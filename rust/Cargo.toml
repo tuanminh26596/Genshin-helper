@@ -8,6 +8,7 @@ members = [
     "crates/gh-hud",
     "crates/gh-host",
     "crates/gh-app",
+    "crates/gh-sim",
 ]
 
 [workspace.package]
@@ -58,6 +59,7 @@ gh-win32 = { path = "crates/gh-win32" }
 gh-net = { path = "crates/gh-net" }
 gh-cv = { path = "crates/gh-cv" }
 gh-hud = { path = "crates/gh-hud" }
+gh-app = { path = "crates/gh-app" }
 
 # Keep third-party crates (image, rustfft, ndarray, tiny-skia, cosmic-text, zip)
 # optimized during dev/test so CV & HUD tests run 10-30x faster while gh-* keeps

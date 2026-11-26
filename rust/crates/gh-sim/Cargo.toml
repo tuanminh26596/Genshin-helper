@@ -1,0 +1,27 @@
+[package]
+name = "gh-sim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Dev-only deterministic replay harness and diagnostic importer for Genshin-Helper (never shipped in dist/)."
+
+[[bin]]
+name = "gh-sim"
+path = "src/main.rs"
+
+[dependencies]
+gh-core.workspace = true
+gh-win32.workspace = true
+gh-net.workspace = true
+gh-cv.workspace = true
+gh-hud.workspace = true
+gh-app.workspace = true
+
+clap.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

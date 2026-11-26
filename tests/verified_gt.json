@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "policy": "Human-verified ground truth for diagnostic bundles and recorded sessions. Agents MUST NOT modify existing entries or relax tolerances without explicit user approval.",
+  "diagnostics": {
+    "diag_20260920_214102": {
+      "expect_rejected": false,
+      "expected_map_id": 36,
+      "ref_xy": null,
+      "note": "Pre-v4 Python 2-waypoint false match on Map 36 (verified in e1_oracle_parity and e3_view_registration)"
+    },
+    "diag_20260920_214145": {
+      "expect_rejected": false,
+      "expected_map_id": 36,
+      "ref_xy": null,
+      "note": "Pre-v4 Python 2-waypoint false match on Map 36 (verified in e1_oracle_parity and e3_view_registration)"
+    },
+    "diag_20260920_214801": {
+      "expect_rejected": false,
+      "expected_map_id": 2,
+      "ref_xy": null,
+      "note": "Pre-v4 Python 2-waypoint false match placing Natlan into Fontaine (verified in e3_view_registration on Map 2)"
+    },
+    "diag_20260920_220225": {
+      "expect_rejected": false,
+      "expected_map_id": 2,
+      "ref_xy": null,
+      "note": "Verified Map 2 diagnostic bundle"
+    },
+    "diag_20260920_220416": {
+      "expect_rejected": false,
+      "expected_map_id": 40,
+      "ref_xy": null,
+      "note": "Verified Map 40 diagnostic bundle"
+    },
+    "diag_20260920_220447": {
+      "expect_rejected": false,
+      "expected_map_id": 40,
+      "ref_xy": null,
+      "note": "Verified Map 40 diagnostic bundle"
+    },
+    "diag_20261120_231651": {
+      "expect_rejected": false,
+      "expected_map_id": 2,
+      "ref_xy": [
+        -5541.9,
+        -7014.9
+      ],
+      "note": "Verified Map 2 world coordinates"
+    },
+    "diag_20261121_011520": {
+      "expect_rejected": true,
+      "expected_map_id": null,
+      "ref_xy": null,
+      "note": "Off-screen edge compass / non-M-Map frame must be rejected"
+    },
+    "diag_20261121_204617": {
+      "expect_rejected": false,
+      "expected_map_id": 2,
+      "ref_xy": [
+        -3691.6,
+        -7285.0
+      ],
+      "note": "Verified Map 2 world coordinates"
+    }
+  },
+  "sessions": {}
+}

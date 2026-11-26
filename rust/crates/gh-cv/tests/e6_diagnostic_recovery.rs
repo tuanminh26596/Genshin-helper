@@ -22,6 +22,7 @@ use gh_cv::minimap_tracker::{HybridMinimapTracker, MinimapTrackerConfig, Tracker
 use gh_cv::tile_cache::{LRU_TILE_CAPACITY, LruTerrainTileCache, TileCacheConfig};
 use ndarray::{Array2, s};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -282,58 +283,56 @@ impl OcrProvider for ReportOcrProvider {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
 struct GroundTruthOverride {
     expect_rejected: bool,
     expected_map_id: Option<i32>,
     ref_xy: Option<(f64, f64)>,
 }
 
-/// Overrides for historical pre-fix diagnostic bundles whose `03_report.json` captured an
-/// erroneous location or map ID before the v5 locator / edge-compass fixes landed.
-fn known_historical_override(bundle_name: &str) -> Option<GroundTruthOverride> {
-    match bundle_name {
-        "diag_20261121_011520" => Some(GroundTruthOverride {
-            expect_rejected: true,
-            expected_map_id: None,
-            ref_xy: None,
-        }),
-        // Pre-v4 Python 2-waypoint false matches on Map 36 (wrong scale 1.31–1.46 vs true 0.805,
-        // verified in `e1_oracle_parity` and `e3_view_registration` with 4 inliers & terrain 0.57–0.60).
-        "diag_20260920_214102" | "diag_20260920_214145" => Some(GroundTruthOverride {
-            expect_rejected: false,
-            expected_map_id: Some(36),
-            ref_xy: None,
-        }),
-        // Pre-v4 Python 2-waypoint false match placing Natlan ("Thung Lũng Tequemecan" /
-        // "Con Của Tiếng Vang") into Fontaine (-4587, +1098); verified in `e3_view_registration`
-        // with 5 inliers & terrain_score 0.572 on Map 2.
-        "diag_20260920_214801" => Some(GroundTruthOverride {
-            expect_rejected: false,
-            expected_map_id: Some(2),
-            ref_xy: None,
-        }),
-        "diag_20260920_220225" => Some(GroundTruthOverride {
-            expect_rejected: false,
-            expected_map_id: Some(2),
-            ref_xy: None,
-        }),
-        "diag_20260920_220416" | "diag_20260920_220447" => Some(GroundTruthOverride {
-            expect_rejected: false,
-            expected_map_id: Some(40),
-            ref_xy: None,
-        }),
-        "diag_20261120_231651" => Some(GroundTruthOverride {
-            expect_rejected: false,
-            expected_map_id: Some(2),
-            ref_xy: Some((-5541.9, -7014.9)),
-        }),
-        "diag_20261121_204617" => Some(GroundTruthOverride {
-            expect_rejected: false,
-            expected_map_id: Some(2),
-            ref_xy: Some((-3691.6, -7285.0)),
-        }),
-        _ => None,
+/// Loads human-verified ground truth overrides from tracked `tests/verified_gt.json`.
+/// Keeping verified GT in a git-tracked JSON file ensures any accidental modification shows up
+/// immediately in `git diff` and lets `gh-sim import-diag` add new cases without editing Rust code.
+fn load_verified_gt_overrides(root: &Path) -> BTreeMap<String, GroundTruthOverride> {
+    let path = root.join("tests").join("verified_gt.json");
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("failed to read tracked ground truth file {}: {e}", path.display())
+    });
+    let doc: Value = serde_json::from_str(&raw).unwrap_or_else(|e| {
+        panic!("invalid JSON in {}: {e}", path.display())
+    });
+    let mut out = BTreeMap::new();
+    if let Some(diags) = doc.get("diagnostics").and_then(Value::as_object) {
+        for (bundle_name, entry) in diags {
+            let expect_rejected = entry
+                .get("expect_rejected")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let expected_map_id = entry
+                .get("expected_map_id")
+                .and_then(Value::as_i64)
+                .map(|v| v as i32);
+            let ref_xy = entry.get("ref_xy").and_then(Value::as_array).and_then(|arr| {
+                if arr.len() == 2 {
+                    let x = arr[0].as_f64()?;
+                    let y = arr[1].as_f64()?;
+                    if x.is_finite() && y.is_finite() {
+                        return Some((x, y));
+                    }
+                }
+                None
+            });
+            out.insert(
+                bundle_name.clone(),
+                GroundTruthOverride {
+                    expect_rejected,
+                    expected_map_id,
+                    ref_xy,
+                },
+            );
+        }
     }
+    out
 }
 
 fn is_strong_minimap_match(method: &str) -> bool {
@@ -583,9 +582,23 @@ fn e6_diagnostic_recovery_report_metrics_calculation() {
 }
 
 #[test]
+fn e6_verified_gt_json_loads_historical_entries() {
+    let gt = load_verified_gt_overrides(&repo_root());
+    assert!(
+        gt.len() >= 9,
+        "expected migrated historical GT overrides in tests/verified_gt.json, got {}",
+        gt.len()
+    );
+    assert!(gt["diag_20261121_011520"].expect_rejected);
+    assert_eq!(gt["diag_20260920_214102"].expected_map_id, Some(36));
+    assert_eq!(gt["diag_20261120_231651"].ref_xy, Some((-5541.9, -7014.9)));
+}
+
+#[test]
 #[ignore]
 fn e6_diagnostic_bundles_recovery_regression() {
     let root = repo_root();
+    let verified_gt = load_verified_gt_overrides(&root);
     let diag_dir = root.join("scratch").join("diagnostics");
     let db_path = multimap_json_path(&root);
     let terrain_path = terrain_npz_path(&root);
@@ -705,10 +718,8 @@ fn e6_diagnostic_bundles_recovery_regression() {
             .and_then(|c| c.get("detected"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let override_gt = known_historical_override(&bundle_name);
-        let expect_rejected = override_gt
-            .as_ref()
-            .map_or(!report_detected, |gt| gt.expect_rejected);
+        let override_gt = verified_gt.get(&bundle_name);
+        let expect_rejected = override_gt.map_or(!report_detected, |gt| gt.expect_rejected);
 
         locator.reset_tracking_state();
         ocr.set(region_text);

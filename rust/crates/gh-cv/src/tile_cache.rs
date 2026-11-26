@@ -192,6 +192,7 @@ pub struct CacheStats {
     pub hits: u64,
     pub misses: u64,
     pub evictions: u64,
+    pub disk_loads: u64,
     pub provider_loads: u64,
 }
 
@@ -850,6 +851,7 @@ pub struct LruTerrainTileCache {
     lazy_npz_slot: Mutex<Option<(i32, Arc<TerrainRaster>)>>,
     map_meta: Mutex<HashMap<i32, TileMapMeta>>,
     lru: Mutex<LruState>,
+    disk_loads: AtomicU64,
     provider_loads: AtomicU64,
 }
 
@@ -899,6 +901,7 @@ impl LruTerrainTileCache {
             lazy_npz_slot: Mutex::new(None),
             map_meta: Mutex::new(initial_meta),
             lru: Mutex::new(LruState::new(cfg.max_tiles)),
+            disk_loads: AtomicU64::new(0),
             provider_loads: AtomicU64::new(0),
         })
     }
@@ -951,6 +954,10 @@ impl LruTerrainTileCache {
         self.lru.lock().expect("lru lock").evictions
     }
 
+    pub fn disk_loads(&self) -> u64 {
+        self.disk_loads.load(Ordering::Acquire)
+    }
+
     pub fn provider_loads(&self) -> u64 {
         self.provider_loads.load(Ordering::Acquire)
     }
@@ -973,6 +980,7 @@ impl LruTerrainTileCache {
             hits: g.hits,
             misses: g.misses,
             evictions: g.evictions,
+            disk_loads: self.disk_loads.load(Ordering::Acquire),
             provider_loads: self.provider_loads.load(Ordering::Acquire),
         }
     }
@@ -1105,6 +1113,7 @@ impl LruTerrainTileCache {
             && let Ok(gray) = decoded_image_to_gray_alpha_zeroed(&decoded)
             && let Some(norm) = self.normalize_tile(gray)
         {
+            self.disk_loads.fetch_add(1, Ordering::Release);
             return Some(norm);
         }
 

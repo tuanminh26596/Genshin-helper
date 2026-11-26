@@ -3,30 +3,26 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-pub mod callbacks;
-pub mod config_watcher;
-pub mod diagnostics;
-pub mod log_buffer;
-pub mod minimap_recorder;
-pub mod mmap_guide;
-pub mod mmap_view;
-pub mod state;
-pub mod tracking_loop;
-pub mod updater;
-
-use crate::callbacks::{
+use clap::Parser;
+use gh_app::callbacks::{
     AppConflictAdvisor, AppServerCallbacks, prefetch_startup_labels_if_online,
 };
-use crate::config_watcher::run_config_watcher;
-use crate::diagnostics::DiagnosticManager;
-use crate::log_buffer::LogRingBuffer;
-use crate::minimap_recorder::MinimapRecorder;
-use crate::state::{
+use gh_app::capture_backend::FrameCapturer;
+use gh_app::config_watcher::run_config_watcher;
+use gh_app::diagnostics::{self, DiagnosticManager};
+use gh_app::log_buffer::LogRingBuffer;
+use gh_app::minimap_recorder::MinimapRecorder;
+use gh_app::mmap_view;
+use gh_app::session_recorder::{
+    DEFAULT_SESSION_FPS, SessionCodec, SessionRecorder, SessionRecorderConfig,
+    validate_ffmpeg_path,
+};
+use gh_app::state::{
     AppState, GameState, NavMarkConfirm, RouteState, WINDOW_TITLES, get_hotkey_field,
 };
-use crate::tracking_loop::run_tracking_loop;
-use crate::updater::AppUpdater;
-use clap::Parser;
+use gh_app::tracking_loop::run_tracking_loop;
+use gh_app::tracking_stack::{TrackingStackOptions, build_tracking_stack};
+use gh_app::updater::AppUpdater;
 use gh_core::assets::{EnsureDataOptions, REQUIRED_ASSETS, ensure_data_ready};
 use gh_core::config::AppConfig;
 use gh_core::i18n::{get_language, set_language, t};
@@ -35,17 +31,9 @@ use gh_core::nav_controller::NavigationController;
 use gh_core::paths::{AppPaths, RuntimeMode};
 use gh_core::traits::{ConflictAdvisor, DiagnosticService, OcrProvider, ServerCallbacks};
 use gh_core::{APP_VERSION, CoreResult, DEFAULT_SYNC_HOST};
-use gh_cv::global_relocator::TeyvatGlobalRelocator;
-use gh_cv::locator::MapLocator;
-use gh_cv::map_state::MapScreenStateMachine;
-use gh_cv::minimap_tracker::{HybridMinimapTracker, MinimapTrackerConfig};
-use gh_cv::tile_cache::{LruTerrainTileCache, TileCacheConfig};
 use gh_hud::mmap_overlay::MMapOverlayController;
 use gh_hud::nav_hud::{GuideZoomMode, HudPalette, NavHudConfig, NavMiniHud, PositionMode};
 use gh_hud::toast::HudToastOverlay;
-use gh_net::hd_assets::{
-    HoyolabHdTileProvider, UndergroundOverlayProvider,
-};
 use gh_net::hoyolab_sync::{
     HoyolabSyncClient, StartupUpdateOutcome, check_and_apply_startup_update,
 };
@@ -96,6 +84,22 @@ pub struct CliArgs {
     /// Losslessly record SECONDS of in-game minimap/HUD frames (30 fps)
     #[arg(long, value_name = "SECONDS", default_value_t = 0.0)]
     pub record_minimap: f64,
+
+    /// Dev-only hidden lossless full-frame gameplay session recorder (requires explicit --ffmpeg)
+    #[arg(long, value_name = "SECONDS", default_value_t = 0.0, hide = true)]
+    pub record_session: f64,
+
+    /// Target FPS for --record-session (default 20 fps matching minimap full-step cadence)
+    #[arg(long, value_name = "FPS", default_value_t = DEFAULT_SESSION_FPS, hide = true)]
+    pub record_fps: f64,
+
+    /// Lossless RGB codec for --record-session: libx264rgb (default) or ffv1
+    #[arg(long, value_name = "CODEC", default_value = "libx264rgb", hide = true)]
+    pub record_codec: String,
+
+    /// Explicit absolute path to ffmpeg.exe for --record-session (never resolved via PATH)
+    #[arg(long, value_name = "ABS_PATH", hide = true)]
+    pub ffmpeg: Option<PathBuf>,
 
     /// Override Sync Server bind port (`AppConfig.ws_port`)
     #[arg(long)]
@@ -172,6 +176,26 @@ async fn main() {
 
     let args = CliArgs::parse();
 
+    let session_rec_spec = if args.record_session > 0.0 {
+        let ffmpeg_abs = match validate_ffmpeg_path(args.ffmpeg.as_deref()) {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::error!("[--record-session] {err}");
+                std::process::exit(2);
+            }
+        };
+        let codec = match SessionCodec::parse(&args.record_codec) {
+            Ok(c) => c,
+            Err(err) => {
+                tracing::error!("[--record-session] {err}");
+                std::process::exit(2);
+            }
+        };
+        Some((ffmpeg_abs, codec))
+    } else {
+        None
+    };
+
     let env_no_elevate = env_flag_truthy(std::env::var("GH_NO_ELEVATE").ok().as_deref());
     if should_auto_elevate(
         &args,
@@ -241,57 +265,18 @@ async fn main() {
         }
     }
 
-    let capturer = Arc::new(ScreenCapturer::new(DIB_POOL_SLOTS));
+    let capturer: Arc<dyn FrameCapturer> = Arc::new(ScreenCapturer::new(DIB_POOL_SLOTS));
     let ocr: Option<Arc<dyn OcrProvider>> = WindowsOcrService::try_new()
         .ok()
         .map(|s| Arc::new(s) as Arc<dyn OcrProvider>);
-    let locator = Arc::new(MapLocator::new(ocr));
-    let maps_db = locator.multimap_db_arc();
-
-    let hd_provider = Arc::new(
-        HoyolabHdTileProvider::new(
-            Some(paths.tiles_dir.clone()),
-            Some(Arc::clone(&maps_db)),
-            Duration::from_secs(5),
-            true,
-            offline_mode,
-            4,
-        )
-        .expect("HoyolabHdTileProvider init"),
-    );
-    let ug_provider = Arc::new(
-        UndergroundOverlayProvider::new(
-            Some(paths.ug_overlays_dir.clone()),
-            Some(Arc::clone(&maps_db)),
-            Duration::from_secs(8),
-            true,
-            offline_mode,
-            2,
-        )
-        .expect("UndergroundOverlayProvider init"),
-    );
-
-    let tile_cache = LruTerrainTileCache::from_config(TileCacheConfig {
-        max_tiles: 72,
-        terrain_data: locator.terrain_data().clone(),
-        tile_provider: Some(Arc::clone(&hd_provider) as Arc<dyn gh_core::traits::TileProvider>),
-        ..Default::default()
-    })
-    .expect("LruTerrainTileCache init");
-
-    let global_relocator =
-        TeyvatGlobalRelocator::from_terrain_data(locator.terrain_data(), None, true);
-    global_relocator.warmup_async();
-
-    let minimap_tracker = HybridMinimapTracker::new(
-        Arc::new(tile_cache),
-        MinimapTrackerConfig::production_defaults(),
-    )
-    .expect("HybridMinimapTracker init")
-    .with_multimap_db(Arc::clone(&maps_db))
-    .with_ug_provider(Arc::clone(&ug_provider) as Arc<dyn gh_core::traits::UndergroundOverlaySource>)
-    .with_global_relocator(Arc::new(global_relocator))
-    .with_paimon_cache_path(paths.paimon_cache_path());
+    let stack = build_tracking_stack(TrackingStackOptions::for_live(&paths, offline_mode, ocr))
+        .expect("build_tracking_stack init");
+    let locator = stack.locator;
+    let maps_db = stack.maps_db;
+    let hd_provider = stack.hd_provider;
+    let ug_provider = stack.ug_provider;
+    let minimap_tracker = stack.minimap_tracker;
+    let state_machine = stack.state_machine;
 
     let lan_bind_host = gh_net::lan_companion::resolve_lan_bind_host(
         std::env::var("GH_LAN_BIND_HOST").ok().as_deref(),
@@ -391,7 +376,7 @@ async fn main() {
             hotkey_label: hotkey_mgr.get_display_name("nav_mark"),
             guide_hotkey_label: hotkey_mgr.get_display_name("nav_guide"),
             layout_hotkey_label: hotkey_mgr.get_display_name("nav_layout"),
-            capture_visible: cfg.nav_hud_capture_visible,
+            capture_visible: cfg.nav_hud_capture_visible && session_rec_spec.is_none(),
             guide_zoom_mode: GuideZoomMode::from_str_lossy(&cfg.nav_hud_guide_zoom_mode),
             screen_offset: (0, 0),
         })
@@ -477,7 +462,7 @@ async fn main() {
         nav_mark_confirm: Mutex::new(NavMarkConfirm::default()),
         tracker: Mutex::new(Some((minimap_tracker, 0.0))),
         locator: Some(locator),
-        state_machine: Mutex::new(MapScreenStateMachine::new()),
+        state_machine: Mutex::new(state_machine),
         capturer,
         server: server.clone(),
         lan_companion: Arc::clone(&lan_companion),
@@ -504,6 +489,7 @@ async fn main() {
         hd_provider,
         ug_provider,
         minimap_recorder: Mutex::new(None),
+        session_recorder: Mutex::new(None),
         minimap_ring,
         diagnostics: Arc::clone(&diagnostics),
         updater: Arc::new(AppUpdater::new_from_env()),
@@ -537,21 +523,32 @@ async fn main() {
         hotkey_mgr.register(
             act,
             &hk,
-            Arc::new(move || match act_owned.as_str() {
-                "sync" => st.handle_hotkey_action(),
-                "debug" => {
-                    let _ = st.handle_debug_action("hotkey_debug", "", true);
+            Arc::new(move || {
+                if let Some(srec) = st
+                    .session_recorder
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                    && srec.active()
+                {
+                    srec.record_hotkey_event(st.start_instant.elapsed().as_secs_f64(), &act_owned);
                 }
-                "switch" => st.handle_switch_hotkey(),
-                "nav_mark" => st.handle_nav_mark_hotkey(),
-                "nav_undo" => st.handle_nav_undo_hotkey(),
-                "nav_guide" => st.handle_nav_guide_hotkey(),
-                "nav_next" => st.handle_nav_next_hotkey(),
-                "nav_layout" => st.handle_nav_layout_hotkey(),
-                "nav_toggle" => st.handle_nav_toggle_hotkey(),
-                "nav_unlock" => st.handle_nav_unlock_hotkey(),
-                "radar_toggle" => st.handle_radar_toggle_hotkey(),
-                _ => {}
+                match act_owned.as_str() {
+                    "sync" => st.handle_hotkey_action(),
+                    "debug" => {
+                        let _ = st.handle_debug_action("hotkey_debug", "", true);
+                    }
+                    "switch" => st.handle_switch_hotkey(),
+                    "nav_mark" => st.handle_nav_mark_hotkey(),
+                    "nav_undo" => st.handle_nav_undo_hotkey(),
+                    "nav_guide" => st.handle_nav_guide_hotkey(),
+                    "nav_next" => st.handle_nav_next_hotkey(),
+                    "nav_layout" => st.handle_nav_layout_hotkey(),
+                    "nav_toggle" => st.handle_nav_toggle_hotkey(),
+                    "nav_unlock" => st.handle_nav_unlock_hotkey(),
+                    "radar_toggle" => st.handle_radar_toggle_hotkey(),
+                    _ => {}
+                }
             }),
             enabled,
             None,
@@ -580,6 +577,43 @@ async fn main() {
             .minimap_recorder
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(rec);
+    }
+
+    // Optional hidden SessionRecorder (--record-session --ffmpeg <ABS_PATH>)
+    if let Some((ffmpeg_abs, codec)) = session_rec_spec {
+        let hud_for_srec = Arc::clone(&nav_hud);
+        match SessionRecorder::new(
+            SessionRecorderConfig {
+                seconds: args.record_session,
+                fps: args.record_fps,
+                codec,
+                ffmpeg_path: ffmpeg_abs,
+                out_root: paths.session_rec_dir(),
+                tiles_dir: paths.tiles_dir.clone(),
+                ug_overlays_dir: paths.ug_overlays_dir.clone(),
+                paimon_cache_path: paths.paimon_cache_path(),
+                maps_db: Arc::clone(&state.maps_db),
+                max_queue: 64,
+            },
+            Some(Box::new(move |_out_dir, frames| {
+                hud_for_srec.flash(
+                    &format!("SESSION REC OK - {frames} frames"),
+                    HudPalette::Success,
+                    6.0,
+                );
+            })),
+        ) {
+            Ok(srec) => {
+                *state
+                    .session_recorder
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(srec);
+            }
+            Err(err) => {
+                tracing::error!("[--record-session] Init failed: {err}");
+                std::process::exit(2);
+            }
+        }
     }
 
     // Opt-in LAN Companion startup
@@ -773,6 +807,15 @@ async fn main() {
         rec.finish();
         rec.join_timeout(Duration::from_secs(10));
     }
+    let srec_opt = state
+        .session_recorder
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(srec) = srec_opt {
+        srec.finish();
+        srec.join_timeout(Duration::from_secs(15));
+    }
 
     let _ = track_handle.await;
     let _ = watch_handle.await;
@@ -862,6 +905,29 @@ mod tests {
         assert_eq!(full.config, Some(PathBuf::from("custom_cfg.json")));
         assert!(full.no_mutex);
         assert!(full.no_elevate);
+
+        // Hidden dev session recorder flags parse cleanly yet stay hidden from user-facing --help
+        let rec = CliArgs::try_parse_from([
+            "GenshinHelper",
+            "--record-session",
+            "30",
+            "--record-fps",
+            "20",
+            "--record-codec",
+            "ffv1",
+            "--ffmpeg",
+            "C:\\tools\\ffmpeg.exe",
+        ])
+        .unwrap();
+        assert_eq!(rec.record_session, 30.0);
+        assert_eq!(rec.record_fps, 20.0);
+        assert_eq!(rec.record_codec, "ffv1");
+        assert_eq!(rec.ffmpeg, Some(PathBuf::from("C:\\tools\\ffmpeg.exe")));
+
+        use clap::CommandFactory;
+        let help = CliArgs::command().render_help().to_string();
+        assert!(!help.contains("--record-session"), "hidden flag leaked into --help:\n{help}");
+        assert!(!help.contains("--ffmpeg"), "hidden flag leaked into --help:\n{help}");
     }
 
     #[test]

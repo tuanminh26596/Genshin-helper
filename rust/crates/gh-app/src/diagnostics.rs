@@ -2,6 +2,7 @@
 //! (opaque UID redaction, verified-window-only game capture, Extension-locked HoYoLAB viewport
 //! PNG attachment, PII-scrubbed `03_report.json` + `06_app_log.txt`, and auto-ZIP packaging).
 
+use crate::capture_backend::FrameCapturer;
 use crate::log_buffer::LogRingBuffer;
 use gh_core::atomic_io::{
     AtomicTempFile, DEFAULT_REPLACE_RETRIES, DEFAULT_REPLACE_RETRY_DELAY, write_bytes_atomic,
@@ -19,7 +20,7 @@ use gh_cv::locator::MapLocator;
 use gh_hud::diag_annotate::render_annotated_frame;
 use gh_hud::fonts::HudFonts;
 use gh_net::sync_server::decode_png_base64;
-use gh_win32::capture::{ScreenCapturer, WindowFinder};
+use gh_win32::capture::WindowFinder;
 use gh_win32::game_settings::is_process_elevated;
 use gh_win32::locale::Win32LocaleProvider;
 use gh_core::traits::LocaleProvider;
@@ -577,7 +578,7 @@ fn write_bundle_zip(bundle_dir: &Path, zip_path: &Path, folder_name: &str) -> Co
 
 pub struct DiagnosticManager {
     paths: AppPaths,
-    capturer: Arc<ScreenCapturer>,
+    capturer: Arc<dyn FrameCapturer>,
     locator: Option<Arc<MapLocator>>,
     config: Arc<RwLock<AppConfig>>,
     read_browser_state: BrowserStateReader,
@@ -592,7 +593,7 @@ pub struct DiagnosticManager {
 impl DiagnosticManager {
     pub fn new(
         paths: AppPaths,
-        capturer: Arc<ScreenCapturer>,
+        capturer: Arc<dyn FrameCapturer>,
         locator: Option<Arc<MapLocator>>,
         config: Arc<RwLock<AppConfig>>,
         read_browser_state: BrowserStateReader,
@@ -1765,7 +1766,7 @@ mod tests {
         log_buf.push_line(concat!("INFO gh_app: loaded ", "C:\\", "Users\\", "Player\\cache"));
         let mgr = DiagnosticManager::new(
             paths.clone(),
-            Arc::new(ScreenCapturer::new(2)),
+            Arc::new(gh_win32::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
             None,
             Arc::new(RwLock::new(AppConfig::default())),
             Arc::new(Map::new),
@@ -1883,7 +1884,7 @@ mod tests {
         // Missing frames without log_buffer must omit unwritten PNG names from `files`
         let bare_mgr = DiagnosticManager::new(
             paths,
-            Arc::new(ScreenCapturer::new(2)),
+            Arc::new(gh_win32::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
             None,
             Arc::new(RwLock::new(AppConfig::default())),
             Arc::new(Map::new),
@@ -1916,7 +1917,7 @@ mod tests {
 
         let mgr = DiagnosticManager::new(
             paths,
-            Arc::new(ScreenCapturer::new(2)),
+            Arc::new(gh_win32::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
             None,
             Arc::new(RwLock::new(AppConfig::default())),
             Arc::new(Map::new),

@@ -1,7 +1,9 @@
 //! Shared runtime state and cross-subsystem actions for `gh-app`.
 
+use crate::capture_backend::FrameCapturer;
 use crate::diagnostics::{DiagnosticManager, MinimapPreLostRingBuffer};
 use crate::minimap_recorder::MinimapRecorder;
+use crate::session_recorder::SessionRecorder;
 use crate::updater::AppUpdater;
 use crate::mmap_guide::{
     FallbackInput, GuideInput, SINGLE_PIN_MMAP_DISTANCE_M, build_single_pin_route_doc,
@@ -40,7 +42,7 @@ use gh_net::lan_companion::LanCompanionServer;
 use gh_net::pin_guide::{HoYoLABLabelCatalog, PinGuide, PinGuideFetcher, PinIconCache};
 use gh_net::sync_server::{HOTKEY_ACTIONS, SyncServer};
 use gh_win32::audio::AudioFeedback;
-use gh_win32::capture::{ScreenCapturer, WindowFinder};
+use gh_win32::capture::WindowFinder;
 use gh_win32::game_settings::UipiStatus;
 use gh_win32::hotkey::UnifiedHotkeyManager;
 use gh_win32::hotkey_conflicts::HotkeyConflictAdvisor;
@@ -215,7 +217,7 @@ pub struct AppState {
     pub tracker: Mutex<Option<(HybridMinimapTracker, f64)>>,
     pub locator: Option<Arc<MapLocator>>,
     pub state_machine: Mutex<MapScreenStateMachine>,
-    pub capturer: Arc<ScreenCapturer>,
+    pub capturer: Arc<dyn FrameCapturer>,
     pub server: SyncServer,
     pub lan_companion: Arc<LanCompanionServer>,
     pub nav_hud: Arc<NavMiniHud>,
@@ -239,6 +241,7 @@ pub struct AppState {
     pub hd_provider: Arc<HoyolabHdTileProvider>,
     pub ug_provider: Arc<UndergroundOverlayProvider>,
     pub minimap_recorder: Mutex<Option<Arc<MinimapRecorder>>>,
+    pub session_recorder: Mutex<Option<Arc<SessionRecorder>>>,
     pub minimap_ring: MinimapPreLostRingBuffer,
     pub diagnostics: Arc<DiagnosticManager>,
     pub updater: Arc<AppUpdater>,
@@ -268,9 +271,13 @@ impl AppState {
 
     pub fn pause_minimap_tracker(&self, reason: &str) {
         let now = self.start_instant.elapsed().as_secs_f64();
+        self.pause_minimap_tracker_at(now, reason);
+    }
+
+    pub fn pause_minimap_tracker_at(&self, now_s: f64, reason: &str) {
         let mut guard = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((ref mut tracker, ref mut last_ts)) = *guard {
-            let ts = if now < *last_ts { *last_ts } else { now };
+            let ts = if now_s < *last_ts { *last_ts } else { now_s };
             *last_ts = ts;
             let _ = tracker.pause(Some(ts), reason, 0.0);
         }
@@ -2580,6 +2587,25 @@ pub fn make_test_state_with_db(
     cli_lan_port: Option<u16>,
     custom_maps_db: Option<Arc<MultimapDb>>,
 ) -> Arc<AppState> {
+    make_test_state_full(root, cli_port, cli_lan_port, custom_maps_db, None)
+}
+
+#[cfg(test)]
+pub fn make_test_state_with_capturer(
+    root: &std::path::Path,
+    capturer: Arc<dyn FrameCapturer>,
+) -> Arc<AppState> {
+    make_test_state_full(root, None, None, None, Some(capturer))
+}
+
+#[cfg(test)]
+fn make_test_state_full(
+    root: &std::path::Path,
+    cli_port: Option<u16>,
+    cli_lan_port: Option<u16>,
+    custom_maps_db: Option<Arc<MultimapDb>>,
+    custom_capturer: Option<Arc<dyn FrameCapturer>>,
+) -> Arc<AppState> {
     use gh_core::paths::RuntimeMode;
     use gh_net::sync_server::SyncServerConfig;
     use std::time::Duration;
@@ -2613,7 +2639,8 @@ pub fn make_test_state_with_db(
     };
 
     let config = Arc::new(RwLock::new(cfg.clone()));
-    let capturer = Arc::new(ScreenCapturer::new(2));
+    let capturer: Arc<dyn FrameCapturer> = custom_capturer
+        .unwrap_or_else(|| Arc::new(gh_win32::capture::ScreenCapturer::new(2)));
     let maps_db = custom_maps_db.unwrap_or_else(|| Arc::new(MultimapDb::default()));
     let hd_provider = Arc::new(
         HoyolabHdTileProvider::new(
@@ -2728,6 +2755,7 @@ pub fn make_test_state_with_db(
         hd_provider,
         ug_provider,
         minimap_recorder: Mutex::new(None),
+        session_recorder: Mutex::new(None),
         minimap_ring: test_mm_ring,
         diagnostics,
         updater: Arc::new(AppUpdater::default()),

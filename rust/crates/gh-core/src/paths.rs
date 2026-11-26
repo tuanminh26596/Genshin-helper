@@ -172,6 +172,13 @@ impl AppPaths {
             .join("minimap_rec")
     }
 
+    pub fn session_rec_dir(&self) -> PathBuf {
+        self.diagnostics_dir
+            .parent()
+            .unwrap_or(&self.diagnostics_dir)
+            .join("session_rec")
+    }
+
     pub fn external_hotkey_backups_path(&self) -> PathBuf {
         self.config_dir().join("external_hotkey_backups.json")
     }
