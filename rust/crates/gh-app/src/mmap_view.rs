@@ -201,6 +201,9 @@ pub struct MMapViewEngine {
     shared: Arc<Shared>,
     jobs: Mutex<Option<SyncSender<WorkerCmd>>>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    /// When `Some`, registrations execute synchronously inline inside `step()` (zero background
+    /// thread) for deterministic offline replay in `gh-sim`. Live production leaves this `None`.
+    inline_registrar: Option<Arc<dyn ViewRegistrar>>,
 }
 
 impl MMapViewEngine {
@@ -227,6 +230,31 @@ impl MMapViewEngine {
             shared,
             jobs: Mutex::new(worker.as_ref().map(|_| tx)),
             worker: Mutex::new(worker),
+            inline_registrar: None,
+        }
+    }
+
+    /// Synchronous, zero-thread constructor for deterministic offline replay (`gh-sim`).
+    /// Runs `ViewRegistrar::register` inline inside [`Self::step`] using the exact same
+    /// registration & verdict logic as the live worker thread.
+    pub fn new_sync<R: ViewRegistrar>(registrar: Arc<R>) -> Self {
+        Self::with_config_sync(registrar, TrackerConfig::default())
+    }
+
+    pub fn with_config_sync<R: ViewRegistrar>(registrar: Arc<R>, cfg: TrackerConfig) -> Self {
+        let shared = Arc::new(Shared {
+            tracker: Mutex::new(ViewTracker::new(cfg)),
+            busy: AtomicBool::new(false),
+            active: AtomicBool::new(false),
+            epoch: AtomicU64::new(0),
+            trim_pending: AtomicBool::new(false),
+            stats: Mutex::new(Stats::with_capacity()),
+        });
+        Self {
+            shared,
+            jobs: Mutex::new(None),
+            worker: Mutex::new(None),
+            inline_registrar: Some(registrar as Arc<dyn ViewRegistrar>),
         }
     }
 
@@ -255,7 +283,7 @@ impl MMapViewEngine {
         };
         let drawer_open = is_map_drawer_open(bgr);
         let slider = slider.filter(|s| s.found && s.ratio_t.is_finite());
-        let (seq, stable, out) = {
+        let (seq, stable, mut out) = {
             let mut tr = self.shared.tracker.lock().unwrap_or_else(|e| e.into_inner());
             let map_id = tr.output().transform.map_or(map_fallback, |t| t.map_id);
             let reading = ZoomSliderDetector::get_map_scale(slider, map_id, bgr.dim().1)
@@ -273,17 +301,27 @@ impl MMapViewEngine {
                 frame,
                 slider: slider.cloned(),
             };
-            let sent = self
-                .jobs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .is_some_and(|tx| match tx.try_send(WorkerCmd::Register(job)) {
-                    Ok(()) => true,
-                    Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
-                });
-            if !sent {
-                self.shared.busy.store(false, Ordering::Release);
+            if let Some(ref inline_reg) = self.inline_registrar {
+                run_one_registration(&self.shared, inline_reg.as_ref(), job);
+                out = self
+                    .shared
+                    .tracker
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .output();
+            } else {
+                let sent = self
+                    .jobs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .is_some_and(|tx| match tx.try_send(WorkerCmd::Register(job)) {
+                        Ok(()) => true,
+                        Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
+                    });
+                if !sent {
+                    self.shared.busy.store(false, Ordering::Release);
+                }
             }
         }
         let step_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -379,6 +417,42 @@ impl Drop for MMapViewEngine {
     }
 }
 
+fn run_one_registration(shared: &Shared, registrar: &dyn ViewRegistrar, job: Job) {
+    let t0 = Instant::now();
+    let reg = registrar.register(&job.frame, job.slider.as_ref());
+    let reg_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    drop(job.frame);
+    let verdict = reg.as_ref().and_then(|r| {
+        if shared.epoch.load(Ordering::Acquire) != job.epoch {
+            return None;
+        }
+        let mut tr = shared.tracker.lock().unwrap_or_else(|e| e.into_inner());
+        // `reset` may have raced the check above; it bumps the epoch before resetting.
+        (shared.epoch.load(Ordering::Acquire) == job.epoch).then(|| tr.on_registration(job.seq, r))
+    });
+    {
+        let mut st = shared.stats.lock().unwrap_or_else(|e| e.into_inner());
+        st.registrations = st.registrations.saturating_add(1);
+        let count = st.registrations;
+        Stats::push_sample(&mut st.reg_ms, count, reg_ms);
+        st.anchors = st.anchors.saturating_add(u32::from(matches!(
+            verdict,
+            Some(
+                RegistrationVerdict::Agrees
+                    | RegistrationVerdict::Restored
+                    | RegistrationVerdict::Acquired
+                    | RegistrationVerdict::Switched
+            )
+        )));
+    }
+    if shared.trim_pending.swap(false, Ordering::AcqRel)
+        || shared.epoch.load(Ordering::Acquire) != job.epoch
+    {
+        gh_cv::locator::release_thread_scratch();
+    }
+    shared.busy.store(false, Ordering::Release);
+}
+
 fn registration_worker(shared: &Shared, registrar: &dyn ViewRegistrar, rx: &Receiver<WorkerCmd>) {
     while let Ok(cmd) = rx.recv() {
         let job = match cmd {
@@ -389,39 +463,7 @@ fn registration_worker(shared: &Shared, registrar: &dyn ViewRegistrar, rx: &Rece
             }
             WorkerCmd::Register(job) => job,
         };
-        let t0 = Instant::now();
-        let reg = registrar.register(&job.frame, job.slider.as_ref());
-        let reg_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        drop(job.frame);
-        let verdict = reg.as_ref().and_then(|r| {
-            if shared.epoch.load(Ordering::Acquire) != job.epoch {
-                return None;
-            }
-            let mut tr = shared.tracker.lock().unwrap_or_else(|e| e.into_inner());
-            // `reset` may have raced the check above; it bumps the epoch before resetting.
-            (shared.epoch.load(Ordering::Acquire) == job.epoch).then(|| tr.on_registration(job.seq, r))
-        });
-        {
-            let mut st = shared.stats.lock().unwrap_or_else(|e| e.into_inner());
-            st.registrations = st.registrations.saturating_add(1);
-            let count = st.registrations;
-            Stats::push_sample(&mut st.reg_ms, count, reg_ms);
-            st.anchors = st.anchors.saturating_add(u32::from(matches!(
-                verdict,
-                Some(
-                    RegistrationVerdict::Agrees
-                        | RegistrationVerdict::Restored
-                        | RegistrationVerdict::Acquired
-                        | RegistrationVerdict::Switched
-                )
-            )));
-        }
-        if shared.trim_pending.swap(false, Ordering::AcqRel)
-            || shared.epoch.load(Ordering::Acquire) != job.epoch
-        {
-            gh_cv::locator::release_thread_scratch();
-        }
-        shared.busy.store(false, Ordering::Release);
+        run_one_registration(shared, registrar, job);
     }
     gh_cv::locator::release_thread_scratch();
 }
@@ -591,5 +633,31 @@ mod tests {
         st.clear_reusing_buffers();
         assert!(st.step_ms.is_empty());
         assert!(st.step_ms.capacity() >= cap_before);
+    }
+
+    #[test]
+    fn sync_registration_acquires_view_inline_without_worker_thread() {
+        let reg = Arc::new(FakeRegistrar { calls: AtomicUsize::new(0), delay_ms: 0 });
+        let e = MMapViewEngine::new_sync(Arc::clone(&reg));
+        assert!(
+            e.worker.lock().unwrap().is_none(),
+            "sync mode must not spawn a background worker thread"
+        );
+        let f = frame(0.0, 0.0);
+        let mut acquired = None;
+        for _ in 0..4 {
+            let v = e.step(Arc::clone(&f), None, None, 2);
+            if v.transform.is_some() {
+                acquired = Some(v);
+                break;
+            }
+        }
+        let v = acquired.expect("sync mode must acquire view deterministically without sleeping");
+        assert!(v.anchored);
+        assert!(reg.calls.load(Ordering::Relaxed) >= 1);
+        assert!(!e.is_busy());
+        e.reset();
+        let after = e.step(frame(40.0, 0.0), None, None, 2);
+        assert!(after.transform.is_none());
     }
 }

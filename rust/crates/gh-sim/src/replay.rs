@@ -3,10 +3,14 @@
 //! recorded frames (`minimap_rec`, full-frame lossless video sessions, or `diag_*` bundles).
 
 use crate::capturer::{CaptureCoverageStats, ReplayCapturer};
+use crate::compositor::{
+    OfflineRadarAssets, composite_radar_onto_frame, save_bgra_png,
+};
 use crate::verified_gt::{SessionCheckpointGt, VerifiedGtFile};
 use gh_app::capture_backend::FrameCapturer;
 use gh_app::diagnostics::{DiagnosticManager, MinimapPreLostRingBuffer};
 use gh_app::log_buffer::LogRingBuffer;
+use gh_app::mmap_view::{LocatorRegistrar, MMapViewEngine};
 use gh_app::state::{AppState, GameState, NavMarkConfirm, RouteState};
 use gh_app::tracking_loop::{
     LoopRuntimeState, PostTickContext, TickMode, TickParams, apply_tick_output,
@@ -27,6 +31,7 @@ use gh_cv::minimap_tracker::MinimapPose;
 use gh_cv::tile_cache::LruTerrainTileCache;
 use gh_hud::mmap_overlay::{MMapOverlayController, MMapOverlayMode};
 use gh_hud::nav_hud::{NavHudConfig, NavMiniHud};
+use gh_hud::radar_map::{HeadlessRadarRenderer, RadarAssetSource};
 use gh_hud::toast::HudToastOverlay;
 use gh_net::lan_companion::{LanCompanionConfig, LanCompanionServer};
 use gh_net::pin_guide::{HoYoLABLabelCatalog, PinGuideFetcher, PinIconCache};
@@ -69,6 +74,8 @@ pub struct ReplayOptions {
     pub ffmpeg_path: Option<PathBuf>,
     pub max_frames: Option<usize>,
     pub drift_threshold_w: f64,
+    pub verify_mmap_view: bool,
+    pub render_out: Option<PathBuf>,
     pub out_report: Option<PathBuf>,
 }
 
@@ -113,6 +120,10 @@ pub struct PostTickTelemetry {
     pub broadcast_minimap_events: usize,
     pub max_gate_reject_streak: usize,
     pub max_hdr_clip_streak: usize,
+    pub mmap_view_frames: usize,
+    pub mmap_view_acquired: usize,
+    pub mmap_view_drawer_open: usize,
+    pub rendered_previews: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -475,6 +486,7 @@ fn build_offline_replay_state(
     ug_dir: PathBuf,
     paimon_cache_path: PathBuf,
     capturer: Arc<ReplayCapturer>,
+    enable_mmap_view: bool,
 ) -> Result<(Arc<AppState>, Arc<LruTerrainTileCache>, AppConfig, bool), String> {
     let paths = AppPaths {
         mode: RuntimeMode::Installed,
@@ -569,7 +581,7 @@ fn build_offline_replay_state(
         route_state: Mutex::new(RouteState::default()),
         nav_mark_confirm: Mutex::new(NavMarkConfirm::default()),
         tracker: Mutex::new(Some((stack.minimap_tracker, 0.0))),
-        locator: Some(stack.locator),
+        locator: Some(Arc::clone(&stack.locator)),
         state_machine: Mutex::new(stack.state_machine),
         capturer: capturer_dyn,
         server,
@@ -581,7 +593,13 @@ fn build_offline_replay_state(
         mmap_overlay: Arc::new(MMapOverlayController::new_with_offset(
             gh_hud::layered::OFFSCREEN_TEST_OFFSET,
         )),
-        mmap_view: None,
+        mmap_view: if enable_mmap_view {
+            Some(Arc::new(MMapViewEngine::new_sync(Arc::new(
+                LocatorRegistrar::new(Arc::clone(&stack.locator)),
+            ))))
+        } else {
+            None
+        },
         radar_map: Mutex::new(None),
         radar_active: AtomicBool::new(false),
         radar_pins: Mutex::new(None),
@@ -923,6 +941,7 @@ pub fn run_replay(opts: &ReplayOptions) -> Result<ReplayReport, String> {
     };
     let paimon_present_at_start = paimon_cache.is_file();
 
+    let enable_mmap_view = opts.verify_mmap_view || opts.render_out.is_some();
     let capturer = Arc::new(ReplayCapturer::new());
     let (state, tile_cache, cfg_snap, relocator_ready) = build_offline_replay_state(
         &sandbox.0,
@@ -931,7 +950,21 @@ pub fn run_replay(opts: &ReplayOptions) -> Result<ReplayReport, String> {
         ug_dir.clone(),
         paimon_cache.clone(),
         Arc::clone(&capturer),
+        enable_mmap_view,
     )?;
+
+    let mut radar_renderer = if let Some(ref rdir) = opts.render_out {
+        std::fs::create_dir_all(rdir)
+            .map_err(|e| format!("failed to create render-out dir {}: {e}", rdir.display()))?;
+        let assets: Arc<dyn RadarAssetSource> = Arc::new(OfflineRadarAssets {
+            maps_db: Arc::clone(&state.maps_db),
+            hd_provider: Arc::clone(&state.hd_provider),
+            ug_provider: Arc::clone(&state.ug_provider),
+        });
+        Some(HeadlessRadarRenderer::new(assets))
+    } else {
+        None
+    };
 
     let mut records: Vec<MetaRecord>;
     let mut video_decoder: Option<VideoPipeDecoder> = None;
@@ -994,6 +1027,7 @@ pub fn run_replay(opts: &ReplayOptions) -> Result<ReplayReport, String> {
     let mut post_tick = PostTickTelemetry::default();
     let mut tick_ms = Vec::with_capacity(records.len());
     let mut observed = Vec::with_capacity(records.len());
+    let mut last_rendered_idx: Option<usize> = None;
     let wall_t0 = Instant::now();
 
     for rec in &records {
@@ -1023,6 +1057,15 @@ pub fn run_replay(opts: &ReplayOptions) -> Result<ReplayReport, String> {
             break;
         };
 
+        let render_clone = if opts.render_out.is_some()
+            && post_tick.rendered_previews < 8
+            && last_rendered_idx.is_none_or(|prev| rec.idx.saturating_sub(prev) >= 100)
+        {
+            Some(frame.clone())
+        } else {
+            None
+        };
+
         let is_hdr = rec
             .capture_path
             .as_deref()
@@ -1047,7 +1090,7 @@ pub fn run_replay(opts: &ReplayOptions) -> Result<ReplayReport, String> {
             do_auto_sync: true,
             do_minimap: true,
             fast_ok: false,
-            guide_view: false,
+            guide_view: enable_mmap_view,
             guide_map: 2,
             want_window_capture: false,
             now_s: Some(now_s),
@@ -1057,6 +1100,41 @@ pub fn run_replay(opts: &ReplayOptions) -> Result<ReplayReport, String> {
 
         let t0 = Instant::now();
         let out = run_tick_worker(&state, params);
+        if let Some(ref vf) = out.view {
+            post_tick.mmap_view_frames += 1;
+            if vf.transform.is_some() {
+                post_tick.mmap_view_acquired += 1;
+            }
+            if vf.drawer_open {
+                post_tick.mmap_view_drawer_open += 1;
+            }
+        }
+        if let (Some(rdir), Some(rr), Some(mut canvas), Some(pose)) = (
+            opts.render_out.as_ref(),
+            radar_renderer.as_mut(),
+            render_clone,
+            out.pose.as_ref(),
+        ) && out.mode == TickMode::Minimap
+            && let (Some(wx), Some(wy)) = (pose.world_x, pose.world_y)
+            && composite_radar_onto_frame(
+                rr,
+                &mut canvas,
+                pose.map_id.unwrap_or(2),
+                wx,
+                wy,
+                pose.body_heading.or(pose.view_heading),
+                pose.camera_heading.or(pose.view_heading),
+                pose.is_underground,
+                pose.floor_id,
+                &pose.floor_name,
+            )
+        {
+            let out_png = rdir.join(format!("frame_{:06}_radar.png", rec.idx));
+            if save_bgra_png(&canvas, &out_png).is_ok() {
+                post_tick.rendered_previews += 1;
+                last_rendered_idx = Some(rec.idx);
+            }
+        }
 
         let mut obs = ObservedFrame {
             idx: rec.idx,
@@ -1318,6 +1396,8 @@ mod tests {
             ffmpeg_path: None,
             max_frames: None,
             drift_threshold_w: DEFAULT_DRIFT_THRESHOLD_W,
+            verify_mmap_view: false,
+            render_out: None,
             out_report: Some(out_report.clone()),
         })
         .unwrap();
@@ -1495,6 +1575,8 @@ mod tests {
             ffmpeg_path: Some(ffmpeg_abs),
             max_frames: None,
             drift_threshold_w: DEFAULT_DRIFT_THRESHOLD_W,
+            verify_mmap_view: false,
+            render_out: None,
             out_report: None,
         })
         .unwrap();

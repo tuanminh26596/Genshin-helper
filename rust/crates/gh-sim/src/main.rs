@@ -55,6 +55,14 @@ enum Cmd {
         #[arg(long, default_value_t = DEFAULT_DRIFT_THRESHOLD_W)]
         drift_threshold_w: f64,
 
+        /// Exercise synchronous MMapViewEngine registration during M-Map ticks.
+        #[arg(long)]
+        verify_mmap_view: bool,
+
+        /// Directory to save composited HUD/Radar preview PNGs overlaid on real frames.
+        #[arg(long)]
+        render_out: Option<PathBuf>,
+
         /// Write structured report.json to this path.
         #[arg(long)]
         out: Option<PathBuf>,
@@ -154,6 +162,8 @@ fn main() {
             ffmpeg,
             max_frames,
             drift_threshold_w,
+            verify_mmap_view,
+            render_out,
             out,
         } => {
             let res = run_replay(&ReplayOptions {
@@ -166,6 +176,8 @@ fn main() {
                 ffmpeg_path: ffmpeg,
                 max_frames,
                 drift_threshold_w,
+                verify_mmap_view,
+                render_out,
                 out_report: out.clone(),
             });
             match res {

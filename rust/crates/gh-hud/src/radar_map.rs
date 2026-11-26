@@ -576,11 +576,32 @@ struct RadarUiState {
     live_interaction_rect: Option<RectI32>,
     // Tile prefetch throttle
     last_prefetch_ts: Option<Instant>,
+    /// When `true` (`HeadlessRadarRenderer`), asset decodes run synchronously inline with zero
+    /// background threads and zero Win32 HWND. Live `RadarMapController` keeps this `false`.
+    sync_decode: bool,
+    sync_decoded_any: AtomicBool,
 }
 
 impl RadarUiState {
     fn queue_tile_decode(&self, map_id: i32, z: i32, tx: i32, ty: i32) {
         let key = (map_id, z, tx, ty);
+        if self.sync_decode {
+            let already = {
+                let b = self.bank.lock().unwrap_or_else(|e| e.into_inner());
+                b.tiles.contains(&key)
+            };
+            if !already
+                && let Some(pm) = self
+                    .assets
+                    .get_color_tile_bytes(map_id, z, tx, ty)
+                    .and_then(|bytes| decode_image_bytes_to_pixmap(&bytes))
+            {
+                let mut b = self.bank.lock().unwrap_or_else(|e| e.into_inner());
+                b.tiles.insert(key, pm);
+                self.sync_decoded_any.store(true, Ordering::Relaxed);
+            }
+            return;
+        }
         let should_send = {
             let mut b = self.bank.lock().unwrap_or_else(|e| e.into_inner());
             if b.tiles.contains(&key) || b.pending_tiles.contains(&key) {
@@ -601,6 +622,27 @@ impl RadarUiState {
             return;
         }
         let key = (map_id, label_id);
+        if self.sync_decode {
+            let skip = {
+                let b = self.bank.lock().unwrap_or_else(|e| e.into_inner());
+                b.icons.contains(&key) || b.icon_miss_gen.get(&key).copied() == Some(icon_gen)
+            };
+            if !skip {
+                let decoded = self
+                    .assets
+                    .get_icon_bytes_or_request(map_id, label_id)
+                    .and_then(|bytes| decode_image_bytes_to_pixmap(&bytes));
+                let mut b = self.bank.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(pm) = decoded {
+                    b.icon_miss_gen.remove(&key);
+                    b.icons.insert(key, pm);
+                    self.sync_decoded_any.store(true, Ordering::Relaxed);
+                } else {
+                    b.icon_miss_gen.insert(key, icon_gen);
+                }
+            }
+            return;
+        }
         let should_send = {
             let mut b = self.bank.lock().unwrap_or_else(|e| e.into_inner());
             if b.icons.contains(&key)
@@ -626,6 +668,28 @@ impl RadarUiState {
 
     fn ensure_ui_sprites_queued(&self, icon_gen: u64) {
         for &kind in MarkerUiKind::ALL {
+            if self.sync_decode {
+                let skip = {
+                    let b = self.bank.lock().unwrap_or_else(|e| e.into_inner());
+                    b.ui_sprites.contains_key(&kind)
+                        || b.ui_miss_gen.get(&kind).copied() == Some(icon_gen)
+                };
+                if !skip {
+                    let decoded = self
+                        .assets
+                        .get_marker_ui_asset_or_request(kind.key())
+                        .and_then(|bytes| decode_image_bytes_to_pixmap(&bytes));
+                    let mut b = self.bank.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(pm) = decoded {
+                        b.ui_miss_gen.remove(&kind);
+                        b.ui_sprites.insert(kind, pm);
+                        self.sync_decoded_any.store(true, Ordering::Relaxed);
+                    } else {
+                        b.ui_miss_gen.insert(kind, icon_gen);
+                    }
+                }
+                continue;
+            }
             let should_send = {
                 let mut b = self.bank.lock().unwrap_or_else(|e| e.into_inner());
                 if b.ui_sprites.contains_key(&kind)
@@ -652,6 +716,23 @@ impl RadarUiState {
 
     fn queue_ug_decode(&self, map_id: i32, group_id: i32, floor_id: i32) {
         let key = (map_id, group_id, floor_id);
+        if self.sync_decode {
+            let already = {
+                let b = self.bank.lock().unwrap_or_else(|e| e.into_inner());
+                b.ug.contains(&key)
+            };
+            if !already
+                && let Some(pm) = self
+                    .assets
+                    .get_ug_overlay_bytes(map_id, group_id, floor_id)
+                    .and_then(|bytes| decode_image_bytes_to_pixmap(&bytes))
+            {
+                let mut b = self.bank.lock().unwrap_or_else(|e| e.into_inner());
+                b.ug.insert(key, pm);
+                self.sync_decoded_any.store(true, Ordering::Relaxed);
+            }
+            return;
+        }
         let should_send = {
             let mut b = self.bank.lock().unwrap_or_else(|e| e.into_inner());
             if b.ug.contains(&key) || b.pending_ug.contains(&key) {
@@ -1983,6 +2064,8 @@ impl RadarMapController {
             last_effective_alpha: 240,
             live_interaction_rect: None,
             last_prefetch_ts: None,
+            sync_decode: false,
+            sync_decoded_any: AtomicBool::new(false),
         };
         let _ = host.ensure_started(move || ui_state);
 
@@ -2110,6 +2193,119 @@ impl RadarMapController {
 impl Drop for RadarMapController {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+/// Pure, zero-HWND, synchronous Radar renderer for headless QA visual verification (`gh-sim`).
+///
+/// Reuses the exact production `RadarUiState::render_frame_into_pixmap` drawing pipeline while
+/// decoding offline tiles/overlays/icons inline from [`RadarAssetSource`] without spawning any
+/// Win32 window or background thread.
+pub struct HeadlessRadarRenderer {
+    ui: RadarUiState,
+}
+
+impl HeadlessRadarRenderer {
+    pub fn new(assets: Arc<dyn RadarAssetSource>) -> Self {
+        let shared = Arc::new(Mutex::new(RadarShared {
+            scene: None,
+            edit_mode: false,
+            rel_rect: None,
+            zoom: DEFAULT_RADAR_ZOOM,
+            opacity: 0.94,
+            capture_visible: false,
+            last_scene_at: None,
+            last_tile_gen: 0,
+            last_icon_gen: 0,
+        }));
+        let bank = Arc::new(Mutex::new(DecodedAssetBank::new()));
+        let (decode_tx, _decode_rx) = mpsc::sync_channel::<DecodeReq>(1);
+        let ui = RadarUiState {
+            shared,
+            assets,
+            bank,
+            decode_tx,
+            on_layout_saved: None,
+            fonts: HudFonts::new(),
+            pixmap: None,
+            clip_mask: None,
+            clip_mask_size: (0, 0),
+            smooth_wx: None,
+            smooth_wy: None,
+            smooth_vx: 0.0,
+            smooth_vy: 0.0,
+            smooth_body_deg: None,
+            smooth_cam_deg: None,
+            last_map_id: None,
+            last_anim_ts: None,
+            anim_timer_active: false,
+            lease_timer_active: false,
+            hover_fade: HoverFadeController::default(),
+            last_presented_rect: None,
+            last_forced_wda_exclude: None,
+            last_effective_alpha: 240,
+            live_interaction_rect: None,
+            last_prefetch_ts: None,
+            sync_decode: true,
+            sync_decoded_any: AtomicBool::new(false),
+        };
+        Self { ui }
+    }
+
+    /// Renders `scene` synchronously into a `w × h` premultiplied RGBA [`Pixmap`].
+    /// Any missing tiles/overlays/icons available from [`RadarAssetSource`] are decoded inline
+    /// before the returned pixmap is finalized so the first frame is already populated.
+    pub fn render_scene(
+        &mut self,
+        scene: &RadarScene,
+        w: u32,
+        h: u32,
+        zoom: f64,
+        edit_mode: bool,
+    ) -> Option<&Pixmap> {
+        let zoom_clamped = zoom.clamp(RADAR_ZOOM_MIN, RADAR_ZOOM_MAX);
+        let body_deg = scene.body_heading.or(scene.camera_heading).unwrap_or(0.0);
+        let cam_deg = scene.camera_heading.or(scene.body_heading).unwrap_or(body_deg);
+        self.ui.sync_decoded_any.store(false, Ordering::Relaxed);
+        self.ui.render_frame_into_pixmap(
+            w,
+            h,
+            scene,
+            scene.world_x,
+            scene.world_y,
+            body_deg,
+            cam_deg,
+            zoom_clamped,
+            edit_mode,
+        );
+        if self.ui.sync_decoded_any.swap(false, Ordering::Relaxed) {
+            self.ui.render_frame_into_pixmap(
+                w,
+                h,
+                scene,
+                scene.world_x,
+                scene.world_y,
+                body_deg,
+                cam_deg,
+                zoom_clamped,
+                edit_mode,
+            );
+        }
+        self.ui.pixmap.as_ref()
+    }
+
+    /// Convenience wrapper returning `(width, height, premultiplied_rgba_bytes)` so callers
+    /// (such as `gh-sim`) do not need a direct `tiny-skia` dependency.
+    pub fn render_scene_rgba(
+        &mut self,
+        scene: &RadarScene,
+        w: u32,
+        h: u32,
+        zoom: f64,
+        edit_mode: bool,
+    ) -> Option<(u32, u32, &[u8])> {
+        let pm = self.render_scene(scene, w, h, zoom, edit_mode)?;
+        Some((pm.width(), pm.height(), pm.data()))
     }
 }
 
@@ -2985,5 +3181,47 @@ mod tests {
         assert!(!ctrl.is_running());
         assert_eq!(ctrl.raw_hwnd(), None);
         assert!(!ctrl.is_visible());
+    }
+
+    #[test]
+    fn headless_radar_renderer_draws_non_empty_pixmap_without_hwnd() {
+        let assets: Arc<dyn RadarAssetSource> = Arc::new(MockRadarAssets::new());
+        let mut renderer = HeadlessRadarRenderer::new(assets);
+        let scene = RadarScene {
+            game_rect: RectI32 {
+                x: 0,
+                y: 0,
+                width: 2560,
+                height: 1440,
+            },
+            map_id: 2,
+            world_x: 100.0,
+            world_y: -50.0,
+            vx: 0.0,
+            vy: 0.0,
+            body_heading: Some(45.0),
+            camera_heading: Some(60.0),
+            is_underground: false,
+            group_id: None,
+            floor_id: None,
+            floor_short: String::new(),
+            pins: Arc::new(Vec::new()),
+            excluded_ids: Arc::new(HashSet::new()),
+            target: None,
+            route_anchor: None,
+            route_legs: Arc::new(Vec::new()),
+            capture_visible: false,
+            edit_hint: String::new(),
+        };
+        let (w, h, rgba) = renderer
+            .render_scene_rgba(&scene, 420, 300, 0.0, false)
+            .expect("headless radar must render pixmap");
+        assert_eq!((w, h), (420, 300));
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        let opaque_pixels = rgba.as_chunks::<4>().0.iter().filter(|px| px[3] > 200).count();
+        assert!(
+            opaque_pixels > (w * h / 2) as usize,
+            "expected solid radar card interior, got only {opaque_pixels} opaque pixels"
+        );
     }
 }

@@ -2,6 +2,7 @@
 
 pub mod capturer;
 pub mod compact;
+pub mod compositor;
 pub mod import_diag;
 pub mod replay;
 pub mod verified_gt;
