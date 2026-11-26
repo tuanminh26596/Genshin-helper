@@ -1,6 +1,7 @@
 //! Dev-only CLI (`gh-sim`) for deterministic offline replay and diagnostic GT import.
 
 use clap::{Parser, Subcommand};
+use gh_sim::compact::{CompactOptions, CompactProfile, run_compact};
 use gh_sim::import_diag::{ImportDiagArgs, import_diagnostic_bundle};
 use gh_sim::replay::{DEFAULT_DRIFT_THRESHOLD_W, ReplayOptions, run_replay};
 use std::path::PathBuf;
@@ -96,6 +97,44 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+
+    /// Losslessly re-encode and/or trim a recorded video session (keeps 100% bit-exact RGB pixels).
+    Compact {
+        /// Source video session directory containing video.mkv & meta.jsonl.
+        source: PathBuf,
+
+        /// Explicit absolute path to ffmpeg.exe (never resolved via PATH).
+        #[arg(long)]
+        ffmpeg: PathBuf,
+
+        /// Destination session directory (default: <source>_compact).
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// First frame to keep (1-based inclusive, default 1).
+        #[arg(long, default_value_t = 1)]
+        start_frame: usize,
+
+        /// Last frame to keep (1-based inclusive, default last frame).
+        #[arg(long)]
+        end_frame: Option<usize>,
+
+        /// Compaction profile: archive (libx265 4:4:4 crf 22, ~39x smaller), near-lossless (libx264rgb crf 18), or lossless (libx264rgb qp 0).
+        #[arg(long, default_value = "archive")]
+        profile: String,
+
+        /// Optional CRF override for archive (default 22) or near-lossless (default 18).
+        #[arg(long)]
+        crf: Option<u8>,
+
+        /// Encoder speed/compression preset (e.g. fast, medium, slow).
+        #[arg(long, default_value = "fast")]
+        preset: String,
+
+        /// Overwrite existing destination directory.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() {
@@ -185,6 +224,47 @@ fn main() {
                 }
                 Err(err) => {
                     eprintln!("[gh-sim import-diag] ERROR: {err}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Cmd::Compact {
+            source,
+            ffmpeg,
+            out,
+            start_frame,
+            end_frame,
+            profile,
+            crf,
+            preset,
+            force,
+        } => {
+            let parsed_profile = match CompactProfile::parse(&profile) {
+                Ok(p) => p,
+                Err(err) => {
+                    eprintln!("[gh-sim compact] ERROR: {err}");
+                    std::process::exit(2);
+                }
+            };
+            match run_compact(&CompactOptions {
+                source_dir: source,
+                out_dir: out,
+                ffmpeg_path: ffmpeg,
+                start_frame,
+                end_frame,
+                profile: parsed_profile,
+                crf,
+                preset,
+                force,
+            }) {
+                Ok(report) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).expect("serialize compact report")
+                    );
+                }
+                Err(err) => {
+                    eprintln!("[gh-sim compact] ERROR: {err}");
                     std::process::exit(2);
                 }
             }

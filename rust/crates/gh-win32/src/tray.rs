@@ -37,6 +37,7 @@ pub const ID_QUIT: u32 = 1005;
 pub const ID_LAUNCH_BORDERLESS: u32 = 1006;
 pub const ID_SUPPORT: u32 = 1007;
 pub const ID_CHECK_UPDATE: u32 = 1008;
+pub const ID_STOP_SESSION_REC: u32 = 1009;
 
 const ICON_CONNECTED_BYTES: &[u8] = include_bytes!("../../../../assets/icons/tray_connected.ico");
 const ICON_IDLE_BYTES: &[u8] = include_bytes!("../../../../assets/icons/tray_default.ico");
@@ -354,6 +355,7 @@ pub struct TrayCallbacks {
     pub on_launch_borderless: Option<TrayCallback>,
     pub on_open_support: Option<TrayCallback>,
     pub on_check_update: Option<TrayCallback>,
+    pub on_stop_session_rec: Option<TrayCallback>,
 }
 
 struct TrayMutableState {
@@ -363,6 +365,7 @@ struct TrayMutableState {
     state: TrayState,
     last_applied_state: Option<TrayState>,
     engine_active: bool,
+    session_rec_active: bool,
     lang: Option<String>,
     available_update: Option<String>,
     update_ready: bool,
@@ -482,10 +485,11 @@ impl TrayShared {
     }
 
     fn show_context_menu(&self, hwnd: HWND) {
-        let (active, lang, available_update, update_ready) = {
+        let (active, session_rec_active, lang, available_update, update_ready) = {
             let guard = self.inner.lock().expect("tray state lock poisoned");
             (
                 guard.engine_active,
+                guard.session_rec_active,
                 guard.lang.clone(),
                 guard.available_update.clone(),
                 guard.update_ready,
@@ -497,12 +501,32 @@ impl TrayShared {
             return;
         };
 
-        for item in build_menu_items_with_update_state(
+        let mut items = Vec::new();
+        if session_rec_active {
+            let stop_label = if lang.as_deref() == Some("en") {
+                "⏹ Stop Session Recording"
+            } else {
+                "⏹ Dừng ghi phiên (Stop Recording)"
+            };
+            items.push(TrayMenuItem {
+                cmd_id: ID_STOP_SESSION_REC,
+                label: stop_label.to_owned(),
+                is_separator: false,
+            });
+            items.push(TrayMenuItem {
+                cmd_id: 0,
+                label: String::new(),
+                is_separator: true,
+            });
+        }
+        items.extend(build_menu_items_with_update_state(
             active,
             lang.as_deref(),
             available_update.as_deref(),
             update_ready,
-        ) {
+        ));
+
+        for item in items {
             if item.is_separator {
                 let _ = unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()) };
             } else {
@@ -613,6 +637,9 @@ unsafe extern "system" fn tray_wnd_proc(
                 ID_SUPPORT => {
                     TrayShared::dispatch_cb(shared.callbacks.on_open_support.as_ref());
                 }
+                ID_STOP_SESSION_REC => {
+                    TrayShared::dispatch_cb(shared.callbacks.on_stop_session_rec.as_ref());
+                }
                 ID_QUIT => {
                     TrayShared::dispatch_cb(shared.callbacks.on_quit.as_ref());
                 }
@@ -691,6 +718,7 @@ impl SystemTrayApp {
                     state,
                     last_applied_state: None,
                     engine_active: initial_active,
+                    session_rec_active: false,
                     lang,
                     available_update: None,
                     update_ready: false,
@@ -923,6 +951,11 @@ impl SystemTrayApp {
             .filter(|s| !s.is_empty())
             .map(|s| s.trim_start_matches(['v', 'V']).to_owned());
         guard.update_ready = ready_to_restart && guard.available_update.is_some();
+    }
+
+    pub fn set_session_recording(&self, active: bool) {
+        let mut guard = self.shared.inner.lock().expect("tray state lock poisoned");
+        guard.session_rec_active = active;
     }
 
     pub fn set_language(&self, lang: Option<&str>) {

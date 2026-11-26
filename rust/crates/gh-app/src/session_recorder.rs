@@ -120,6 +120,7 @@ struct RecorderShared {
 }
 
 struct RecorderState {
+    first_ts: Option<f64>,
     last_ts: Option<f64>,
     expected_dims: Option<(u32, u32)>,
     finished: bool,
@@ -130,11 +131,11 @@ struct RecorderState {
 pub type SessionDoneCallback = Box<dyn FnOnce(PathBuf, usize) + Send>;
 
 pub struct SessionRecorder {
+    /// Target recording duration in wall seconds (`0.0` = unlimited until manual stop).
     seconds: f64,
     fps: f64,
     codec: SessionCodec,
     ffmpeg_path: PathBuf,
-    target_frames: usize,
     out_dir: PathBuf,
     tiles_dir: PathBuf,
     ug_overlays_dir: PathBuf,
@@ -151,17 +152,16 @@ impl SessionRecorder {
         on_done: Option<SessionDoneCallback>,
     ) -> CoreResult<Arc<Self>> {
         let ffmpeg_path = validate_ffmpeg_path(Some(&cfg.ffmpeg_path))?;
-        let sec = if cfg.seconds.is_finite() {
-            cfg.seconds.max(1.0)
+        let sec = if cfg.seconds.is_finite() && cfg.seconds > 0.0 {
+            cfg.seconds
         } else {
-            1.0
+            0.0
         };
         let fps = if cfg.fps.is_finite() {
             cfg.fps.clamp(1.0, 60.0)
         } else {
             DEFAULT_SESSION_FPS
         };
-        let target_frames = (sec * fps).round().max(1.0) as usize;
         let (stamp, _) = local_timestamp_compact_and_iso();
         let mut out_dir = cfg.out_root.join(format!("sess_{stamp}"));
         if out_dir.exists() {
@@ -179,7 +179,6 @@ impl SessionRecorder {
             fps,
             codec: cfg.codec,
             ffmpeg_path,
-            target_frames,
             out_dir,
             tiles_dir: cfg.tiles_dir,
             ug_overlays_dir: cfg.ug_overlays_dir,
@@ -203,6 +202,7 @@ impl SessionRecorder {
                 Condvar::new(),
             )),
             state: Mutex::new(RecorderState {
+                first_ts: None,
                 last_ts: None,
                 expected_dims: None,
                 finished: false,
@@ -285,7 +285,12 @@ impl SessionRecorder {
                 st.finished = true;
                 return;
             }
+            if st.first_ts.is_none() {
+                st.first_ts = Some(ts);
+            }
             st.last_ts = Some(ts);
+            let reached_target = self.seconds > 0.0
+                && st.first_ts.is_some_and(|t0| (ts - t0) >= self.seconds);
 
             let (lock, _) = &*self.shared;
             let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -307,7 +312,7 @@ impl SessionRecorder {
             sh.frames += 1;
             let idx = sh.frames;
             let dropped = sh.dropped_queue + sh.dropped_resize;
-            (idx, idx >= self.target_frames, dropped, hotkeys)
+            (idx, reached_target, dropped, hotkeys)
         };
 
         let mut rec = Map::new();
@@ -390,9 +395,14 @@ impl SessionRecorder {
             .spawn(move || rec.run_worker(child, writer, width, height))?;
         st.worker_started = true;
         st.worker = Some(handle);
+        let dur_label = if self.seconds > 0.0 {
+            format!("{:.0}s", self.seconds)
+        } else {
+            "manual-stop".to_owned()
+        };
         tracing::info!(
-            "[SessionRecorder] Recording {:.0}s @ {:.1} fps ({}x{}, {}) -> {}",
-            self.seconds,
+            "[SessionRecorder] Recording {} @ {:.1} fps ({}x{}, {}) -> {}",
+            dur_label,
             self.fps,
             width,
             height,

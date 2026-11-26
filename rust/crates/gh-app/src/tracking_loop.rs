@@ -2192,7 +2192,7 @@ pub async fn run_tracking_loop(state: Arc<AppState>, mut shutdown_rx: watch::Rec
                 Duration::ZERO
             }
         } else if cur_state == MapState::Settling {
-            Duration::from_millis(45)
+            Duration::from_millis(25)
         } else if live_minimap {
             let elapsed = tick_start.elapsed().as_secs_f64();
             let rem = MINIMAP_TICK_S - elapsed;

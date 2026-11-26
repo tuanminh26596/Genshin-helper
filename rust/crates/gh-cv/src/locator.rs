@@ -68,8 +68,26 @@ const SUBMAP_KEYWORDS: &[(i32, &[&str])] = &[
         40,
         &[
             "suong nguyet",
+            "frost moon",
             "cao nguyen trang",
             "nguyen trang",
+            "moon plateau",
+            "bien trang dat dao",
+            "bien trang",
+            "ien trang",
+            "trang dat",
+            "trang det",
+            "dat dao",
+            "det dao",
+            "vung toi cua mat trang",
+            "vung toi",
+            "toi cua",
+            "cua mat trang",
+            "cua mot trang",
+            "mat trang",
+            "mot trang",
+            "dark side of the moon",
+            "far side of the moon",
             "ungien",
             "nuur",
             "ibni",
@@ -94,6 +112,7 @@ const AREA_KEYWORDS: &[(i32, &[&str])] = &[
             "court",
             "merusea",
             "morte",
+            "khu more",
             "erinnyes",
             "nostoi",
             "romaritime",
@@ -115,6 +134,10 @@ const AREA_KEYWORDS: &[(i32, &[&str])] = &[
             "sa mac",
             "vissudha",
             "desert",
+            "bien cat",
+            "tru cot",
+            "xoi mon",
+            "gio lang",
         ],
     ),
     (
@@ -126,6 +149,10 @@ const AREA_KEYWORDS: &[(i32, &[&str])] = &[
             "dao quang",
             "quy ly",
             "tram ngoc",
+            "thuong coc",
+            "man lam",
+            "ngoai o li sa",
+            "li sa",
             "chenyu",
             "quynh co",
             "song quynh",
@@ -168,6 +195,8 @@ const AREA_KEYWORDS: &[(i32, &[&str])] = &[
             "tepeacac",
             "ven hoa",
             "long chao",
+            "chao van hoa",
+            "quahuacan",
             "tequemecan",
             "quenepa",
             "malipo",
@@ -179,7 +208,19 @@ const AREA_KEYWORDS: &[(i32, &[&str])] = &[
             "tieng vang",
         ],
     ),
-    (13, &["nod-krai", "nod krai", "lempe", "lempo", "hiisi", "nodkrai"]),
+    (
+        13,
+        &[
+            "nod-krai",
+            "nod krai",
+            "lempe",
+            "lempo",
+            "hiisi",
+            "paha",
+            "tro phu",
+            "nodkrai",
+        ],
+    ),
     (
         16,
         &[
@@ -200,6 +241,9 @@ const AREA_KEYWORDS: &[(i32, &[&str])] = &[
             "dinh bang",
             "vuon vo uu",
             "novokitezhgrad",
+            "novokjtezhgrad",
+            "novokitezh",
+            "belovod",
             "kitezh",
             "sai canh",
             "dinh sai canh",
@@ -1222,7 +1266,7 @@ impl MapLocator {
         };
         let y0 = (h as f64 * 0.88) as usize;
         let y1 = (h as f64 * 0.96) as usize;
-        let x0 = (w as f64 * 0.80) as usize;
+        let x0 = (w as f64 * 0.72) as usize;
         let x1 = (w as f64 * 0.96) as usize;
         if y1 <= y0 || x1 <= x0 {
             return (None, None, String::new());
@@ -5566,11 +5610,26 @@ mod tests {
         );
 
         let loc_ok =
-            MapLocator::with_paths(paths, Some(Arc::new(FixedOcrProvider("Nüi Thånh Vién cb"))));
+            MapLocator::with_paths(paths.clone(), Some(Arc::new(FixedOcrProvider("Nüi Thånh Vién cb"))));
         let (mid, aid, raw) = loc_ok.detect_region_name(frame.view());
         assert_eq!(mid, Some(36));
         assert_eq!(aid, None);
         assert_eq!(raw, "Nüi Thånh Vién cb");
+
+        // Map 40 (Frost Moon) sub-regions including real Windows OCR diacritic confusions
+        for sample in [
+            "Biển Trăng Dạt Dào",
+            "3ién Träng Det Däo",
+            "Vùng Tối Của Mặt Trăng",
+            "Tbi Cüa Möt Träng",
+            "Frost Moon",
+        ] {
+            let loc_m40 =
+                MapLocator::with_paths(paths.clone(), Some(Arc::new(FixedOcrProvider(sample))));
+            let (m40_id, m40_aid, _) = loc_m40.detect_region_name(frame.view());
+            assert_eq!(m40_id, Some(40), "expected Map 40 for OCR sample {sample:?}");
+            assert_eq!(m40_aid, None);
+        }
 
         let _ = std::fs::remove_dir_all(&missing_dir);
     }

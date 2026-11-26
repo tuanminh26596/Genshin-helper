@@ -85,9 +85,17 @@ pub struct CliArgs {
     #[arg(long, value_name = "SECONDS", default_value_t = 0.0)]
     pub record_minimap: f64,
 
-    /// Dev-only hidden lossless full-frame gameplay session recorder (requires explicit --ffmpeg)
-    #[arg(long, value_name = "SECONDS", default_value_t = 0.0, hide = true)]
-    pub record_session: f64,
+    /// Dev-only hidden lossless full-frame gameplay session recorder (requires explicit --ffmpeg).
+    /// Pass without a number (`--record-session`) for unlimited manual-stop recording, or with
+    /// SECONDS (`--record-session 90`) to auto-stop after real elapsed seconds.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        num_args = 0..=1,
+        default_missing_value = "0",
+        hide = true
+    )]
+    pub record_session: Option<f64>,
 
     /// Target FPS for --record-session (default 20 fps matching minimap full-step cadence)
     #[arg(long, value_name = "FPS", default_value_t = DEFAULT_SESSION_FPS, hide = true)]
@@ -100,6 +108,10 @@ pub struct CliArgs {
     /// Explicit absolute path to ffmpeg.exe for --record-session (never resolved via PATH)
     #[arg(long, value_name = "ABS_PATH", hide = true)]
     pub ffmpeg: Option<PathBuf>,
+
+    /// Dev-only toggle hotkey to start/stop --record-session (default alt+f8, off NVIDIA Alt+F9)
+    #[arg(long, value_name = "COMBO", default_value = "alt+f8", hide = true)]
+    pub record_hotkey: String,
 
     /// Override Sync Server bind port (`AppConfig.ws_port`)
     #[arg(long)]
@@ -176,7 +188,7 @@ async fn main() {
 
     let args = CliArgs::parse();
 
-    let session_rec_spec = if args.record_session > 0.0 {
+    let session_rec_spec = if let Some(raw_secs) = args.record_session {
         let ffmpeg_abs = match validate_ffmpeg_path(args.ffmpeg.as_deref()) {
             Ok(p) => p,
             Err(err) => {
@@ -191,7 +203,7 @@ async fn main() {
                 std::process::exit(2);
             }
         };
-        Some((ffmpeg_abs, codec))
+        Some((raw_secs.max(0.0), ffmpeg_abs, codec))
     } else {
         None
     };
@@ -579,42 +591,161 @@ async fn main() {
             .unwrap_or_else(|e| e.into_inner()) = Some(rec);
     }
 
-    // Optional hidden SessionRecorder (--record-session --ffmpeg <ABS_PATH>)
-    if let Some((ffmpeg_abs, codec)) = session_rec_spec {
-        let hud_for_srec = Arc::clone(&nav_hud);
-        match SessionRecorder::new(
-            SessionRecorderConfig {
-                seconds: args.record_session,
-                fps: args.record_fps,
-                codec,
-                ffmpeg_path: ffmpeg_abs,
-                out_root: paths.session_rec_dir(),
-                tiles_dir: paths.tiles_dir.clone(),
-                ug_overlays_dir: paths.ug_overlays_dir.clone(),
-                paimon_cache_path: paths.paimon_cache_path(),
-                maps_db: Arc::clone(&state.maps_db),
-                max_queue: 64,
-            },
-            Some(Box::new(move |_out_dir, frames| {
-                hud_for_srec.flash(
-                    &format!("SESSION REC OK - {frames} frames"),
-                    HudPalette::Success,
-                    6.0,
+    // Optional hidden SessionRecorder (--record-session [SECONDS] --ffmpeg <ABS_PATH>)
+    // Supports Alt+F8 (or --record-hotkey) toggle to start/stop multiple takes without restarting.
+    let session_rec_toggle: Option<Arc<dyn Fn() + Send + Sync>> =
+        if let Some((rec_secs, ffmpeg_abs, codec)) = session_rec_spec.clone() {
+            let st_rec = Arc::clone(&state);
+            let hud_rec = Arc::clone(&nav_hud);
+            let paths_rec = paths.clone();
+            let fps_rec = args.record_fps;
+            let hk_label = args.record_hotkey.trim().to_ascii_uppercase();
+
+            let spawn_take = Arc::new(move |seconds: f64| {
+                let st_done = Arc::clone(&st_rec);
+                let hud_done = Arc::clone(&hud_rec);
+                let hk_done = hk_label.clone();
+                match SessionRecorder::new(
+                    SessionRecorderConfig {
+                        seconds,
+                        fps: fps_rec,
+                        codec,
+                        ffmpeg_path: ffmpeg_abs.clone(),
+                        out_root: paths_rec.session_rec_dir(),
+                        tiles_dir: paths_rec.tiles_dir.clone(),
+                        ug_overlays_dir: paths_rec.ug_overlays_dir.clone(),
+                        paimon_cache_path: paths_rec.paimon_cache_path(),
+                        maps_db: Arc::clone(&st_rec.maps_db),
+                        max_queue: 64,
+                    },
+                    Some(Box::new(move |out_dir, frames| {
+                        if let Some(tray) = st_done
+                            .tray
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone()
+                        {
+                            tray.set_session_recording(false);
+                        }
+                        let mb = std::fs::metadata(out_dir.join("video.mkv"))
+                            .map(|m| m.len() as f64 / (1024.0 * 1024.0))
+                            .unwrap_or(0.0);
+                        let folder = out_dir
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("session");
+                        hud_done.flash(
+                            &format!("SESSION REC OK - {frames} frames"),
+                            HudPalette::Success,
+                            6.0,
+                        );
+                        let title = if get_language() == "en" {
+                            format!("Session saved ({frames} frames, {mb:.1} MB)")
+                        } else {
+                            format!("Đã lưu phiên ghi ({frames} frame, {mb:.1} MB)")
+                        };
+                        let sub = format!("{folder} · {hk_done}");
+                        st_done.hud_toast.show_toast(
+                            &title,
+                            &sub,
+                            gh_hud::toast::ToastKind::Success,
+                            6000,
+                            None,
+                        );
+                    })),
+                ) {
+                    Ok(srec) => {
+                        *st_rec
+                            .session_recorder
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = Some(srec);
+                        if let Some(tray) = st_rec
+                            .tray
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone()
+                        {
+                            tray.set_session_recording(true);
+                        }
+                        let (title, sub) = if get_language() == "en" {
+                            ("REC started", format!("Press {hk_label} or Tray to stop"))
+                        } else {
+                            ("Đang ghi phiên gameplay", format!("Bấm {hk_label} hoặc Tray để dừng"))
+                        };
+                        st_rec.hud_toast.show_toast(
+                            title,
+                            &sub,
+                            gh_hud::toast::ToastKind::Info,
+                            4500,
+                            None,
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!("[--record-session] Init failed: {err}");
+                    }
+                }
+            });
+
+            // `--record-session <SECONDS>` (> 0) starts immediately; bare `--record-session`
+            // starts armed in standby so the user presses Alt+F8 when ready in-game.
+            if rec_secs > 0.0 {
+                spawn_take(rec_secs);
+            }
+
+            let st_tog = Arc::clone(&state);
+            let spawn_for_tog = Arc::clone(&spawn_take);
+            let toggle: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                let active_srec = {
+                    let mut guard = st_tog
+                        .session_recorder
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if guard.as_ref().is_some_and(|r| r.active()) {
+                        guard.take()
+                    } else {
+                        *guard = None;
+                        None
+                    }
+                };
+                if let Some(srec) = active_srec {
+                    let title = if get_language() == "en" {
+                        "Stopping recording..."
+                    } else {
+                        "Đang dừng & lưu phiên ghi..."
+                    };
+                    st_tog.hud_toast.show_toast(
+                        title,
+                        "ffmpeg",
+                        gh_hud::toast::ToastKind::Info,
+                        3000,
+                        None,
+                    );
+                    let _ = std::thread::Builder::new()
+                        .name("GH_StopSessionRec".to_owned())
+                        .spawn(move || {
+                            srec.finish();
+                            srec.join_timeout(Duration::from_secs(15));
+                        });
+                } else {
+                    spawn_for_tog(rec_secs);
+                }
+            });
+
+            let hk_combo = args.record_hotkey.trim().to_owned();
+            if !hk_combo.is_empty() {
+                hotkey_mgr.register(
+                    "dev_record_toggle",
+                    &hk_combo,
+                    Arc::clone(&toggle),
+                    true,
+                    None,
                 );
-            })),
-        ) {
-            Ok(srec) => {
-                *state
-                    .session_recorder
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = Some(srec);
             }
-            Err(err) => {
-                tracing::error!("[--record-session] Init failed: {err}");
-                std::process::exit(2);
-            }
-        }
-    }
+            Some(toggle)
+        } else {
+            None
+        };
+    let _ = &session_rec_toggle;
 
     // Opt-in LAN Companion startup
     if cfg.lan_companion_enabled {
@@ -646,6 +777,7 @@ async fn main() {
         let st_quit = Arc::clone(&state);
         let st_borderless = Arc::clone(&state);
         let st_update = Arc::clone(&state);
+        let st_stop_rec = Arc::clone(&state);
         let tray = Arc::new(SystemTrayApp::new(
             TrayCallbacks {
                 on_toggle_engine: Some(Arc::new(move || {
@@ -693,11 +825,53 @@ async fn main() {
                 on_check_update: Some(Arc::new(move || {
                     st_update.handle_tray_update_click();
                 })),
+                on_stop_session_rec: Some(Arc::new(move || {
+                    let srec_opt = st_stop_rec
+                        .session_recorder
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take();
+                    if let Some(srec) = srec_opt {
+                        srec.finish();
+                        srec.join_timeout(Duration::from_secs(15));
+                    }
+                    if let Some(tray) = st_stop_rec
+                        .tray
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                    {
+                        tray.set_session_recording(false);
+                    }
+                })),
             },
             active_init,
             Some(get_language()),
         ));
         if tray.start() {
+            let srec_active = state
+                .session_recorder
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|r| r.active());
+            if srec_active {
+                tray.set_session_recording(true);
+            } else if session_rec_spec.is_some() {
+                let hk_disp = args.record_hotkey.trim().to_ascii_uppercase();
+                let (title, sub) = if get_language() == "en" {
+                    ("Session recorder ready", format!("Press {hk_disp} to start / stop"))
+                } else {
+                    ("Sẵn sàng quay phiên", format!("Bấm {hk_disp} để bắt đầu / dừng"))
+                };
+                state.hud_toast.show_toast(
+                    title,
+                    &sub,
+                    gh_hud::toast::ToastKind::Info,
+                    5000,
+                    None,
+                );
+            }
             *state.tray.lock().unwrap_or_else(|e| e.into_inner()) = Some(tray);
             state.refresh_tray_state();
         }
@@ -919,10 +1093,22 @@ mod tests {
             "C:\\tools\\ffmpeg.exe",
         ])
         .unwrap();
-        assert_eq!(rec.record_session, 30.0);
+        assert_eq!(rec.record_session, Some(30.0));
         assert_eq!(rec.record_fps, 20.0);
         assert_eq!(rec.record_codec, "ffv1");
         assert_eq!(rec.ffmpeg, Some(PathBuf::from("C:\\tools\\ffmpeg.exe")));
+
+        let rec_manual = CliArgs::try_parse_from([
+            "GenshinHelper",
+            "--record-session",
+            "--ffmpeg",
+            "C:\\tools\\ffmpeg.exe",
+        ])
+        .unwrap();
+        assert_eq!(rec_manual.record_session, Some(0.0));
+
+        let def_no_rec = CliArgs::try_parse_from(["GenshinHelper"]).unwrap();
+        assert_eq!(def_no_rec.record_session, None);
 
         use clap::CommandFactory;
         let help = CliArgs::command().render_help().to_string();

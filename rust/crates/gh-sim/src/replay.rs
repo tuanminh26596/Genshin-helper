@@ -21,6 +21,7 @@ use gh_core::i18n::get_language;
 use gh_core::map_bridge::PerMapAffineRegistry;
 use gh_core::nav_controller::NavigationController;
 use gh_core::paths::{AppPaths, RuntimeMode};
+use gh_core::traits::OcrProvider;
 use gh_cv::map_state::MapState;
 use gh_cv::minimap_tracker::MinimapPose;
 use gh_cv::tile_cache::LruTerrainTileCache;
@@ -33,6 +34,7 @@ use gh_net::sync_server::{SyncServer, SyncServerConfig};
 use gh_win32::audio::AudioFeedback;
 use gh_win32::hotkey::UnifiedHotkeyManager;
 use gh_win32::hotkey_conflicts::HotkeyConflictAdvisor;
+use gh_win32::win_ocr::WindowsOcrService;
 use image::ImageReader;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -507,7 +509,9 @@ fn build_offline_replay_state(
         offline: true,
         async_fetch: false,
         sync_relocator_warmup: true,
-        ocr: None,
+        ocr: WindowsOcrService::try_new()
+            .ok()
+            .map(|s| Arc::new(s) as Arc<dyn OcrProvider>),
     })
     .map_err(|e| format!("failed to build shared tracking stack: {e}"))?;
 
@@ -1105,7 +1109,35 @@ pub fn run_replay(opts: &ReplayOptions) -> Result<ReplayReport, String> {
             && let Some(ref full_frame) = out.full_frame
         {
             let slider_hint = out.step_res.as_ref().and_then(|s| s.check.slider_res.as_ref());
-            let found = loc.locate_player_frame(full_frame.as_view(), false, slider_hint);
+            let loc_t0 = Instant::now();
+            let want_dbg = tracing::enabled!(tracing::Level::INFO);
+            let found = loc.locate_player_frame(full_frame.as_view(), want_dbg, slider_hint);
+            if want_dbg {
+                let loc_ms = loc_t0.elapsed().as_secs_f64() * 1000.0;
+                match &found {
+                    Some(r) => tracing::info!(
+                        "[gh-sim locate] f={} kind={:?} ms={:.1} ok={} map={:?} target_map={:?} ocr={:?} inliers={:?} xy=({:?},{:?}) ug={} floor={:?}",
+                        rec.idx,
+                        loc_kind,
+                        loc_ms,
+                        r.has_world_coords,
+                        r.map_id,
+                        r.target_map_id,
+                        r.region_text,
+                        r.inliers_count,
+                        r.world_x.map(|v| v.round()),
+                        r.world_y.map(|v| v.round()),
+                        r.is_underground,
+                        r.floor_id,
+                    ),
+                    None => tracing::info!(
+                        "[gh-sim locate] f={} kind={:?} ms={:.1} result=None",
+                        rec.idx,
+                        loc_kind,
+                        loc_ms,
+                    ),
+                }
+            }
             Some((loc_kind, found))
         } else {
             None
