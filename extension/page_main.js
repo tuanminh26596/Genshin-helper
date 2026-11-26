@@ -2521,6 +2521,7 @@
             method: 'POST',
             body: {
                 tab_id: GH_TAB_ID,
+                provider_id: 'hoyolab',
                 visible: isVisible,
                 focused: isFocused,
                 interacted: Boolean(opts && opts.interacted),
@@ -3014,12 +3015,29 @@
             return;
         }
 
+        const isEventForThisHoyolabTab = (ev) => {
+            if (!ev || typeof ev !== 'object') return true;
+            if (ev.target_provider && String(ev.target_provider).toLowerCase() !== 'hoyolab') return false;
+            if (ev.owner_tab_id && String(ev.owner_tab_id) !== GH_TAB_ID) return false;
+            return true;
+        };
+
         if (data.type === 'TARGET_LOCK_UPDATED') {
-            setActiveLockedPin(data.locked_target || null);
+            const locked = data.locked_target || null;
+            const lockedId = locked && locked.id !== undefined && locked.id !== null ? String(locked.id) : '';
+            if (locked && (lockedId.includes(':') || (data.target_provider && String(data.target_provider).toLowerCase() !== 'hoyolab'))) {
+                setActiveLockedPin(null);
+            } else {
+                setActiveLockedPin(locked);
+            }
             return;
         }
 
         if (data.type === 'TSP_ROUTE_UPDATED') {
+            if (data.target_provider && String(data.target_provider).toLowerCase() !== 'hoyolab') {
+                clearTspRouteFromMap();
+                return;
+            }
             const route = Object.prototype.hasOwnProperty.call(data, 'route') ? data.route : data;
             const hasRoute = Boolean(
                 route &&
@@ -3042,23 +3060,29 @@
         }
 
         if (data.type === 'NAV_MARK_PIN') {
+            const rawPid = (data.pin_id !== undefined && data.pin_id !== null) ? String(data.pin_id) : '';
+            if (rawPid.includes(':') || !isEventForThisHoyolabTab(data)) {
+                return;
+            }
             handleNavMarkPin(data);
             return;
         }
 
         if (data.type === 'LAN_FOCUS_PIN') {
+            if (!isEventForThisHoyolabTab(data)) return;
             handleLanFocusPin(data);
             return;
         }
 
         if (data.type === 'LAN_SET_FLOOR') {
+            if (!isEventForThisHoyolabTab(data)) return;
             handleLanSetFloor(data);
             return;
         }
 
         if (data.type === 'SYNC_POSITION_ONLY' || data.type === 'SYNC_AND_MARK') {
             nativeFeedbackActive = data.native_feedback === true;
-            const markAfterSync = (data.type === 'SYNC_AND_MARK');
+            const markAfterSync = (data.type === 'SYNC_AND_MARK') && isEventForThisHoyolabTab(data);
             const eventSeq = typeof data._seq === 'number' ? data._seq : 0;
             if (data.detected === false) {
                 if (markAfterSync) {
@@ -4436,6 +4460,10 @@
     }
 
     async function handleNavMarkPin(data) {
+        const rawPinId = (data && data.pin_id !== undefined && data.pin_id !== null) ? String(data.pin_id) : '';
+        if (rawPinId.includes(':')) return;
+        if (data && data.target_provider && String(data.target_provider).toLowerCase() !== 'hoyolab') return;
+        if (data && data.owner_tab_id && String(data.owner_tab_id) !== GH_TAB_ID) return;
         const task = navMarkChain.then(async () => {
             const action = (data && data.action === 'unmark') ? 'unmark' : 'mark';
             const seq = typeof data._seq === 'number' ? data._seq : 0;

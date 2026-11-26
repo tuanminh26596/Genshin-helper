@@ -116,9 +116,10 @@ pub const GAME_IGNORED_TITLE_SUBSTRINGS: [&str; 6] = [
 pub const GAME_IGNORED_CLASSES: [&str; 2] =
     ["ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"];
 
-pub const BROWSER_KEYWORDS: [&str; 9] = [
+pub const BROWSER_KEYWORDS: [&str; 10] = [
     "hoyolab",
     "interactive map",
+    "interactive world map",
     "bản đồ tương tác",
     "genshin helper",
     "appsample",
@@ -270,12 +271,24 @@ pub fn is_browser_window_from_meta(
     title_lower: &str,
     allow_unverified_title: bool,
 ) -> bool {
-    if is_browser_title_excluded(title_lower) {
-        return false;
-    }
     let proc_lower = proc_name.trim().to_ascii_lowercase();
+    let verified_browser_proc =
+        !proc_lower.is_empty() && BROWSER_PROCESS_NAMES.contains(&proc_lower.as_str());
+    if is_browser_title_excluded(title_lower) {
+        // Real interactive map tabs like AppSample ("Genshin Impact Interactive World Map")
+        // contain "genshin impact" inside a verified browser executable. Allow only when no
+        // non-game excluded app substring is present AND the title matches a known map keyword.
+        let blocked_non_game = BROWSER_TITLE_EXCLUDE
+            .iter()
+            .filter(|&&bad| bad != "genshin impact")
+            .any(|bad| title_lower.contains(bad));
+        let explicit_map_title = BROWSER_KEYWORDS.iter().any(|kw| title_lower.contains(kw));
+        if !(verified_browser_proc && explicit_map_title && !blocked_non_game) {
+            return false;
+        }
+    }
     if !proc_lower.is_empty() {
-        return BROWSER_PROCESS_NAMES.contains(&proc_lower.as_str());
+        return verified_browser_proc;
     }
     if allow_unverified_title {
         return true;
@@ -287,19 +300,49 @@ pub fn is_browser_window_from_meta(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserMatch {
+    PreferredProvider,
     Specific,
     Generic,
 }
 
-fn classify_browser_window(
+/// Title keywords specific to an individual interactive map provider (used so Quick-Switch
+/// `Alt+Q` focuses the exact browser window hosting the active map provider when multiple
+/// browsers with different map sources are open simultaneously).
+pub fn provider_browser_keywords(provider: &str) -> &'static [&'static str] {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "hoyolab" | "miyoushe" => &[
+            "hoyolab",
+            "bản đồ tương tác",
+            "teyvat interactive map",
+            "interactive map",
+        ],
+        "appsample" => &["appsample", "genshin impact interactive world map"],
+        "kongying" => &["yuanshen", "原神地图", "空荧"],
+        "mapgenie" => &["mapgenie"],
+        "gamedot" => &["gamedot"],
+        _ => &[],
+    }
+}
+
+fn classify_browser_window_for_provider(
     raw_title: &str,
     raw_class: &str,
     proc_name: &str,
+    preferred_provider: Option<&str>,
     specific_only: bool,
 ) -> Option<BrowserMatch> {
     let title = raw_title.to_lowercase();
     if title.is_empty() {
         return None;
+    }
+    if let Some(prov) = preferred_provider {
+        let p_kws = provider_browser_keywords(prov);
+        if !p_kws.is_empty()
+            && p_kws.iter().any(|kw| title.contains(kw))
+            && is_browser_window_from_meta(proc_name, &title, true)
+        {
+            return Some(BrowserMatch::PreferredProvider);
+        }
     }
     if BROWSER_KEYWORDS.iter().any(|kw| title.contains(kw))
         && is_browser_window_from_meta(proc_name, &title, true)
@@ -319,6 +362,15 @@ fn classify_browser_window(
         return Some(BrowserMatch::Generic);
     }
     None
+}
+
+fn classify_browser_window(
+    raw_title: &str,
+    raw_class: &str,
+    proc_name: &str,
+    specific_only: bool,
+) -> Option<BrowserMatch> {
+    classify_browser_window_for_provider(raw_title, raw_class, proc_name, None, specific_only)
 }
 
 /// Pure geometry check for foreground occlusion (`src/capture.py:344-362`).
@@ -708,7 +760,19 @@ impl WindowFinder {
     }
 
     pub fn find_browser_window_any_state(specific_only: bool) -> Option<isize> {
-        if let Some((hwnd, _, _, _, _)) = Self::get_browser_window() {
+        Self::find_browser_window_for_provider(None, specific_only)
+    }
+
+    pub fn find_browser_window_for_provider(
+        preferred_provider: Option<&str>,
+        specific_only: bool,
+    ) -> Option<isize> {
+        let pref = preferred_provider
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if pref.is_none()
+            && let Some((hwnd, _, _, _, _)) = Self::get_browser_window()
+        {
             if !specific_only {
                 return Some(hwnd);
             }
@@ -722,6 +786,7 @@ impl WindowFinder {
 
         ensure_default_desktop();
 
+        let mut preferred: Option<(i64, isize)> = None;
         let mut specific: Option<(i64, isize)> = None;
         let mut generic: Option<(i64, isize)> = None;
         for hwnd in enumerate_top_level_windows() {
@@ -740,7 +805,13 @@ impl WindowFinder {
             let cls = get_class_name(hwnd);
             let proc_name = get_hwnd_process_basename(hwnd);
 
-            match classify_browser_window(&title, &cls, &proc_name, specific_only) {
+            match classify_browser_window_for_provider(&title, &cls, &proc_name, pref, specific_only)
+            {
+                Some(BrowserMatch::PreferredProvider)
+                    if preferred.as_ref().is_none_or(|b| area > b.0) =>
+                {
+                    preferred = Some((area, hwnd.0 as isize));
+                }
                 Some(BrowserMatch::Specific) if specific.as_ref().is_none_or(|b| area > b.0) => {
                     specific = Some((area, hwnd.0 as isize));
                 }
@@ -751,7 +822,7 @@ impl WindowFinder {
             }
         }
 
-        specific.or(generic).map(|(_, hwnd)| hwnd)
+        preferred.or(specific).or(generic).map(|(_, hwnd)| hwnd)
     }
 
     /// Focuses `hwnd` via `AllowSetForegroundWindow(ASFW_ANY)` and `AttachThreadInput`
@@ -1713,5 +1784,42 @@ mod tests {
         let gdi_only = ScreenCapturer::new(DIB_POOL_SLOTS).with_hdr_wgc(false);
         assert!(!gdi_only.is_region_hdr(0, 0, 96, 64));
         gdi_only.close();
+    }
+
+    #[test]
+    fn provider_window_classification_prioritizes_active_provider_across_browsers() {
+        let chrome_hl = "Teyvat Interactive Map - HoYoLAB - Google Chrome";
+        let edge_as = "Genshin Impact Interactive World Map - AppSample - Microsoft Edge";
+        let brave_ky = "原神地图 - 空荧酒馆 - Brave";
+
+        // Active provider = AppSample -> Edge gets PreferredProvider, Chrome/Brave stay Specific
+        assert_eq!(
+            classify_browser_window_for_provider(edge_as, "Chrome_WidgetWin_1", "msedge.exe", Some("appsample"), true),
+            Some(BrowserMatch::PreferredProvider)
+        );
+        assert_eq!(
+            classify_browser_window_for_provider(chrome_hl, "Chrome_WidgetWin_1", "chrome.exe", Some("appsample"), true),
+            Some(BrowserMatch::Specific)
+        );
+        assert_eq!(
+            classify_browser_window_for_provider(brave_ky, "Chrome_WidgetWin_1", "brave.exe", Some("appsample"), true),
+            Some(BrowserMatch::Specific)
+        );
+
+        // Active provider = Kongying -> Brave gets PreferredProvider
+        assert_eq!(
+            classify_browser_window_for_provider(brave_ky, "Chrome_WidgetWin_1", "brave.exe", Some("kongying"), true),
+            Some(BrowserMatch::PreferredProvider)
+        );
+        assert_eq!(
+            classify_browser_window_for_provider(chrome_hl, "Chrome_WidgetWin_1", "chrome.exe", Some("kongying"), true),
+            Some(BrowserMatch::Specific)
+        );
+
+        // Active provider = HoYoLAB -> Chrome gets PreferredProvider
+        assert_eq!(
+            classify_browser_window_for_provider(chrome_hl, "Chrome_WidgetWin_1", "chrome.exe", Some("hoyolab"), true),
+            Some(BrowserMatch::PreferredProvider)
+        );
     }
 }

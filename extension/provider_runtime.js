@@ -654,6 +654,15 @@
   let calibrationInFlight = false;
   let prevArrowAngle = null;
   let prevFovAngle = null;
+  let isActiveOwnerTab = false;
+  let lastMapSwitchTs = 0;
+
+  function isEventForThisProviderTab(ev) {
+    if (!ev || typeof ev !== 'object') return true;
+    if (ev.target_provider && String(ev.target_provider).toLowerCase() !== activeAdapter.id) return false;
+    if (ev.owner_tab_id && String(ev.owner_tab_id) !== GH_TAB_ID) return false;
+    return true;
+  }
 
   function tr(key, params, fallback) {
     if (window.GHI18n && typeof window.GHI18n.t === 'function') {
@@ -1092,7 +1101,7 @@
       .sort((a, b) => a.distance - b.distance)
       .slice(0, 40);
 
-    const userInitiated = Boolean(opts.userInitiated || force);
+    const userInitiated = Boolean(opts.userInitiated);
     extRequest('/nearby_pins', {
       method: 'POST',
       body: {
@@ -1107,6 +1116,10 @@
         map_id: mapId,
         coverage_radius: radius,
         pins: nearby
+      }
+    }).then((resp) => {
+      if (resp && resp.ok && resp.data && typeof resp.data.is_owner === 'boolean') {
+        isActiveOwnerTab = resp.data.is_owner;
       }
     }).catch(() => {});
 
@@ -1161,7 +1174,7 @@
         provider_id: activeAdapter.id,
         tab_visible: !document.hidden,
         tab_focused: typeof document.hasFocus === 'function' ? Boolean(document.hasFocus()) : false,
-        user_initiated: Boolean(userInitiated || force),
+        user_initiated: Boolean(userInitiated),
         map_id: mapId,
         names,
         categories: Array.from(catMap.values()).sort((a, b) => b.count - a.count),
@@ -1240,8 +1253,12 @@
 
     const curMapId = activeAdapter.getCurrentMapId(ctx);
     if (curMapId !== targetMapId) {
-      if (!activeAdapter.switchMap(ctx, targetMapId)) {
-        return;
+      // Never force full-page reload on a hidden secondary tab when another map tab is driving.
+      const now = Date.now();
+      const canSwitch = !document.hidden && (isManualSync || isActiveOwnerTab) && (now - lastMapSwitchTs > 6000);
+      if (canSwitch) {
+        lastMapSwitchTs = now;
+        activeAdapter.switchMap(ctx, targetMapId);
       }
       return;
     }
@@ -1289,19 +1306,21 @@
   function handleNavMarkPin(data) {
     const fullId = String((data && data.pin_id) || '').trim();
     const action = (data && data.action === 'unmark') ? 'unmark' : 'mark';
+    const seq = (data && typeof data._seq === 'number') ? data._seq : 0;
     const prefix = `${activeAdapter.id}:`;
-    if (fullId.includes(':') && !fullId.startsWith(prefix)) {
-      // Belongs to another provider tab; ignore safely
+    // Strictly require this provider's namespace prefix AND active owner/provider routing so
+    // pure-digit HoYoLAB pins or another provider's pins are NEVER touched or rolled back.
+    if (!fullId.startsWith(prefix) || !isEventForThisProviderTab(data)) {
       return;
     }
-    const rawId = fullId.startsWith(prefix) ? fullId.slice(prefix.length) : fullId;
+    const rawId = fullId.slice(prefix.length);
 
     navMarkChain = navMarkChain.then(async () => {
       const ctx = getLiveContext();
       if (!ctx) {
         extRequest('/action_feedback', {
           method: 'POST',
-          body: { event_type: 'NAV_MARK', status: 'error', action, pin_id: fullId, detail: 'Map not ready' }
+          body: { event_type: 'NAV_MARK', status: 'error', action, pin_id: fullId, seq, detail: 'Map not ready' }
         });
         return;
       }
@@ -1310,7 +1329,7 @@
         if (res && res.ok) {
           extRequest('/action_feedback', {
             method: 'POST',
-            body: { event_type: 'NAV_MARK', status: 'ok', action, pin_id: fullId }
+            body: { event_type: 'NAV_MARK', status: 'ok', action, pin_id: fullId, seq }
           });
           pushNearbyPins(ctx, { force: true, userInitiated: true });
         } else {
@@ -1318,14 +1337,14 @@
           showMiniToast(msg, 3200);
           extRequest('/action_feedback', {
             method: 'POST',
-            body: { event_type: 'NAV_MARK', status: 'error', action, pin_id: fullId, detail: msg }
+            body: { event_type: 'NAV_MARK', status: 'error', action, pin_id: fullId, seq, detail: msg }
           });
         }
       } catch (err) {
         const msg = (err && err.message) ? err.message : 'Mark error';
         extRequest('/action_feedback', {
           method: 'POST',
-          body: { event_type: 'NAV_MARK', status: 'error', action, pin_id: fullId, detail: msg }
+          body: { event_type: 'NAV_MARK', status: 'error', action, pin_id: fullId, seq, detail: msg }
         });
       }
     });
@@ -1348,18 +1367,29 @@
         handlePositionEvent(data, { isManualSync: true });
         break;
       case 'SYNC_AND_MARK':
-        handlePositionEvent(data, { isManualSync: true, autoMark: true });
+        handlePositionEvent(data, { isManualSync: true, autoMark: isEventForThisProviderTab(data) });
         break;
       case 'NAV_MARK_PIN':
         handleNavMarkPin(data);
         break;
-      case 'TARGET_LOCK_UPDATED':
-        lockedTarget = data.locked_target || null;
+      case 'TARGET_LOCK_UPDATED': {
+        const nextLock = data.locked_target || null;
+        const lockId = nextLock && nextLock.id !== undefined && nextLock.id !== null ? String(nextLock.id) : '';
+        if (nextLock && lockId.startsWith(`${activeAdapter.id}:`)) {
+          lockedTarget = nextLock;
+        } else {
+          lockedTarget = null;
+        }
         renderTargetLockPill();
         break;
+      }
       case 'TSP_ROUTE_UPDATED': {
         const ctx = getLiveContext();
-        drawTspOverlay(ctx, data.route || data);
+        if (data.target_provider && String(data.target_provider).toLowerCase() !== activeAdapter.id) {
+          drawTspOverlay(ctx, null);
+        } else {
+          drawTspOverlay(ctx, data.route || data);
+        }
         break;
       }
       case 'GH_CMD_REFRESH_PINS': {
@@ -1450,6 +1480,10 @@
         interacted: Boolean(interacted),
         closing: Boolean(closing)
       }
+    }).then((resp) => {
+      if (resp && resp.ok && resp.data && typeof resp.data.is_owner === 'boolean') {
+        isActiveOwnerTab = resp.data.is_owner;
+      }
     }).catch(() => {});
   }
 
@@ -1465,6 +1499,8 @@
       body: {
         tab_id: GH_TAB_ID,
         provider_id: activeAdapter.id,
+        tab_visible: !document.hidden,
+        tab_focused: typeof document.hasFocus === 'function' ? Boolean(document.hasFocus()) : false,
         map_id: mapId,
         center: canonC ? [canonC.lat, canonC.lng] : [center.lat, center.lng],
         zoom: ctx.map.getZoom(),
@@ -1472,6 +1508,10 @@
         scriptVersion: SCRIPT_VERSION,
         scriptBuild: SCRIPT_BUILD,
         runtimeMode: 'extension'
+      }
+    }).then((resp) => {
+      if (resp && resp.ok && resp.data && typeof resp.data.is_owner === 'boolean') {
+        isActiveOwnerTab = resp.data.is_owner;
       }
     }).catch(() => {});
   }
@@ -1512,7 +1552,11 @@
   injectStyles();
   window.addEventListener('message', onWindowMessage);
 
-  const onVis = () => reportTabVisibility(false, false);
+  const onVis = () => {
+    const nowVisible = !document.hidden;
+    const focused = typeof document.hasFocus === 'function' ? Boolean(document.hasFocus()) : false;
+    reportTabVisibility(nowVisible && focused, false);
+  };
   const onFocus = () => {
     reportTabVisibility(true, false);
     const ctx = getLiveContext();
@@ -1552,7 +1596,7 @@
     if (resp && resp.ok && resp.data) {
       if (typeof resp.data.engine_active === 'boolean') engineActive = resp.data.engine_active;
       if (typeof resp.data.auto_sync === 'boolean') autoSyncEnabled = resp.data.auto_sync;
-      if (resp.data.locked_target) {
+      if (resp.data.locked_target && String(resp.data.locked_target.id || '').startsWith(`${activeAdapter.id}:`)) {
         lockedTarget = resp.data.locked_target;
         renderTargetLockPill();
       }
@@ -1567,9 +1611,11 @@
 
   // Expose diagnostic & E2E verification bridge (mirrors HoYoLAB window.__GH_BRIDGE__)
   window.__GH_BRIDGE__ = {
+    tabId: GH_TAB_ID,
     providerId: activeAdapter.id,
     providerName: activeAdapter.name,
     capabilities: activeAdapter.capabilities,
+    isActiveOwner: () => isActiveOwnerTab,
     getContext: () => getLiveContext(),
     getCurrentMapId: () => {
       const ctx = getLiveContext();

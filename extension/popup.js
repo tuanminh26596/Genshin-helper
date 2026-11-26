@@ -602,23 +602,35 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   let cachedActiveProvider = null;
+  let cachedProviderCounts = null;
   const selectMapProvider = document.getElementById('select-map-provider');
 
-  function applyState({ connected, engineActive, statusData, lastSync, tabCount, activeProvider }) {
+  function applyState({ connected, engineActive, statusData, lastSync, tabCount, activeProvider, providerCounts }) {
     if (typeof connected === 'boolean') currentConnected = connected;
     if (typeof engineActive === 'boolean') currentEngineActive = engineActive;
     if (statusData !== undefined) currentLastStatus = statusData;
     if (typeof tabCount === 'number') cachedTabCount = tabCount;
-    if (typeof activeProvider === 'string' && activeProvider) {
+    if (providerCounts && typeof providerCounts === 'object') cachedProviderCounts = providerCounts;
+    const backendProv = (currentLastStatus && typeof currentLastStatus.active_map_provider === 'string' && currentLastStatus.active_map_provider)
+      ? currentLastStatus.active_map_provider
+      : null;
+    if (backendProv && currentConnected) {
+      cachedActiveProvider = backendProv;
+    } else if (typeof activeProvider === 'string' && activeProvider) {
       cachedActiveProvider = activeProvider;
     } else if (tabCount === 0) {
       cachedActiveProvider = null;
     }
 
     const baseTabText = t('popup.footer.map_tabs', { count: cachedTabCount });
+    const distinctSources = cachedProviderCounts
+      ? Object.values(cachedProviderCounts).filter((n) => Number(n) > 0).length
+      : 0;
     if (cachedTabCount > 0 && cachedActiveProvider && window.GHMapProviders) {
       const pMeta = window.GHMapProviders.getProvider(cachedActiveProvider);
-      mapTabStatus.textContent = `${pMeta.shortName} · ${baseTabText}`;
+      mapTabStatus.textContent = distinctSources >= 2
+        ? `★ ${pMeta.shortName} · ${baseTabText}`
+        : `${pMeta.shortName} · ${baseTabText}`;
     } else {
       mapTabStatus.textContent = baseTabText;
     }
@@ -849,7 +861,8 @@ document.addEventListener('DOMContentLoaded', () => {
         statusData: bgState.lastStatus || null,
         lastSync: bgState.lastSync !== undefined ? bgState.lastSync : currentLastSync,
         tabCount: typeof bgState.tabCount === 'number' ? bgState.tabCount : cachedTabCount,
-        activeProvider: bgState.activeProvider || (bgState.lastStatus && bgState.lastStatus.active_map_provider) || null
+        activeProvider: (bgState.lastStatus && bgState.lastStatus.active_map_provider) || bgState.activeProvider || null,
+        providerCounts: bgState.providerCounts || null
       });
       if (activeTabName === 'tools' && currentConnected) {
         refreshRouteStatus();

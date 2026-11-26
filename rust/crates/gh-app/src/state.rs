@@ -1879,11 +1879,16 @@ impl AppState {
         if !self.engine_active.load(Ordering::Acquire) {
             return;
         }
+        let active_prov = self.server.active_provider();
         let server_cb = self.server.clone();
         let cb = move || {
             server_cb.broadcast(json!({"type": "FOCUS_MAP_TAB"}), false, false);
         };
-        let target = WindowSwitcher::toggle_game_and_browser(&WINDOW_TITLES, Some(&cb));
+        let target = WindowSwitcher::toggle_game_and_browser_for_provider(
+            &WINDOW_TITLES,
+            Some(active_prov.as_str()),
+            Some(&cb),
+        );
         if target == "no_browser" {
             let rect = self
                 .game_state

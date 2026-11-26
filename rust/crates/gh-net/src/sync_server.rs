@@ -212,23 +212,63 @@ struct SyncInner {
     lifecycle: Mutex<ServerLifecycle>,
 }
 
-const PIN_OWNER_TTL_SECS: f64 = 12.0;
+const PIN_OWNER_TTL_SECS: f64 = 22.0;
 
-/// Tracks the single authoritative HoYoLAB map tab across ALL connected browsers/profiles
-/// (e.g. Chrome + Edge open simultaneously) so a background browser with different filters
-/// cannot silently overwrite the active browser's `/nearby_pins` or `/lan_pins`.
+fn normalize_provider_opt(raw: Option<&str>) -> Option<String> {
+    raw.map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty() && s.len() <= 32)
+}
+
+fn infer_provider_from_pin_id(pin_id: &str) -> Option<String> {
+    let trimmed = pin_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((prefix, rest)) = trimmed.split_once(':') {
+        let p = prefix.trim().to_ascii_lowercase();
+        if !p.is_empty()
+            && p.len() <= 32
+            && !rest.trim().is_empty()
+            && p.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        {
+            return Some(p);
+        }
+    }
+    if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return Some("hoyolab".to_owned());
+    }
+    None
+}
+
+/// Tracks the single authoritative map tab across ALL connected browsers/profiles
+/// (e.g. Chrome + Edge open simultaneously, same or different providers) so a background
+/// tab/browser cannot silently overwrite the active browser's `/nearby_pins`, `/lan_pins`,
+/// or steal `NAV_MARK_PIN` / `SYNC_AND_MARK` execution.
 #[derive(Debug, Clone)]
 struct PinOwnerState {
     tab_id: String,
+    provider: Option<String>,
     last_seen: Instant,
     visible: bool,
     focused: bool,
+}
+
+struct VisibilityOwnerUpdate<'a> {
+    tab_id: &'a str,
+    provider: Option<&'a str>,
+    visible: bool,
+    focused: Option<bool>,
+    interacted: bool,
+    closing: bool,
+    now: Instant,
 }
 
 impl SyncInner {
     fn claim_or_check_pin_owner(
         &self,
         tab_id: Option<&str>,
+        provider: Option<&str>,
         visible: Option<bool>,
         focused: Option<bool>,
         user_initiated: bool,
@@ -238,11 +278,15 @@ impl SyncInner {
             // Backward compatibility for callers/tests that omit `tab_id`.
             return true;
         };
+        let norm_prov = normalize_provider_opt(provider);
         let mut guard = self.pin_owner.lock().expect("pin_owner lock poisoned");
         if let Some(ref mut cur) = *guard
             && cur.tab_id == tid
         {
             cur.last_seen = now;
+            if let Some(p) = norm_prov {
+                cur.provider = Some(p);
+            }
             if let Some(v) = visible {
                 cur.visible = v;
             }
@@ -260,8 +304,9 @@ impl SyncInner {
         if owner_stale || user_initiated || new_focused || owner_hidden_and_new_visible {
             *guard = Some(PinOwnerState {
                 tab_id: tid.to_owned(),
+                provider: norm_prov,
                 last_seen: now,
-                visible: visible.unwrap_or(true),
+                visible: visible.unwrap_or_else(|| focused.unwrap_or(user_initiated)),
                 focused: focused.unwrap_or(user_initiated),
             });
             true
@@ -270,40 +315,59 @@ impl SyncInner {
         }
     }
 
-    fn update_pin_owner_from_visibility(
-        &self,
-        tab_id: &str,
-        visible: bool,
-        focused: Option<bool>,
-        interacted: bool,
-        closing: bool,
-        now: Instant,
-    ) {
+    fn update_pin_owner_from_visibility(&self, upd: VisibilityOwnerUpdate<'_>) -> bool {
+        let norm_prov = normalize_provider_opt(upd.provider);
         let mut guard = self.pin_owner.lock().expect("pin_owner lock poisoned");
-        if closing {
-            if guard.as_ref().is_some_and(|o| o.tab_id == tab_id) {
+        if upd.closing {
+            if guard.as_ref().is_some_and(|o| o.tab_id == upd.tab_id) {
                 *guard = None;
             }
-            return;
+            return false;
         }
-        if interacted || focused == Some(true) {
+        let owner_stale = guard
+            .as_ref()
+            .is_none_or(|o| upd.now.saturating_duration_since(o.last_seen).as_secs_f64() > PIN_OWNER_TTL_SECS);
+        let owner_hidden_and_new_visible =
+            guard.as_ref().is_some_and(|o| !o.visible) && upd.visible;
+        if upd.interacted
+            || upd.focused == Some(true)
+            || (upd.visible && (owner_stale || owner_hidden_and_new_visible))
+        {
+            let prev_prov = guard
+                .as_ref()
+                .filter(|o| o.tab_id == upd.tab_id)
+                .and_then(|o| o.provider.clone());
             *guard = Some(PinOwnerState {
-                tab_id: tab_id.to_owned(),
-                last_seen: now,
-                visible,
-                focused: focused.unwrap_or(true),
+                tab_id: upd.tab_id.to_owned(),
+                provider: norm_prov.or(prev_prov),
+                last_seen: upd.now,
+                visible: upd.visible,
+                focused: upd.focused.unwrap_or(upd.interacted),
             });
-            return;
+            return true;
         }
         if let Some(ref mut cur) = *guard
-            && cur.tab_id == tab_id
+            && cur.tab_id == upd.tab_id
         {
-            cur.visible = visible;
-            cur.last_seen = now;
-            if let Some(f) = focused {
+            cur.visible = upd.visible;
+            cur.last_seen = upd.now;
+            if let Some(p) = norm_prov {
+                cur.provider = Some(p);
+            }
+            if let Some(f) = upd.focused {
                 cur.focused = f;
             }
+            return true;
         }
+        false
+    }
+
+    fn current_owner_snapshot(&self, now: Instant) -> Option<(String, Option<String>)> {
+        let guard = self.pin_owner.lock().expect("pin_owner lock poisoned");
+        guard
+            .as_ref()
+            .filter(|o| now.saturating_duration_since(o.last_seen).as_secs_f64() <= PIN_OWNER_TTL_SECS)
+            .map(|o| (o.tab_id.clone(), o.provider.clone()))
     }
 
     /// Updates the active map provider if `raw_provider` differs from the current one.
@@ -449,6 +513,12 @@ impl SyncServer {
 
     pub fn active_provider(&self) -> String {
         self.inner.current_provider()
+    }
+
+    pub fn active_owner_tab_id(&self) -> Option<String> {
+        self.inner
+            .current_owner_snapshot(Instant::now())
+            .map(|(tid, _)| tid)
     }
 
     /// Returns `true` when `/shutdown` was initiated by a native Setup/Uninstaller process that
@@ -1020,6 +1090,50 @@ fn broadcast_inner(
             .unwrap_or("UNKNOWN")
             .to_owned();
 
+        // Stamp target_provider & owner_tab_id on routed/side-effecting events so multiple
+        // open tabs/browsers (same or different providers) never double-mark, cross-talk
+        // target lock pills/TSP overlays, or steal window focus on Alt+Q.
+        if matches!(
+            msg_type.as_str(),
+            "NAV_MARK_PIN"
+                | "SYNC_AND_MARK"
+                | "TARGET_LOCK_UPDATED"
+                | "TSP_ROUTE_UPDATED"
+                | "FOCUS_MAP_TAB"
+                | "LAN_FOCUS_PIN"
+                | "LAN_SET_FLOOR"
+        ) {
+            let inferred_prov = match msg_type.as_str() {
+                "NAV_MARK_PIN" => stamped
+                    .get("pin_id")
+                    .and_then(Value::as_str)
+                    .and_then(infer_provider_from_pin_id),
+                "TARGET_LOCK_UPDATED" => stamped
+                    .get("locked_target")
+                    .and_then(Value::as_object)
+                    .and_then(|o| o.get("id"))
+                    .and_then(Value::as_str)
+                    .and_then(infer_provider_from_pin_id),
+                _ => None,
+            };
+            let target_prov = stamped
+                .get("target_provider")
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .or(inferred_prov)
+                .unwrap_or_else(|| inner.current_provider());
+            stamped
+                .entry("target_provider".to_owned())
+                .or_insert_with(|| Value::String(target_prov.clone()));
+            if !stamped.contains_key("owner_tab_id")
+                && let Some((owner_tid, owner_prov)) = inner.current_owner_snapshot(Instant::now())
+                && owner_prov.as_deref().is_none_or(|p| p == target_prov)
+            {
+                stamped.insert("owner_tab_id".to_owned(), Value::String(owner_tid));
+            }
+        }
+
         let stamped_val = Value::Object(stamped);
 
         if ephemeral {
@@ -1474,8 +1588,23 @@ async fn handle_tab_visibility(
     let focused = req.get("focused").and_then(Value::as_bool);
     let interacted = req.get("interacted").and_then(Value::as_bool).unwrap_or(false);
     let closing = req.get("closing").and_then(Value::as_bool).unwrap_or(false);
+    let provider_id = req
+        .get("provider_id")
+        .or_else(|| req.get("provider"))
+        .and_then(Value::as_str);
     let now = Instant::now();
-    inner.update_pin_owner_from_visibility(&tab_id, visible, focused, interacted, closing, now);
+    let is_owner = inner.update_pin_owner_from_visibility(VisibilityOwnerUpdate {
+        tab_id: &tab_id,
+        provider: provider_id,
+        visible,
+        focused,
+        interacted,
+        closing,
+        now,
+    });
+    if is_owner && (interacted || focused == Some(true) || visible) {
+        notify_provider_if_switched(&inner, provider_id).await;
+    }
     let any_visible = {
         let mut tabs = inner
             .tab_visibility
@@ -1495,9 +1624,18 @@ async fn handle_tab_visibility(
         }
         any_tab_visible_at(&tabs, now, TAB_VISIBLE_TTL_SECS)
     };
+    let active_provider = inner.current_provider();
+    let owner_tab_id = inner.current_owner_snapshot(now).map(|(tid, _)| tid);
     json_response(
         StatusCode::OK,
-        &json!({"ok": true, "visible": visible, "any_visible": any_visible}),
+        &json!({
+            "ok": true,
+            "visible": visible,
+            "any_visible": any_visible,
+            "is_owner": is_owner,
+            "owner_tab_id": owner_tab_id,
+            "active_provider": active_provider,
+        }),
     )
 }
 
@@ -2049,13 +2187,20 @@ async fn handle_report_state(
         .filter(|s| !s.is_empty());
     let visible = req_map.get("tab_visible").and_then(Value::as_bool);
     let focused = req_map.get("tab_focused").and_then(Value::as_bool);
-    if !inner.claim_or_check_pin_owner(tab_id, visible, focused, false, Instant::now()) {
-        return json_response(StatusCode::OK, &json!({"ignored_secondary_client": true}));
-    }
     let provider_id = req_map
         .get("provider_id")
         .or_else(|| req_map.get("provider"))
         .and_then(Value::as_str);
+    if !inner.claim_or_check_pin_owner(tab_id, provider_id, visible, focused, false, Instant::now()) {
+        return json_response(
+            StatusCode::OK,
+            &json!({
+                "ignored_secondary_client": true,
+                "is_owner": false,
+                "active_provider": inner.current_provider(),
+            }),
+        );
+    }
     notify_provider_if_switched(&inner, provider_id).await;
     if !req_map.is_empty() {
         let mut st = inner
@@ -2980,16 +3125,22 @@ async fn handle_nearby_pins(
         .get("user_initiated")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if !inner.claim_or_check_pin_owner(tab_id, visible, focused, user_initiated, Instant::now()) {
-        return json_response(
-            StatusCode::OK,
-            &json!({"ok": true, "count": 0, "ignored_secondary_client": true}),
-        );
-    }
     let provider_id = req
         .get("provider_id")
         .or_else(|| req.get("provider"))
         .and_then(Value::as_str);
+    if !inner.claim_or_check_pin_owner(tab_id, provider_id, visible, focused, user_initiated, Instant::now()) {
+        return json_response(
+            StatusCode::OK,
+            &json!({
+                "ok": true,
+                "count": 0,
+                "ignored_secondary_client": true,
+                "is_owner": false,
+                "active_provider": inner.current_provider(),
+            }),
+        );
+    }
     notify_provider_if_switched(&inner, provider_id).await;
     let map_id = json_i64(req.get("map_id")).unwrap_or(2) as i32;
     let raw_pins = req
@@ -3041,7 +3192,15 @@ async fn handle_nearby_pins(
         n
     };
 
-    json_response(StatusCode::OK, &json!({"ok": true, "count": count}))
+    json_response(
+        StatusCode::OK,
+        &json!({
+            "ok": true,
+            "count": count,
+            "is_owner": true,
+            "active_provider": inner.current_provider(),
+        }),
+    )
 }
 
 async fn handle_nav_command(
@@ -3050,9 +3209,32 @@ async fn handle_nav_command(
 ) -> Response {
     mark_client_poll(&inner);
     let req = parse_lenient_json_map(&body);
+    let inferred_pin_prov = req
+        .get("pin")
+        .and_then(Value::as_object)
+        .and_then(|o| o.get("id"))
+        .or_else(|| req.get("pin_id"))
+        .and_then(Value::as_str)
+        .and_then(infer_provider_from_pin_id);
+    let req_prov = req
+        .get("provider_id")
+        .or_else(|| req.get("provider"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or(inferred_pin_prov);
     if let Some(tab_id) = req.get("tab_id").and_then(Value::as_str) {
         // User-initiated Navigate / lock_target from a browser tab promotes that tab as pin owner.
-        let _ = inner.claim_or_check_pin_owner(Some(tab_id), Some(true), Some(true), true, Instant::now());
+        let _ = inner.claim_or_check_pin_owner(
+            Some(tab_id),
+            req_prov.as_deref(),
+            Some(true),
+            Some(true),
+            true,
+            Instant::now(),
+        );
+    }
+    if req_prov.is_some() {
+        notify_provider_if_switched(&inner, req_prov.as_deref()).await;
     }
     let action_str = json_str_trimmed(req.get("action")).to_ascii_lowercase();
     let is_lock_action = matches!(
@@ -3904,16 +4086,22 @@ async fn handle_lan_pins(State(inner): State<Arc<SyncInner>>, body: Bytes) -> Re
             .get("user_initiated")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if !inner.claim_or_check_pin_owner(tab_id, visible, focused, user_initiated, Instant::now()) {
-            return json_response(
-                StatusCode::OK,
-                &json!({"ok": true, "rev": 0, "ignored_secondary_client": true}),
-            );
-        }
         let provider_id = obj
             .get("provider_id")
             .or_else(|| obj.get("provider"))
             .and_then(Value::as_str);
+        if !inner.claim_or_check_pin_owner(tab_id, provider_id, visible, focused, user_initiated, Instant::now()) {
+            return json_response(
+                StatusCode::OK,
+                &json!({
+                    "ok": true,
+                    "rev": 0,
+                    "ignored_secondary_client": true,
+                    "is_owner": false,
+                    "active_provider": inner.current_provider(),
+                }),
+            );
+        }
         notify_provider_if_switched(&inner, provider_id).await;
     }
     let cb_opt = inner
@@ -6319,6 +6507,151 @@ mod tests {
             .unwrap();
         assert_eq!(r5["count"], 1);
         assert!(r5.get("ignored_secondary_client").is_none());
+
+        srv.stop().await;
+    }
+
+    #[tokio::test]
+    async fn multi_browser_different_providers_owner_routing_and_isolation() {
+        let srv = SyncServer::new(SyncServerConfig::default());
+        let port = srv.start().await.expect("start sync server");
+        let base = format!("http://127.0.0.1:{port}");
+        let cli = reqwest::Client::new();
+
+        // 1. Browser 1 (Chrome) interacts on HoYoLAB -> becomes authoritative owner & provider.
+        let v_hl: Value = cli
+            .post(format!("{base}/tab_visibility"))
+            .json(&json!({
+                "tab_id": "chrome_hl",
+                "provider_id": "hoyolab",
+                "visible": true,
+                "focused": true,
+                "interacted": true
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v_hl["is_owner"], true);
+        assert_eq!(v_hl["active_provider"], "hoyolab");
+        assert_eq!(srv.active_provider(), "hoyolab");
+        assert_eq!(srv.active_owner_tab_id().as_deref(), Some("chrome_hl"));
+
+        // 2. Browser 2 (Edge) has AppSample open simultaneously (visible on 2nd monitor or
+        //    missing tab_visible in background timer) -> MUST NOT steal ownership or ping-pong.
+        let rs_bg: Value = cli
+            .post(format!("{base}/report_state"))
+            .json(&json!({
+                "tab_id": "edge_as",
+                "provider_id": "appsample",
+                "map_id": 2
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(rs_bg["ignored_secondary_client"], true);
+        assert_eq!(rs_bg["is_owner"], false);
+        assert_eq!(srv.active_provider(), "hoyolab");
+
+        let np_bg: Value = cli
+            .post(format!("{base}/nearby_pins"))
+            .json(&json!({
+                "tab_id": "edge_as",
+                "provider_id": "appsample",
+                "tab_visible": true,
+                "tab_focused": false,
+                "user_initiated": false,
+                "map_id": 2,
+                "lat": 0.0,
+                "lng": 0.0,
+                "pins": [{"id": "appsample:301", "name": "Anemoculus", "lat": 1.0, "lng": 2.0}]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(np_bg["ignored_secondary_client"], true);
+        assert_eq!(srv.active_provider(), "hoyolab");
+
+        // 3. Broadcast NAV_MARK_PIN for HoYoLAB -> stamped with target_provider=hoyolab & owner_tab_id=chrome_hl.
+        let seq0 = srv.latest_seq();
+        srv.broadcast(
+            json!({"type": "NAV_MARK_PIN", "action": "mark", "pin_id": "12345", "map_id": 2}),
+            false,
+            false,
+        );
+        let ev_hl: Value = cli
+            .get(format!("{base}/poll?since={seq0}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(ev_hl["type"], "NAV_MARK_PIN");
+        assert_eq!(ev_hl["target_provider"], "hoyolab");
+        assert_eq!(ev_hl["owner_tab_id"], "chrome_hl");
+
+        // 4. User switches focus to Edge AppSample tab -> ownership & provider switch immediately.
+        let v_as: Value = cli
+            .post(format!("{base}/tab_visibility"))
+            .json(&json!({
+                "tab_id": "edge_as",
+                "provider_id": "appsample",
+                "visible": true,
+                "focused": true,
+                "interacted": true
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v_as["is_owner"], true);
+        assert_eq!(v_as["active_provider"], "appsample");
+        assert_eq!(srv.active_provider(), "appsample");
+        assert_eq!(srv.active_owner_tab_id().as_deref(), Some("edge_as"));
+
+        // 5. FOCUS_MAP_TAB & AppSample NAV_MARK_PIN now target appsample + edge_as.
+        let seq1 = srv.latest_seq();
+        srv.broadcast(json!({"type": "FOCUS_MAP_TAB"}), false, false);
+        let ev_focus: Value = cli
+            .get(format!("{base}/poll?since={seq1}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(ev_focus["type"], "FOCUS_MAP_TAB");
+        assert_eq!(ev_focus["target_provider"], "appsample");
+        assert_eq!(ev_focus["owner_tab_id"], "edge_as");
+
+        // 6. Foreign Kongying NAV_MARK_PIN infers target_provider=kongying and does NOT stamp edge_as as owner.
+        let seq2 = srv.latest_seq();
+        srv.broadcast(
+            json!({"type": "NAV_MARK_PIN", "action": "mark", "pin_id": "kongying:777", "map_id": 2}),
+            false,
+            false,
+        );
+        let ev_ky: Value = cli
+            .get(format!("{base}/poll?since={seq2}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(ev_ky["target_provider"], "kongying");
+        assert!(ev_ky.get("owner_tab_id").is_none());
 
         srv.stop().await;
     }

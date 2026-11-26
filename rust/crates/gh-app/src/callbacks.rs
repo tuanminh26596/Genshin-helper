@@ -254,12 +254,16 @@ impl ServerCallbacks for AppServerCallbacks {
     }
 
     fn on_quick_switch(&self) -> CoreResult<String> {
+        let active_prov = self.state.server.active_provider();
         let server_cb = self.state.server.clone();
         let cb = move || {
             server_cb.broadcast(json!({"type": "FOCUS_MAP_TAB"}), false, false);
         };
-        let target =
-            WindowSwitcher::toggle_game_and_browser(&crate::state::WINDOW_TITLES, Some(&cb));
+        let target = WindowSwitcher::toggle_game_and_browser_for_provider(
+            &crate::state::WINDOW_TITLES,
+            Some(active_prov.as_str()),
+            Some(&cb),
+        );
         Ok(target.to_owned())
     }
 

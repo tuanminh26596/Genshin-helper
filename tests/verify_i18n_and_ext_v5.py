@@ -172,6 +172,26 @@ def verify_extension_i18n_and_manifest() -> None:
     missing_provider_rt = sorted(provider_rt_keys - set(ext_en.keys()))
     assert not missing_provider_rt, f"Undefined i18n keys referenced in provider_runtime.js: {missing_provider_rt}"
     assert "__GH_REGISTER_MAP_PROVIDER__" in provider_rt, "Missing Open Provider SDK hook in provider_runtime.js"
+    # Multi-tab / multi-browser safety invariants
+    assert "if (!fullId.startsWith(prefix) || !isEventForThisProviderTab(data))" in provider_rt, (
+        "provider_runtime.js must strictly require provider prefix & owner match on NAV_MARK_PIN"
+    )
+    assert "tab_visible: !document.hidden" in provider_rt and "tab_focused:" in provider_rt, (
+        "provider_runtime.js must report tab_visible/tab_focused in reportState()"
+    )
+    assert "!document.hidden && (isManualSync || isActiveOwnerTab)" in provider_rt, (
+        "provider_runtime.js must guard switchMap against background tab reload storms"
+    )
+    assert "rawPinId.includes(':')" in page_main and "isEventForThisHoyolabTab" in page_main, (
+        "page_main.js must ignore foreign namespaced pin_ids and non-owner events"
+    )
+    bg_txt = _read_text("extension/background.js")
+    assert "{ requiredProvider: 'hoyolab' }" in bg_txt, (
+        "background.js must route GH_CMD_EXPORT_PINS strictly to a HoYoLAB tab"
+    )
+    assert "if (!hasMatchingProvider) return;" in bg_txt, (
+        "background.js focusBestMapTab must not steal window focus in a browser lacking target_provider"
+    )
 
     # Verify Tier 1 multi-provider permissions & content scripts in manifest.json
     host_perms = set(manifest.get("host_permissions", []))

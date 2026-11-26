@@ -16,6 +16,13 @@ pub trait SwitcherOps {
     fn foreground_hwnd(&self) -> isize;
     fn find_game_window_any_state(&self, titles: &[&str]) -> Option<isize>;
     fn find_browser_window_any_state(&self, specific_only: bool) -> Option<isize>;
+    fn find_browser_window_for_provider(
+        &self,
+        _preferred_provider: Option<&str>,
+        specific_only: bool,
+    ) -> Option<isize> {
+        self.find_browser_window_any_state(specific_only)
+    }
     fn focus_window(&self, hwnd: isize) -> bool;
 }
 
@@ -35,6 +42,14 @@ impl SwitcherOps for Win32SwitcherOps {
 
     fn find_browser_window_any_state(&self, specific_only: bool) -> Option<isize> {
         WindowFinder::find_browser_window_any_state(specific_only)
+    }
+
+    fn find_browser_window_for_provider(
+        &self,
+        preferred_provider: Option<&str>,
+        specific_only: bool,
+    ) -> Option<isize> {
+        WindowFinder::find_browser_window_for_provider(preferred_provider, specific_only)
     }
 
     fn focus_window(&self, hwnd: isize) -> bool {
@@ -60,12 +75,20 @@ impl SwitcherOps for SandboxSwitcherOps {
         Win32SwitcherOps.find_browser_window_any_state(specific_only)
     }
 
+    fn find_browser_window_for_provider(
+        &self,
+        preferred_provider: Option<&str>,
+        specific_only: bool,
+    ) -> Option<isize> {
+        Win32SwitcherOps.find_browser_window_for_provider(preferred_provider, specific_only)
+    }
+
     fn focus_window(&self, _hwnd: isize) -> bool {
         true
     }
 }
 
-/// Single-Monitor quick toggle between Genshin Impact and HoYoLAB Interactive Map.
+/// Single-Monitor quick toggle between Genshin Impact and the active interactive map browser.
 pub struct WindowSwitcher;
 
 impl WindowSwitcher {
@@ -78,18 +101,30 @@ impl WindowSwitcher {
         titles: &[&str],
         on_focus_browser_tab: Option<&dyn Fn()>,
     ) -> &'static str {
+        Self::toggle_game_and_browser_for_provider(titles, None, on_focus_browser_tab)
+    }
+
+    /// Provider-aware toggle: prioritizes the browser window hosting `preferred_provider`
+    /// when multiple browsers with different map sources are open simultaneously.
+    pub fn toggle_game_and_browser_for_provider(
+        titles: &[&str],
+        preferred_provider: Option<&str>,
+        on_focus_browser_tab: Option<&dyn Fn()>,
+    ) -> &'static str {
         if crate::runtime::is_desktop_sandbox_env() {
-            return Self::toggle_with_ops(
+            return Self::toggle_with_ops_for_provider(
                 &SandboxSwitcherOps,
                 titles,
+                preferred_provider,
                 on_focus_browser_tab,
                 FOCUS_TAB_POLL_TIMEOUT,
                 FOCUS_TAB_POLL_INTERVAL,
             );
         }
-        Self::toggle_with_ops(
+        Self::toggle_with_ops_for_provider(
             &Win32SwitcherOps,
             titles,
+            preferred_provider,
             on_focus_browser_tab,
             FOCUS_TAB_POLL_TIMEOUT,
             FOCUS_TAB_POLL_INTERVAL,
@@ -100,6 +135,24 @@ impl WindowSwitcher {
     pub fn toggle_with_ops<O: SwitcherOps>(
         ops: &O,
         titles: &[&str],
+        on_focus_browser_tab: Option<&dyn Fn()>,
+        poll_timeout: Duration,
+        poll_interval: Duration,
+    ) -> &'static str {
+        Self::toggle_with_ops_for_provider(
+            ops,
+            titles,
+            None,
+            on_focus_browser_tab,
+            poll_timeout,
+            poll_interval,
+        )
+    }
+
+    pub fn toggle_with_ops_for_provider<O: SwitcherOps>(
+        ops: &O,
+        titles: &[&str],
+        preferred_provider: Option<&str>,
         on_focus_browser_tab: Option<&dyn Fn()>,
         poll_timeout: Duration,
         poll_interval: Duration,
@@ -116,7 +169,7 @@ impl WindowSwitcher {
                 let _ = catch_unwind(AssertUnwindSafe(cb));
                 let deadline = Instant::now() + poll_timeout;
                 while Instant::now() < deadline {
-                    browser_hwnd = ops.find_browser_window_any_state(true);
+                    browser_hwnd = ops.find_browser_window_for_provider(preferred_provider, true);
                     if browser_hwnd.is_some() {
                         break;
                     }
@@ -124,7 +177,7 @@ impl WindowSwitcher {
                 }
             }
             if browser_hwnd.is_none() {
-                browser_hwnd = ops.find_browser_window_any_state(false);
+                browser_hwnd = ops.find_browser_window_for_provider(preferred_provider, false);
             }
             if let Some(browser) = browser_hwnd {
                 ops.focus_window(browser);
@@ -138,7 +191,7 @@ impl WindowSwitcher {
             return "game";
         }
 
-        if let Some(browser) = ops.find_browser_window_any_state(false) {
+        if let Some(browser) = ops.find_browser_window_for_provider(preferred_provider, false) {
             ops.focus_window(browser);
             return "browser";
         }

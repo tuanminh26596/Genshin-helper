@@ -682,10 +682,26 @@ function scheduleNextPoll(gen, delayMs) {
   }, delayMs);
 }
 
-async function focusBestMapTab() {
+async function focusBestMapTab(targetProvider = null) {
   try {
     const tabs = await chrome.tabs.query({ url: GHMapProviders.ALL_TAB_QUERY_URLS });
     if (!Array.isArray(tabs) || tabs.length === 0) return;
+
+    const wantedProvider = (typeof targetProvider === 'string' && targetProvider.trim())
+      ? targetProvider.trim().toLowerCase()
+      : ((lastStatus && typeof lastStatus.active_map_provider === 'string' && lastStatus.active_map_provider.trim())
+          ? lastStatus.active_map_provider.trim().toLowerCase()
+          : null);
+
+    // Multi-browser guard: when the desktop app explicitly requests a specific provider
+    // (e.g. Edge has AppSample while Chrome has HoYoLAB), a browser that does NOT host any
+    // tab for `wantedProvider` MUST NOT call windows.update(focused:true) and steal focus.
+    if (wantedProvider) {
+      const hasMatchingProvider = tabs.some(
+        (t) => t && typeof t.url === 'string' && GHMapProviders.detectProviderFromUrl(t.url) === wantedProvider
+      );
+      if (!hasMatchingProvider) return;
+    }
 
     const connectedTabIds = new Set();
     for (const port of ports) {
@@ -695,8 +711,10 @@ async function focusBestMapTab() {
 
     const scoreTab = (t) => {
       const url = String((t && t.url) || '');
+      const prov = GHMapProviders.detectProviderFromUrl(url);
       let score = 0;
-      if (GHMapProviders.isSupportedMapUrl(url)) score += 100;
+      if (prov) score += 100;
+      if (wantedProvider && prov === wantedProvider) score += 80;
       if (typeof primaryMapTabId === 'number' && t && t.id === primaryMapTabId) score += 40;
       if (connectedTabIds.has(t.id)) score += 20;
       if (t.active) score += 5;
@@ -770,7 +788,7 @@ async function pollLoop(gen) {
         syncStatusCacheFromEvent(data);
         setConnectionState(true);
         if (data.type === 'FOCUS_MAP_TAB') {
-          focusBestMapTab();
+          focusBestMapTab(data.target_provider || null);
         }
         if (data.type === 'DIAGNOSTIC_CAPTURED' && data.folder_name) {
           attachHoYoLABViewportToBundle(data.folder_name);
@@ -995,7 +1013,7 @@ function reinjectOpenMapTabs(opts = {}) {
   });
 }
 
-function forwardCommandToMapTab(cmdType, payload = {}, broadcastAll = false) {
+function forwardCommandToMapTab(cmdType, payload = {}, broadcastAll = false, opts = {}) {
   return new Promise(async (resolve) => {
     if (ports.size === 0) {
       await reinjectOpenMapTabs();
@@ -1003,9 +1021,31 @@ function forwardCommandToMapTab(cmdType, payload = {}, broadcastAll = false) {
         await sleep(220);
       }
     }
-    const activePorts = Array.from(ports);
+    const requiredProvider = (opts && typeof opts.requiredProvider === 'string' && opts.requiredProvider.trim())
+      ? opts.requiredProvider.trim().toLowerCase()
+      : null;
+    const preferredProvider = requiredProvider
+      || (opts && typeof opts.preferredProvider === 'string' && opts.preferredProvider.trim()
+          ? opts.preferredProvider.trim().toLowerCase()
+          : ((lastStatus && typeof lastStatus.active_map_provider === 'string' && lastStatus.active_map_provider.trim())
+              ? lastStatus.active_map_provider.trim().toLowerCase()
+              : null));
+
+    const allPorts = Array.from(ports);
+    const activePorts = requiredProvider
+      ? allPorts.filter((p) => {
+          const url = p && p.sender && p.sender.tab && p.sender.tab.url;
+          return GHMapProviders.detectProviderFromUrl(url) === requiredProvider;
+        })
+      : allPorts;
     if (activePorts.length === 0) {
-      resolve({ ok: false, noTab: true, error: 'No HoYoLAB Map tab connected' });
+      resolve({
+        ok: false,
+        noTab: true,
+        error: requiredProvider === 'hoyolab'
+          ? 'No HoYoLAB Map tab connected'
+          : 'No supported Map tab connected'
+      });
       return;
     }
 
@@ -1037,6 +1077,12 @@ function forwardCommandToMapTab(cmdType, payload = {}, broadcastAll = false) {
       if (typeof preferredTabId === 'number') {
         chosen = activePorts.find((p) => p && p.sender && p.sender.tab && p.sender.tab.id === preferredTabId) || null;
       }
+      if (!chosen && preferredProvider) {
+        chosen = activePorts.find((p) => {
+          const url = p && p.sender && p.sender.tab && p.sender.tab.url;
+          return GHMapProviders.detectProviderFromUrl(url) === preferredProvider;
+        }) || null;
+      }
       if (!chosen) {
         chosen = activePorts.find((p) => p && p.sender && p.sender.tab && p.sender.tab.active) || activePorts[activePorts.length - 1];
       }
@@ -1059,13 +1105,22 @@ function forwardCommandToMapTab(cmdType, payload = {}, broadcastAll = false) {
     try {
       chrome.tabs.query({ url: GHMapProviders.ALL_TAB_QUERY_URLS }, (tabs) => {
         void chrome.runtime.lastError;
-        const activeMapTab = Array.isArray(tabs)
-          ? (
-              tabs.find((t) => t && t.active && typeof t.url === 'string' && GHMapProviders.isSupportedMapUrl(t.url)) ||
-              tabs.find((t) => t && typeof t.id === 'number' && t.id === primaryMapTabId) ||
-              tabs.find((t) => t && typeof t.url === 'string' && GHMapProviders.isSupportedMapUrl(t.url))
-            )
-          : null;
+        const filtered = Array.isArray(tabs)
+          ? tabs.filter((t) => {
+              if (!t || typeof t.url !== 'string') return false;
+              const p = GHMapProviders.detectProviderFromUrl(t.url);
+              if (!p) return false;
+              return !requiredProvider || p === requiredProvider;
+            })
+          : [];
+        const activeMapTab =
+          (preferredProvider && filtered.find((t) => t.active && GHMapProviders.detectProviderFromUrl(t.url) === preferredProvider)) ||
+          (preferredProvider && filtered.find((t) => t.id === primaryMapTabId && GHMapProviders.detectProviderFromUrl(t.url) === preferredProvider)) ||
+          (preferredProvider && filtered.find((t) => GHMapProviders.detectProviderFromUrl(t.url) === preferredProvider)) ||
+          filtered.find((t) => t.active) ||
+          filtered.find((t) => typeof t.id === 'number' && t.id === primaryMapTabId) ||
+          filtered[0] ||
+          null;
         pickAndSend(activeMapTab && typeof activeMapTab.id === 'number' ? activeMapTab.id : null);
       });
     } catch (e) {
@@ -1140,8 +1195,17 @@ function captureHoYoLABMapViewport() {
         }
 
         const pickTab = async () => {
-          let chosen = candidates[0];
-          for (const t of candidates) {
+          const activeProv = (lastStatus && typeof lastStatus.active_map_provider === 'string' && lastStatus.active_map_provider.trim())
+            ? lastStatus.active_map_provider.trim().toLowerCase()
+            : null;
+          const orderedCandidates = activeProv
+            ? [
+                ...candidates.filter((t) => GHMapProviders.detectProviderFromUrl(t.url) === activeProv),
+                ...candidates.filter((t) => GHMapProviders.detectProviderFromUrl(t.url) !== activeProv)
+              ]
+            : candidates;
+          let chosen = orderedCandidates[0];
+          for (const t of orderedCandidates) {
             try {
               const win = await new Promise((resWin) => {
                 chrome.windows.get(t.windowId, (w) => {
@@ -1328,7 +1392,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.kind === 'GH_CMD_EXPORT_PINS') {
     const targetFormat = typeof msg.targetFormat === 'string' ? msg.targetFormat : 'canonical';
-    forwardCommandToMapTab('GH_CMD_EXPORT_PINS', { targetFormat }, false).then(sendResponse);
+    forwardCommandToMapTab('GH_CMD_EXPORT_PINS', { targetFormat }, false, { requiredProvider: 'hoyolab' }).then(sendResponse);
     return true;
   }
 

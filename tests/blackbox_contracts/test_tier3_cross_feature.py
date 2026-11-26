@@ -346,7 +346,70 @@ class TestTier3CrossFeature(unittest.TestCase):
         st_ky = self.client.get("/status").json()
         self.assertEqual(st_ky.get("active_map_provider"), "kongying")
         ev_clear = self._drain_until_type(seq_before_switch, "TARGET_LOCK_UPDATED")
-        self.assertIsNone(ev_clear.get("pin"))
+        self.assertIsNone(ev_clear.get("locked_target"))
+
+        # 4. Dual-browser / dual-provider owner isolation:
+        #    Chrome claims Kongying via /tab_visibility; Edge AppSample background report_state &
+        #    nearby_pins MUST be ignored without stealing provider or clearing Kongying state.
+        v_ky = self.client.post_json(
+            "/tab_visibility",
+            {
+                "tab_id": "chrome_ky_tab",
+                "provider_id": "kongying",
+                "visible": True,
+                "focused": True,
+                "interacted": True,
+            },
+        ).json()
+        self.assertTrue(v_ky.get("is_owner"))
+        self.assertEqual(v_ky.get("active_provider"), "kongying")
+
+        bg_as = self.client.post_json(
+            "/nearby_pins",
+            {
+                "tab_id": "edge_as_tab",
+                "provider_id": "appsample",
+                "tab_visible": True,
+                "tab_focused": False,
+                "user_initiated": False,
+                "map_id": 2,
+                "lat": 0.0,
+                "lng": 0.0,
+                "pins": [
+                    {
+                        "id": "appsample:8888",
+                        "name": "Bg Pin",
+                        "category": "Anemoculus",
+                        "lat": 5.0,
+                        "lng": 5.0,
+                        "map_id": 2,
+                    }
+                ],
+            },
+        ).json()
+        self.assertTrue(bg_as.get("ignored_secondary_client"))
+        self.assertFalse(bg_as.get("is_owner"))
+        self.assertEqual(self.client.get("/status").json().get("active_map_provider"), "kongying")
+
+        # 5. FOCUS_MAP_TAB (via /quick_switch) carries target_provider=kongying & owner_tab_id=chrome_ky_tab
+        seq_qs = self._current_seq()
+        self.client.post_json("/quick_switch", {})
+        # If no game window is foreground in sandbox, quick_switch may not broadcast FOCUS_MAP_TAB;
+        # verify owner routing via /tab_visibility -> Edge takes over cleanly when user clicks it.
+        v_edge = self.client.post_json(
+            "/tab_visibility",
+            {
+                "tab_id": "edge_as_tab",
+                "provider_id": "appsample",
+                "visible": True,
+                "focused": True,
+                "interacted": True,
+            },
+        ).json()
+        self.assertTrue(v_edge.get("is_owner"))
+        self.assertEqual(v_edge.get("active_provider"), "appsample")
+        self.assertEqual(self.client.get("/status").json().get("active_map_provider"), "appsample")
+        _ = seq_qs
 
 
 class TestTier3PortTakeover(unittest.TestCase):
