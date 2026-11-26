@@ -4894,7 +4894,7 @@
             return markedFetchInFlight.get(mid);
         }
         const apiLang = (window.GHI18n && window.GHI18n.getLang() === 'vi') ? 'vi-vn' : 'en-us';
-        const url = `https://sg-public-api.hoyolab.com/common/map_user/ys_obc/v1/map/mark_map_point_list?map_id=${encodeURIComponent(mid)}&app_sn=ys_obc&lang=${encodeURIComponent(apiLang)}`;
+        const url = `https://sg-public-api.hoyolab.com/common/map_user/ys_obc/v1/map/point/mark_map_point_list?map_id=${encodeURIComponent(mid)}&app_sn=ys_obc&lang=${encodeURIComponent(apiLang)}`;
         const p = _fetchHoyolabOriginJson(url)
             .then((env) => {
                 if (env && (env.retcode === 0 || env.retcode === undefined)) {
@@ -6210,7 +6210,7 @@
         try {
             // Fetch FULL point/list WITHOUT narrow label_ids filter so hidden categories are never dropped
             const pointListUrl = `${apiBase}/v2/map/point/list?map_id=${encodeURIComponent(mapId)}&app_sn=ys_obc&lang=${encodeURIComponent(apiLang)}`;
-            const markedListUrl = `${apiBase}/v1/map/mark_map_point_list?map_id=${encodeURIComponent(mapId)}&app_sn=ys_obc&lang=${encodeURIComponent(apiLang)}`;
+            const markedListUrl = `${apiBase}/v1/map/point/mark_map_point_list?map_id=${encodeURIComponent(mapId)}&app_sn=ys_obc&lang=${encodeURIComponent(apiLang)}`;
 
             const [pointListEnvelope, markedListEnvelope] = await Promise.all([
                 _fetchHoyolabOriginJson(pointListUrl),
@@ -7423,6 +7423,18 @@
         clearTspRouteFromMap,
         requestPlanTspRoute,
         exportMarkedPins,
+        refreshMarkedPins: (mapId) => {
+            const mid = (mapId !== undefined && mapId !== null) ? Number(mapId) : getCurrentWebMapId();
+            cachedMarkedFetchedAt.delete(mid);
+            const ctx = findMapContext();
+            const vm = resolveGisVm(ctx);
+            if (vm && typeof vm.initMarkStatus === 'function') {
+                try { vm.initMarkStatus(); } catch (e) {}
+            } else if (vm && typeof vm.$gemit === 'function') {
+                try { vm.$gemit('markStatusChanged'); } catch (e) {}
+            }
+            return _refreshMarkedPinIds(mid, true);
+        },
         getActiveRoute: () => activeWebRoute,
         isRouteInspecting: () => routeInspecting,
         setRouteInspecting: (v) => {

@@ -3758,6 +3758,19 @@ pub fn execute_cross_map_export(
     };
 
     let Some(affine) = affine else {
+        // Appsample v5 has calibrated multi-affine regional seeds (Teyvat Mainland/Inazuma/Nod-Krai
+        // + all 6 permanent sub-maps), so export succeeds cleanly even without an explicit affine.
+        if format == ExportFormat::Appsample {
+            return crate::cross_map_import::export_hoyolab_to_appsample_v5(
+                &source_pins,
+                if raw_targets.is_null() {
+                    None
+                } else {
+                    Some(raw_targets)
+                },
+                map_id,
+            );
+        }
         return Ok(json!({
             "ok": false,
             "format": format_str,
@@ -4829,7 +4842,7 @@ mod tests {
     #[test]
     fn category_aliases_n_to_1_and_duplicate_rejection() {
         let reg = CategoryRegistry::embedded();
-        for lid in [8, 9, 212, 411, 509, 577] {
+        for lid in [8, 9, 212, 411, 509, 577, 703, 835] {
             assert_eq!(
                 reg.resolve_hoyolab_label(lid, None).as_deref(),
                 Some("shrine_of_depths")
@@ -4862,7 +4875,7 @@ mod tests {
         assert_eq!(reg.resolve_hoyolab_label(148, None).as_deref(), Some("seelie"));
         assert_eq!(reg.get_appsample_code("seelie"), Some("o18"));
         assert_eq!(
-            reg.resolve_hoyolab_label(217, None).as_deref(),
+            reg.resolve_hoyolab_label(205, None).as_deref(),
             Some("electro_seelie")
         );
         assert_eq!(
@@ -4877,20 +4890,26 @@ mod tests {
         );
 
         for (lid, expected) in [
-            (44, "common_chest"),
-            (45, "exquisite_chest"),
-            (46, "precious_chest"),
-            (64, "luxurious_chest"),
-            (236, "remarkable_chest"),
+            (17, "common_chest"),
+            (44, "exquisite_chest"),
+            (45, "precious_chest"),
+            (46, "luxurious_chest"),
+            (269, "remarkable_chest"),
+            (64, "time_trial_challenge"),
             (5, "anemoculus"),
             (6, "geoculus"),
-            (147, "crimson_agate"),
-            (210, "electroculus"),
-            (345, "lumenspar"),
-            (395, "dendroculus"),
+            (141, "crimson_agate"),
+            (194, "electroculus"),
+            (357, "lumenspar"),
+            (403, "dendroculus"),
             (508, "hydroculus"),
-            (559, "spirit_carp"),
-            (575, "pyroculus"),
+            (554, "spirit_carp"),
+            (626, "pyroculus"),
+            (694, "lunoculus"),
+            (833, "cryoculus"),
+            (85, "viewpoint"),
+            (356, "radiant_spincrystal"),
+            (597, "monetoo"),
         ] {
             assert_eq!(reg.resolve_hoyolab_label(lid, None).as_deref(), Some(expected));
         }
@@ -4919,14 +4938,14 @@ mod tests {
             "message": "OK",
             "data": {
                 "label_list": [
-                    {"id": 44, "name": "Common Chest"},
+                    {"id": 17, "name": "Common Chest"},
                     {"id": 577, "name": "Natlan Shrine of Depths"},
                     {"id": 148, "name": "Warming Seelie"},
                     {"id": 9991, "name": "Mysterious Totem"},
                     {"id": 9992, "name": "Shrine of Depths"}
                 ],
                 "point_list": [
-                    {"id": 1001, "label_id": 44, "x_pos": 120.5, "y_pos": -340.25, "z_level": 0, "icon_sign": 0, "point_group": null},
+                    {"id": 1001, "label_id": 17, "x_pos": 120.5, "y_pos": -340.25, "z_level": 0, "icon_sign": 0, "point_group": null},
                     {"id": 1002, "label_id": 577, "x_pos": -500.0, "y_pos": 820.0, "z_level": 0, "icon_sign": 1, "point_group": {"group_id": 248, "floor_id": 372}},
                     {"id": 1003, "label_id": 148, "x_pos": "42.25", "y_pos": "19.75"},
                     {"id": 1004, "label_id": 9991, "x_pos": 10.0, "y_pos": 20.0},
@@ -5481,7 +5500,7 @@ mod tests {
             "id": [7000, 15, 20, 5],
             "lng": [ll[0].0, ll[1].0, ll[2].0, 0.0],
             "lat": [ll[0].1, ll[1].1, ll[2].1, 0.0],
-            "type": ["o44", "o8", "o18", "o44"],
+            "type": ["o17", "o8", "o18", "o17"],
             "mid": [2, 2, 2, 7]
         });
         let app_targets = AppsampleAdapter::parse_markers(&col_app, 2, 13, true, None).unwrap();
@@ -5658,7 +5677,7 @@ mod tests {
             "lng": [lng],
             "lat": [lat],
             "type": [],
-            "cat": ["o44"]
+            "cat": ["o17"]
         });
         let app_col = AppsampleAdapter::parse_markers(&col, 2, 13, true, None).unwrap();
         assert_eq!(app_col.len(), 1);
@@ -5670,7 +5689,7 @@ mod tests {
 
         // 3) AppsampleAdapter row: empty appsample_code="" falls through to type / o.
         let rows = json!([
-            {"id": 7000, "x": 100.0, "y": 200.0, "appsample_code": "", "type": "o44"},
+            {"id": 7000, "x": 100.0, "y": 200.0, "appsample_code": "", "type": "o17"},
             {"id": 7001, "x": 105.0, "y": 205.0, "appsample_code": "", "type": "", "o": "o8"}
         ]);
         let app_rows = AppsampleAdapter::parse_markers(&rows, 2, 13, true, None).unwrap();
@@ -5838,10 +5857,10 @@ mod tests {
             "map_id": 2,
             "affine": {"ax": 1.0, "bx": 0.0, "cy": 1.0, "dy": 0.0},
             "pins": [
-                {"hoyolab_id": 1, "map_id": 2, "label_id": 44, "canonical_category": "common_chest", "x_pos": 100.0, "y_pos": 200.0}
+                {"hoyolab_id": 1, "map_id": 2, "label_id": 17, "canonical_category": "common_chest", "x_pos": 100.0, "y_pos": 200.0}
             ],
             "target_markers": [
-                {"id": 7000, "target_id": 7000, "x": 100.0, "y": 200.0, "type": "o44"}
+                {"id": 7000, "target_id": 7000, "x": 100.0, "y": 200.0, "type": "o17"}
             ]
         });
         let res_app_raw = execute_cross_map_export(&req_app_raw, None, None).unwrap();

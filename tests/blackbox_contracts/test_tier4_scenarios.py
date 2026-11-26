@@ -240,7 +240,7 @@ class TestTier4Scenarios(unittest.TestCase):
             self.assertIn("updated_at", r_ky["payload"])
 
             # 3. Appsample (matching HoYoLAB coordinates with category_aliases appsample_code)
-            app_code_map = {3: "o3", 5: "o5", 44: "o44"}
+            app_code_map = {3: "o3", 5: "o5", 17: "o17"}
             app_targets = [
                 {
                     "id": 3000 + i,

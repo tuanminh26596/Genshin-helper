@@ -1276,11 +1276,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     }
     const method = (msg.method || 'GET').toUpperCase();
-    const timeoutMs = path.startsWith('/cross_map_export')
-      ? 30000
-      : ((path.startsWith('/trigger_diagnostic') || path.startsWith('/attach_diagnostic_browser'))
-          ? 25000
-          : (path.startsWith('/app_update') ? 20000 : 12000));
+    const timeoutMs = path.startsWith('/cross_map_import_preview')
+      ? 90000
+      : (path.startsWith('/cross_map_export')
+          ? 30000
+          : ((path.startsWith('/trigger_diagnostic') || path.startsWith('/attach_diagnostic_browser'))
+              ? 25000
+              : (path.startsWith('/app_update') || path.startsWith('/cross_map_import_history') ? 20000 : 12000)));
     fetchApi(path, method, msg.body, timeoutMs).then(sendResponse);
     return true;
   }
@@ -1327,6 +1329,416 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.kind === 'GH_CMD_EXPORT_PINS') {
     const targetFormat = typeof msg.targetFormat === 'string' ? msg.targetFormat : 'canonical';
     forwardCommandToMapTab('GH_CMD_EXPORT_PINS', { targetFormat }, false).then(sendResponse);
+    return true;
+  }
+
+  if (msg.kind === 'OPEN_IMPORTER_TAB') {
+    const targetUrl = chrome.runtime.getURL('importer.html');
+    chrome.tabs.query({ url: targetUrl }, (tabs) => {
+      void chrome.runtime.lastError;
+      const existing = Array.isArray(tabs) && tabs.length > 0 ? tabs[0] : null;
+      if (existing && typeof existing.id === 'number') {
+        chrome.windows.update(existing.windowId, { focused: true }, () => {
+          void chrome.runtime.lastError;
+          chrome.tabs.update(existing.id, { active: true }, () => {
+            const err = chrome.runtime.lastError;
+            sendResponse(err ? { ok: false, error: err.message } : { ok: true, tabId: existing.id, created: false });
+          });
+        });
+      } else {
+        chrome.tabs.create({ url: targetUrl, active: true }, (created) => {
+          const err = chrome.runtime.lastError;
+          sendResponse(err ? { ok: false, error: err.message } : { ok: true, tabId: created ? created.id : null, created: true });
+        });
+      }
+    });
+    return true;
+  }
+
+  if (msg.kind === 'READ_APPSAMPLE_TAB') {
+    (async () => {
+      const tabs = await new Promise((res) => {
+        chrome.tabs.query({ url: 'https://genshin-impact-map.appsample.com/*' }, (list) => {
+          void chrome.runtime.lastError;
+          res(Array.isArray(list) ? list : []);
+        });
+      });
+      const tab = tabs.find((t) => t && t.active) || tabs[0];
+      if (!tab || typeof tab.id !== 'number') {
+        return { ok: false, noTab: true, error: 'No open Appsample tab found' };
+      }
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'MAIN',
+        func: () => {
+          const toIntList = (src) => {
+            const out = new Set();
+            if (!src) return [];
+            if (src instanceof Set) {
+              for (const v of src) {
+                const n = Number(v);
+                if (Number.isInteger(n)) out.add(n);
+              }
+            } else if (Array.isArray(src)) {
+              for (const v of src) {
+                const n = Number(v);
+                if (Number.isInteger(n)) out.add(n);
+              }
+            } else if (typeof src === 'object') {
+              for (const [k, v] of Object.entries(src)) {
+                if (v) {
+                  const n = Number(k);
+                  if (Number.isInteger(n)) out.add(n);
+                }
+              }
+            }
+            return Array.from(out);
+          };
+
+          const findFiberRoots = () => {
+            const candidates = [
+              document,
+              document.documentElement,
+              document.getElementById('__next'),
+              document.getElementById('root'),
+              document.body,
+              ...(document.body ? Array.from(document.body.children).slice(0, 8) : [])
+            ].filter(Boolean);
+            const roots = [];
+            for (const el of candidates) {
+              for (const key of Object.keys(el)) {
+                if (key.startsWith('__reactContainer$') || key.startsWith('__reactFiber$')) {
+                  roots.push(el[key]);
+                }
+              }
+            }
+            return roots;
+          };
+
+          let foundIds = [];
+          let catalogAll = null;
+          let sourceMode = 'none';
+
+          const roots = findFiberRoots();
+          if (roots.length > 0) {
+            const queue = [...roots];
+            const visited = new Set();
+            let steps = 0;
+            while (queue.length > 0 && steps < 8000) {
+              const node = queue.shift();
+              if (!node || typeof node !== 'object' || visited.has(node)) continue;
+              visited.add(node);
+              steps += 1;
+
+              const val = node.memoizedProps && node.memoizedProps.value;
+              if (val && typeof val === 'object') {
+                if (val.store && typeof val.store.getState === 'function') {
+                  try {
+                    const st = val.store.getState();
+                    if (st && st.found) {
+                      const ids = toIntList(st.found);
+                      if (ids.length >= foundIds.length) {
+                        foundIds = ids;
+                        sourceMode = 'react_fiber';
+                      }
+                    }
+                  } catch (e) {}
+                }
+                if (val.catalog && Array.isArray(val.catalog.all) && val.catalog.all.length > 0) {
+                  catalogAll = val.catalog.all;
+                }
+              }
+              if (foundIds.length > 0 && catalogAll) break;
+              if (node.child) queue.push(node.child);
+              if (node.sibling) queue.push(node.sibling);
+              if (node.return) queue.push(node.return);
+            }
+          }
+
+          // Fallback for guest / localStorage progress
+          if (foundIds.length === 0) {
+            try {
+              const rawLocal = localStorage.getItem('gim-local-markers');
+              if (rawLocal) {
+                const parsed = JSON.parse(rawLocal);
+                const ids = toIntList(parsed && (parsed.found || parsed.ids || parsed));
+                if (ids.length > 0) {
+                  foundIds = ids;
+                  sourceMode = 'local_storage';
+                }
+              }
+            } catch (e) {}
+          }
+
+          // Keep only user's marked markers + o3 Teleports (for live Multi-Affine refinement)
+          // so IPC + localhost JSON stays compact (~200 KB instead of 12 MB).
+          const foundSet = new Set(foundIds);
+          const markers = [];
+          if (Array.isArray(catalogAll)) {
+            for (const m of catalogAll) {
+              if (!m || typeof m !== 'object') continue;
+              const id = Number(m.id);
+              if (!Number.isInteger(id)) continue;
+              const typeStr = String(m.type || '');
+              if (!foundSet.has(id) && typeStr !== 'o3') continue;
+              const lng = Number(
+                m.lng !== undefined ? m.lng : (m.position ? m.position.x : NaN)
+              );
+              const lat = Number(
+                m.lat !== undefined ? m.lat : (m.position ? m.position.y : NaN)
+              );
+              if (!Number.isFinite(lng) || !Number.isFinite(lat)) continue;
+              const mid = Number(m.mapId ?? m.mid ?? m.map_id ?? m.map ?? 2);
+              let meta = String(m.meta || '');
+              if (!meta && m.layer && typeof m.layer === 'object') {
+                const gid = Number(m.layer.groupId || 0);
+                const fid = Number(m.layer.floorId || 0);
+                if (gid > 0 || fid > 0) {
+                  meta = `l=0|${gid}|${fid}`;
+                }
+              }
+              markers.push({
+                id,
+                type: typeStr,
+                mid: Number.isInteger(mid) && mid > 0 ? mid : 2,
+                level: Number(m.level ?? 0) || 0,
+                lng,
+                lat,
+                meta
+              });
+            }
+          }
+
+          return {
+            ok: true,
+            sourceMode,
+            foundCount: foundIds.length,
+            catalogCount: markers.length,
+            foundIds,
+            markers
+          };
+        }
+      });
+      const payload = results && results[0] && results[0].result;
+      if (!payload || !payload.ok) {
+        return { ok: false, error: 'Failed to inspect Appsample tab state' };
+      }
+      return payload;
+    })().then(sendResponse).catch((err) => {
+      sendResponse({ ok: false, error: (err && err.message) ? err.message : 'Appsample tab read failed' });
+    });
+    return true;
+  }
+
+  if (msg.kind === 'READ_KONGYING_TAB') {
+    (async () => {
+      const tabs = await new Promise((res) => {
+        chrome.tabs.query({ url: ['https://v3.yuanshen.site/*', 'https://yuanshen.site/*'] }, (list) => {
+          void chrome.runtime.lastError;
+          res(Array.isArray(list) ? list : []);
+        });
+      });
+      const tab = tabs.find((t) => t && t.active) || tabs[0];
+      if (!tab || typeof tab.id !== 'number') {
+        return { ok: false, noTab: true, error: 'No open Kongying Tavern tab found' };
+      }
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'MAIN',
+        func: () => {
+          const out = new Set();
+          const ingest = (raw) => {
+            if (!raw) return;
+            try {
+              const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+              const arr = Array.isArray(parsed)
+                ? parsed
+                : (parsed && Array.isArray(parsed.Data_KYJG) ? parsed.Data_KYJG : Object.keys(parsed || {}));
+              for (const item of arr) {
+                const n = Number(item);
+                if (Number.isInteger(n) && n > 0) out.add(n);
+              }
+            } catch (e) {}
+          };
+          try {
+            ingest(localStorage.getItem('marked_layers'));
+            if (out.size === 0) ingest(localStorage.getItem('Data_KYJG'));
+          } catch (e) {}
+          const ids = Array.from(out).sort((a, b) => a - b);
+          return { ok: true, count: ids.length, ids };
+        }
+      });
+      const payload = results && results[0] && results[0].result;
+      if (!payload || !payload.ok) {
+        return { ok: false, error: 'Failed to read Kongying Tavern tab' };
+      }
+      return payload;
+    })().then(sendResponse).catch((err) => {
+      sendResponse({ ok: false, error: (err && err.message) ? err.message : 'Kongying tab read failed' });
+    });
+    return true;
+  }
+
+  if (msg.kind === 'HOYOLAB_GET_MARKED') {
+    (async () => {
+      const tabs = await new Promise((res) => {
+        chrome.tabs.query({ url: 'https://act.hoyolab.com/*' }, (list) => {
+          void chrome.runtime.lastError;
+          res(Array.isArray(list) ? list : []);
+        });
+      });
+      const mapTab =
+        tabs.find((t) => t && t.active && typeof t.url === 'string' && t.url.includes('/interactive-map/')) ||
+        tabs.find((t) => t && typeof t.url === 'string' && t.url.includes('/interactive-map/'));
+      if (!mapTab || typeof mapTab.id !== 'number') {
+        return { ok: false, noTab: true, error: 'No open HoYoLAB Interactive Map tab found' };
+      }
+      const mapIds = Array.isArray(msg.mapIds) && msg.mapIds.length > 0
+        ? msg.mapIds.map((x) => Number(x)).filter((x) => Number.isInteger(x) && x > 0)
+        : [2, 7, 9, 34, 36, 37, 40];
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: mapTab.id },
+        world: 'MAIN',
+        args: [mapIds],
+        func: async (ids) => {
+          const base = 'https://sg-public-api.hoyolab.com/common/map_user/ys_obc';
+          const markedByMap = {};
+          for (const mid of ids) {
+            const url = `${base}/v1/map/point/mark_map_point_list?map_id=${encodeURIComponent(mid)}&app_sn=ys_obc&lang=en-us`;
+            const resp = await fetch(url, {
+              method: 'GET',
+              credentials: 'include',
+              headers: { 'x-rpc-map_version': '4.5' }
+            });
+            const json = await resp.json().catch(() => null);
+            if (!json || json.retcode !== 0) {
+              return {
+                ok: false,
+                loggedIn: false,
+                retcode: json ? json.retcode : resp.status,
+                message: (json && json.message) || `HTTP ${resp.status}`
+              };
+            }
+            const rawList = (json.data && (json.data.list || json.data.point_list)) || [];
+            const clean = [];
+            for (const item of rawList) {
+              const pid = Number(typeof item === 'object' && item !== null ? (item.point_id ?? item.id) : item);
+              if (Number.isInteger(pid) && pid > 0) clean.push(pid);
+            }
+            markedByMap[String(mid)] = clean;
+          }
+          return { ok: true, loggedIn: true, markedByMap };
+        }
+      });
+      const payload = results && results[0] && results[0].result;
+      if (!payload) return { ok: false, error: 'HoYoLAB marked list query failed' };
+      return { ...payload, tabId: mapTab.id };
+    })().then(sendResponse).catch((err) => {
+      sendResponse({ ok: false, error: (err && err.message) ? err.message : 'HoYoLAB query failed' });
+    });
+    return true;
+  }
+
+  if (msg.kind === 'HOYOLAB_BATCH_MARK') {
+    (async () => {
+      const tabs = await new Promise((res) => {
+        chrome.tabs.query({ url: 'https://act.hoyolab.com/*' }, (list) => {
+          void chrome.runtime.lastError;
+          res(Array.isArray(list) ? list : []);
+        });
+      });
+      const mapTab =
+        (typeof msg.tabId === 'number' && tabs.find((t) => t && t.id === msg.tabId)) ||
+        tabs.find((t) => t && t.active && typeof t.url === 'string' && t.url.includes('/interactive-map/')) ||
+        tabs.find((t) => t && typeof t.url === 'string' && t.url.includes('/interactive-map/'));
+      if (!mapTab || typeof mapTab.id !== 'number') {
+        return { ok: false, noTab: true, error: 'HoYoLAB Interactive Map tab was closed' };
+      }
+      const mapId = Number(msg.mapId) || 2;
+      const pointIds = Array.isArray(msg.pointIds)
+        ? msg.pointIds.map((x) => Number(x)).filter((x) => Number.isInteger(x) && x > 0)
+        : [];
+      const isDelete = Boolean(msg.isDelete);
+      if (pointIds.length === 0) {
+        return { ok: true, status: 200, retcode: 0, message: 'OK', ms: 0 };
+      }
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: mapTab.id },
+        world: 'MAIN',
+        args: [mapId, pointIds, isDelete],
+        func: async (mid, ids, del) => {
+          const t0 = performance.now();
+          const resp = await fetch(
+            'https://sg-public-api.hoyolab.com/common/map_user/ys_obc/v1/map/point/batch_mark_map_point?app_sn=ys_obc&lang=en-us',
+            {
+              method: 'POST',
+              credentials: 'include',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-rpc-map_version': '4.5'
+              },
+              body: JSON.stringify({
+                map_id: mid,
+                app_sn: 'ys_obc',
+                lang: 'en-us',
+                list: ids.map((id) => ({ point_id: id, is_delete: del }))
+              })
+            }
+          );
+          const json = await resp.json().catch(() => null);
+          const ms = Math.round(performance.now() - t0);
+          const ok = resp.ok && json && json.retcode === 0;
+          return {
+            ok,
+            status: resp.status,
+            retcode: json ? json.retcode : null,
+            message: (json && json.message) || `HTTP ${resp.status}`,
+            ms
+          };
+        }
+      });
+      const payload = results && results[0] && results[0].result;
+      return payload || { ok: false, error: 'HoYoLAB batch_mark call failed' };
+    })().then(sendResponse).catch((err) => {
+      sendResponse({ ok: false, error: (err && err.message) ? err.message : 'HoYoLAB batch_mark failed' });
+    });
+    return true;
+  }
+
+  if (msg.kind === 'HOYOLAB_REFRESH_AFTER_IMPORT') {
+    (async () => {
+      const tabs = await new Promise((res) => {
+        chrome.tabs.query({ url: 'https://act.hoyolab.com/*' }, (list) => {
+          void chrome.runtime.lastError;
+          res(Array.isArray(list) ? list : []);
+        });
+      });
+      const mapTab =
+        tabs.find((t) => t && t.active && typeof t.url === 'string' && t.url.includes('/interactive-map/')) ||
+        tabs.find((t) => t && typeof t.url === 'string' && t.url.includes('/interactive-map/'));
+      if (!mapTab || typeof mapTab.id !== 'number') {
+        return { ok: false, noTab: true };
+      }
+      if (msg.reload) {
+        await new Promise((res) => {
+          chrome.tabs.reload(mapTab.id, {}, () => {
+            void chrome.runtime.lastError;
+            res();
+          });
+        });
+        return { ok: true, reloaded: true };
+      }
+      await chrome.scripting.executeScript({
+        target: { tabId: mapTab.id },
+        world: 'MAIN',
+        func: () => {
+          if (window.__GH_BRIDGE__ && typeof window.__GH_BRIDGE__.refreshMarkedPins === 'function') {
+            window.__GH_BRIDGE__.refreshMarkedPins();
+          }
+        }
+      });
+      return { ok: true, reloaded: false };
+    })().then(sendResponse).catch(() => sendResponse({ ok: false }));
     return true;
   }
 

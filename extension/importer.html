@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="importer.page_title">Genshin Helper — Nhập tiến độ Appsample &amp; Kongying sang HoYoLAB</title>
+  <link rel="stylesheet" href="importer.css">
+</head>
+<body>
+  <div class="imp-shell">
+    <!-- Header -->
+    <header class="imp-header">
+      <div class="imp-brand">
+        <span class="imp-brand-icon" aria-hidden="true">
+          <img src="icons/icon48.png" alt="Genshin Helper" width="28" height="28">
+        </span>
+        <div>
+          <h1 data-i18n="importer.title">Nhập Tiến Độ Liên Bản Đồ</h1>
+          <p class="imp-sub" data-i18n="importer.subtitle">Chuyển toàn bộ ghim từ Appsample hoặc Kongying Tavern sang HoYoLAB Interactive Map — có Xem trước &amp; Hoàn tác 1-Click.</p>
+        </div>
+      </div>
+
+      <div class="imp-header-actions">
+        <button id="btn-lang-toggle" type="button" class="lang-toggle" data-lang="vi" data-i18n-title="popup.lang.toggle_title">
+          <span class="lang-opt is-active" data-lang-opt="vi">VI</span>
+          <span class="lang-opt" data-lang-opt="en">EN</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Live Readiness Bar -->
+    <section class="card status-strip">
+      <div class="status-group">
+        <div class="status-item">
+          <span id="dot-engine" class="dot is-warn"></span>
+          <div>
+            <div class="status-label" data-i18n="importer.status.engine_label">Desktop App (127.0.0.1:8765)</div>
+            <div id="text-engine" class="status-val" data-i18n="importer.status.checking">Đang kiểm tra...</div>
+          </div>
+        </div>
+        <div class="status-item">
+          <span id="dot-hoyolab" class="dot is-warn"></span>
+          <div>
+            <div class="status-label" data-i18n="importer.status.hoyolab_label">Tab HoYoLAB Interactive Map</div>
+            <div id="text-hoyolab" class="status-val" data-i18n="importer.status.checking">Đang kiểm tra...</div>
+          </div>
+        </div>
+      </div>
+      <div class="status-actions">
+        <button id="btn-open-hoyolab" type="button" class="btn btn-secondary btn-sm">
+          <span class="btn-label" data-i18n="importer.status.open_map_btn">Mở HoYoLAB Map</span>
+        </button>
+        <button id="btn-recheck" type="button" class="btn btn-neutral btn-sm">
+          <span class="btn-label" data-i18n="importer.status.recheck_btn">Kiểm tra lại</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Main 2-Column Workspace -->
+    <main class="imp-grid">
+      <!-- Left: Source Selector -->
+      <section class="card source-card">
+        <div class="section-head">
+          <span class="step-badge">1</span>
+          <h2 data-i18n="importer.step1.title">Chọn nguồn dữ liệu của bạn</h2>
+        </div>
+
+        <div class="source-tabs" role="tablist">
+          <button id="src-tab-appsample" type="button" class="src-tab is-active" role="tab" aria-selected="true" data-source="appsample">
+            <span class="src-tab-name">Appsample</span>
+            <span class="src-tab-pill is-emerald">100% Collectibles</span>
+          </button>
+          <button id="src-tab-kongying" type="button" class="src-tab" role="tab" aria-selected="false" data-source="kongying">
+            <span class="src-tab-name">Kongying Tavern</span>
+            <span class="src-tab-pill is-sky">99.8% Oculi · 96% Chests</span>
+          </button>
+        </div>
+
+        <!-- Appsample Panel -->
+        <div id="panel-appsample" class="source-panel">
+          <p class="panel-desc" data-i18n="importer.appsample.desc">
+            Mở tab bản đồ Appsample của bạn (đã đăng nhập Google hoặc chế độ khách), rồi bấm nút bên dưới. Extension chỉ đọc tiến độ ngay trên trình duyệt của bạn — không tải dữ liệu từ server Appsample.
+          </p>
+          <div class="action-row">
+            <button id="btn-read-appsample" type="button" class="btn btn-primary btn-full">
+              <span class="btn-label" data-i18n="importer.appsample.read_tab_btn">Đọc trực tiếp từ tab Appsample đang mở</span>
+            </button>
+          </div>
+          <div class="divider-or"><span data-i18n="importer.or_upload">hoặc tải file JSON thủ công</span></div>
+          <label class="dropzone" for="input-appsample-file">
+            <input id="input-appsample-file" type="file" accept=".json,application/json" hidden>
+            <span class="dropzone-title" data-i18n="importer.appsample.pick_file">Chọn file JSON Appsample (.json)</span>
+            <span class="dropzone-hint" data-i18n="importer.appsample.pick_hint">Hỗ trợ file { found_ids, markers } hoặc bản sao lưu tiến độ</span>
+          </label>
+        </div>
+
+        <!-- Kongying Panel -->
+        <div id="panel-kongying" class="source-panel" hidden>
+          <p class="panel-desc" data-i18n="importer.kongying.desc">
+            Chọn file backup JSON xuất từ Kongying Tavern (Desktop App hoặc Web — chứa Data_KYJG), hoặc đọc trực tiếp từ tab yuanshen.site đang mở.
+          </p>
+          <label class="dropzone" for="input-kongying-file">
+            <input id="input-kongying-file" type="file" accept=".json,application/json" hidden>
+            <span class="dropzone-title" data-i18n="importer.kongying.pick_file">Chọn file backup Kongying (.json — Data_KYJG)</span>
+            <span class="dropzone-hint" data-i18n="importer.kongying.pick_hint">Trong Kongying: Lưu trữ / Archive → Xuất file JSON cục bộ</span>
+          </label>
+          <div class="divider-or"><span data-i18n="importer.or_read_tab">hoặc đọc trực tiếp tab Web</span></div>
+          <div class="action-row">
+            <button id="btn-read-kongying" type="button" class="btn btn-secondary btn-full">
+              <span class="btn-label" data-i18n="importer.kongying.read_tab_btn">Đọc từ tab Kongying Web (yuanshen.site)</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="source-banner" class="banner" hidden></div>
+      </section>
+
+      <!-- Right: Preview & Sync -->
+      <section class="card preview-card">
+        <div class="section-head">
+          <span class="step-badge">2</span>
+          <h2 data-i18n="importer.step2.title">Xem trước &amp; Đồng bộ sang HoYoLAB</h2>
+        </div>
+
+        <div id="preview-empty" class="empty-state">
+          <div class="empty-title" data-i18n="importer.preview.empty_title">Chưa có bản xem trước</div>
+          <p class="empty-desc" data-i18n="importer.preview.empty_desc">Hãy chọn dữ liệu Appsample hoặc Kongying ở bên trái để đối chiếu tọa độ trên cả 7 bản đồ trước khi ghi vào HoYoLAB.</p>
+        </div>
+
+        <div id="preview-loading" class="empty-state" hidden>
+          <div class="spinner" aria-hidden="true"></div>
+          <div id="preview-loading-text" class="empty-title" data-i18n="importer.preview.loading">Đang hiệu chỉnh tọa độ &amp; đối chiếu 7 bản đồ...</div>
+          <p class="empty-desc" data-i18n="importer.preview.loading_sub">Lần đầu với Kongying có thể mất 10–25 giây để tải mốc tham chiếu và lưu cache cục bộ.</p>
+        </div>
+
+        <div id="preview-body" class="preview-body" hidden>
+          <!-- KPI Strip -->
+          <div class="kpi-grid">
+            <div class="kpi-box">
+              <span class="kpi-label" data-i18n="importer.kpi.source">Ghim nguồn</span>
+              <strong id="kpi-source" class="kpi-val">0</strong>
+            </div>
+            <div class="kpi-box">
+              <span class="kpi-label" data-i18n="importer.kpi.already">Đã có sẵn (bỏ qua)</span>
+              <strong id="kpi-already" class="kpi-val is-muted">0</strong>
+            </div>
+            <div class="kpi-box is-accent">
+              <span class="kpi-label" data-i18n="importer.kpi.selected">Sẽ đánh dấu mới</span>
+              <strong id="kpi-selected" class="kpi-val is-emerald">0</strong>
+            </div>
+            <div class="kpi-box">
+              <span class="kpi-label" data-i18n="importer.kpi.unmatched">Chưa khớp</span>
+              <strong id="kpi-unmatched" class="kpi-val is-amber">0</strong>
+            </div>
+          </div>
+
+          <!-- Category Chips -->
+          <div id="category-chips" class="chip-row"></div>
+
+          <!-- Confidence Tier Toggles -->
+          <div class="tier-box">
+            <div class="tier-box-title" data-i18n="importer.tiers.title">Mức tin cậy được phép đồng bộ</div>
+            <label class="tier-row">
+              <input id="chk-tier-exact" type="checkbox" checked>
+              <span class="tier-pill is-emerald" data-i18n="importer.tiers.exact_high">Chuẩn xác / Tin cậy cao</span>
+              <span id="cnt-tier-exact" class="tier-cnt">0</span>
+              <span class="tier-hint" data-i18n="importer.tiers.exact_hint">Appsample 0.05px · Kongying &lt;=12px (~99.7% chuẩn)</span>
+            </label>
+            <label class="tier-row">
+              <input id="chk-tier-medium" type="checkbox" checked>
+              <span class="tier-pill is-sky" data-i18n="importer.tiers.medium">Tin cậy trung bình</span>
+              <span id="cnt-tier-medium" class="tier-cnt">0</span>
+              <span class="tier-hint" data-i18n="importer.tiers.medium_hint">Kongying 12–16px &amp; Thần Đồng đơn nhất (không tranh chấp)</span>
+            </label>
+            <label class="tier-row">
+              <input id="chk-tier-ambig" type="checkbox">
+              <span class="tier-pill is-amber" data-i18n="importer.tiers.ambig">Mơ hồ (mặc định tắt)</span>
+              <span id="cnt-tier-ambig" class="tier-cnt">0</span>
+              <span class="tier-hint" data-i18n="importer.tiers.ambig_hint">Có &gt;=2 ghim HoYoLAB nằm rất sát nhau — nên bỏ qua để tránh tick nhầm</span>
+            </label>
+          </div>
+
+          <!-- Per-Map Breakdown Table -->
+          <div class="table-wrap">
+            <table class="map-table">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th data-i18n="importer.table.map">Bản đồ</th>
+                  <th data-i18n="importer.table.source">Nguồn</th>
+                  <th data-i18n="importer.table.ready">Mới</th>
+                  <th data-i18n="importer.table.already">Có sẵn</th>
+                  <th data-i18n="importer.table.unmatched">Chưa khớp</th>
+                  <th>RMSE</th>
+                </tr>
+              </thead>
+              <tbody id="map-table-body"></tbody>
+            </table>
+          </div>
+
+          <!-- Sync Controls & Progress -->
+          <div class="sync-controls">
+            <button id="btn-start-sync" type="button" class="btn btn-primary">
+              <span class="btn-label" data-i18n="importer.sync.start_btn">Đồng bộ sang HoYoLAB</span>
+            </button>
+            <button id="btn-cancel-sync" type="button" class="btn btn-danger" hidden>
+              <span class="btn-label" data-i18n="importer.sync.cancel_btn">Dừng lại</span>
+            </button>
+            <button id="btn-reload-map" type="button" class="btn btn-secondary" hidden>
+              <span class="btn-label" data-i18n="importer.sync.reload_map_btn">Tải lại tab HoYoLAB</span>
+            </button>
+          </div>
+
+          <div id="progress-wrap" class="progress-wrap" hidden>
+            <div class="progress-head">
+              <span id="progress-label">0 / 0</span>
+              <span id="progress-pct">0%</span>
+            </div>
+            <div class="progress-track">
+              <div id="progress-bar" class="progress-bar"></div>
+            </div>
+          </div>
+
+          <div id="sync-banner" class="banner" hidden></div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Step 3: 1-Click Undo Rollback History -->
+    <section class="card history-card">
+      <div class="section-head">
+        <span class="step-badge is-brass">↺</span>
+        <h2 data-i18n="importer.history.title">Lịch sử nhập &amp; Hoàn tác 1-Click (Undo Rollback)</h2>
+      </div>
+      <p class="panel-desc" data-i18n="importer.history.desc">
+        Mỗi lần đồng bộ chỉ lưu đúng các ghim MỚI thêm vào (không đụng ghim bạn đã tick trước đó), nên bạn có thể hoàn tác sạch 100% bất cứ lúc nào.
+      </p>
+      <div id="history-list" class="history-list"></div>
+    </section>
+  </div>
+
+  <script src="i18n.js"></script>
+  <script src="importer.js"></script>
+</body>
+</html>

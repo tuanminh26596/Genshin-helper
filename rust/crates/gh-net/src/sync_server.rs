@@ -1148,6 +1148,8 @@ fn build_router(inner: Arc<SyncInner>) -> Router {
         .route("/launch_borderless", any(handle_launch_borderless))
         .route("/cross_map_export", any(handle_cross_map_export))
         .route("/calibrate_provider", any(handle_calibrate_provider))
+        .route("/cross_map_import_preview", any(handle_cross_map_import_preview))
+        .route("/cross_map_import_history", any(handle_cross_map_import_history))
         .route("/app_update", any(handle_app_update))
         .route("/poll", any(handle_poll))
         .fallback(handle_not_found)
@@ -4114,6 +4116,52 @@ async fn handle_calibrate_provider(
                 "ok": false,
                 "error": e.to_string(),
             }),
+        ),
+    }
+}
+
+async fn handle_cross_map_import_preview(
+    State(inner): State<Arc<SyncInner>>,
+    body: Bytes,
+) -> Response {
+    mark_client_poll(&inner);
+    let req = parse_lenient_json_map(&body);
+    let cache_dir = gh_core::paths::AppPaths::resolve().cache_dir;
+    match crate::cross_map_service::execute_cross_map_import_preview(&req, &cache_dir).await {
+        Ok(val) => json_response(StatusCode::OK, &val),
+        Err(CoreError::InvalidArgument(msg)) => json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({ "ok": false, "error": msg }),
+        ),
+        Err(err) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({ "ok": false, "error": err.to_string() }),
+        ),
+    }
+}
+
+async fn handle_cross_map_import_history(
+    State(inner): State<Arc<SyncInner>>,
+    method: Method,
+    body: Bytes,
+) -> Response {
+    mark_client_poll(&inner);
+    let cache_dir = gh_core::paths::AppPaths::resolve().cache_dir;
+    let res = if method == Method::GET {
+        crate::cross_map_service::handle_import_history_command(None, &cache_dir)
+    } else {
+        let req = parse_lenient_json_map(&body);
+        crate::cross_map_service::handle_import_history_command(Some(&req), &cache_dir)
+    };
+    match res {
+        Ok(val) => json_response(StatusCode::OK, &val),
+        Err(CoreError::InvalidArgument(msg)) => json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({ "ok": false, "error": msg }),
+        ),
+        Err(err) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({ "ok": false, "error": err.to_string() }),
         ),
     }
 }

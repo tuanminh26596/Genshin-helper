@@ -116,7 +116,7 @@ def build_hoyolab_export_payload(
     label_choices = (
         (3, "Teleport Waypoint", "Teleport Waypoint"),
         (5, "Anemoculus", "Anemoculus"),
-        (44, "Common Chest", "Common Chest"),
+        (17, "Common Chest", "Common Chest"),
     )
 
     for i in range(pin_count):
@@ -155,7 +155,7 @@ def build_hoyolab_export_payload(
             "label_list": [
                 {"id": 3, "name": "Teleport Waypoint"},
                 {"id": 5, "name": "Anemoculus"},
-                {"id": 44, "name": "Common Chest"},
+                {"id": 17, "name": "Common Chest"},
             ],
         },
     }

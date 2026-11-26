@@ -4,6 +4,7 @@
 //!
 //! Acyclic dependency: depends ONLY on `gh-core`.
 
+pub mod cross_map_service;
 pub mod hd_assets;
 pub mod hoyolab_sync;
 pub mod lan_companion;
