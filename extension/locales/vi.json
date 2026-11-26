@@ -426,5 +426,9 @@
   "popup.update.map_sync_btn": "Cập nhật Map",
   "popup.update.map_syncing_btn": "Đang tải...",
   "popup.update.uninstall_ext_hint": "Đã gỡ Desktop App?",
-  "popup.update.uninstall_ext_btn": "Gỡ Extension"
+  "popup.update.uninstall_ext_btn": "Gỡ Extension",
+  "popup.provider.select_title": "Chọn bản đồ tương tác muốn mở (HoYoLAB / Kongying / AppSample)",
+  "popup.provider.hoyolab": "HoYoLAB",
+  "popup.provider.kongying": "Kongying (OS)",
+  "popup.provider.appsample": "AppSample"
 }

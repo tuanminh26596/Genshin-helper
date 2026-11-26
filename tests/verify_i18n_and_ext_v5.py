@@ -167,6 +167,28 @@ def verify_extension_i18n_and_manifest() -> None:
     missing_page_js = sorted(page_keys - set(ext_en.keys()))
     assert not missing_page_js, f"Undefined i18n keys referenced in page_main.js: {missing_page_js}"
 
+    provider_rt = _read_text("extension/provider_runtime.js")
+    provider_rt_keys = set(re.findall(r"\btr\(\s*'([a-z0-9_.]+)'", provider_rt))
+    missing_provider_rt = sorted(provider_rt_keys - set(ext_en.keys()))
+    assert not missing_provider_rt, f"Undefined i18n keys referenced in provider_runtime.js: {missing_provider_rt}"
+    assert "__GH_REGISTER_MAP_PROVIDER__" in provider_rt, "Missing Open Provider SDK hook in provider_runtime.js"
+
+    # Verify Tier 1 multi-provider permissions & content scripts in manifest.json
+    host_perms = set(manifest.get("host_permissions", []))
+    for required_origin in (
+        "https://act.hoyolab.com/*",
+        "https://v3.yuanshen.site/*",
+        "https://genshin-impact-map.appsample.com/*",
+    ):
+        assert required_origin in host_perms, f"Missing Tier 1 host_permission '{required_origin}' in manifest.json"
+    assert any(
+        entry.get("world") == "MAIN"
+        and "coord_transform.js" in entry.get("js", [])
+        and "provider_runtime.js" in entry.get("js", [])
+        and entry["js"].index("coord_transform.js") < entry["js"].index("provider_runtime.js")
+        for entry in cs
+    ), "coord_transform.js must precede provider_runtime.js in MAIN content_scripts"
+
     # Verify zero eval() in all extension JS files
     ext_dir = os.path.join(PROJECT_ROOT, "extension")
     for fn in os.listdir(ext_dir):
@@ -304,6 +326,9 @@ def verify_js_with_node() -> None:
     js_files = [
         "extension/i18n.js",
         "extension/i18n_bridge.js",
+        "extension/providers_registry.js",
+        "extension/coord_transform.js",
+        "extension/provider_runtime.js",
         "extension/popup.js",
         "extension/page_main.js",
         "extension/content_bridge.js",
@@ -688,6 +713,47 @@ const routeHarness = new Function(
   await Promise.resolve();
   await Promise.resolve();
   assert.strictEqual(routeActiveRef && routeActiveRef.title, 'Vue3 Ref Route', 'Vue 3 RefImpl route should load');
+
+  // 5. Multi-provider registry + piecewise coordinate transform round-trips
+  const Reg = require(path.join(root, 'extension', 'providers_registry.js'));
+  assert.strictEqual(Reg.detectProviderFromUrl('https://act.hoyolab.com/ys/app/interactive-map/index.html'), 'hoyolab');
+  assert.strictEqual(Reg.detectProviderFromUrl('https://v3.yuanshen.site/#/'), 'kongying');
+  assert.strictEqual(Reg.detectProviderFromUrl('https://genshin-impact-map.appsample.com/enkanomiya/'), 'appsample');
+  assert.strictEqual(Reg.detectProviderFromUrl('https://example.com/'), null);
+  assert(Reg.getPrivacyMaskCss('appsample').includes('opacity: 0'));
+  assert(Reg.getPrivacyMaskCss('kongying').includes('opacity: 0'));
+
+  const CT = require(path.join(root, 'extension', 'coord_transform.js'));
+  assert(CT, 'Missing GHCoordTransform');
+  // Kongying swapped lat/lng axes round-trip
+  const kyTf = CT.getTransform('kongying', 2);
+  assert.strictEqual(kyTf.swap_lat_lng, true);
+  const kyLl = CT.canonicalToLeaflet(kyTf, -1200, 900);
+  const kyBack = CT.leafletToCanonical(kyTf, kyLl[0], kyLl[1]);
+  assert(Math.hypot(kyBack.lat - (-1200), kyBack.lng - 900) < 1e-4, 'Kongying round-trip failed');
+  // AppSample piecewise Map 2 (Mainland + shifted Inazuma + shifted Easybreeze) & all 6 sub-maps
+  const appMap2 = CT.getTransform('appsample', 2);
+  assert.strictEqual(appMap2.zones.length, 2, 'AppSample Map 2 must declare 2 shifted zones');
+  // Verify shifted Inazuma (lat=5500, lng=1500) uses zone_0 (not base)
+  const inazumaLl = CT.canonicalToLeaflet(appMap2, 5500, 1500);
+  const inazumaBaseX = appMap2.base.ax * 1500 + appMap2.base.bx;
+  assert(Math.abs(inazumaLl[1] - inazumaBaseX) > 0.15, 'Inazuma must apply shifted zone affine');
+  // Verify shifted Easybreeze (lat=1500, lng=-15000) uses zone_1 (not base)
+  const easyLl = CT.canonicalToLeaflet(appMap2, 1500, -15000);
+  const easyBaseX = appMap2.base.ax * -15000 + appMap2.base.bx;
+  assert(Math.abs(easyLl[1] - easyBaseX) > 0.15, 'Easybreeze must apply shifted zone affine');
+  for (const [lat, lng] of [[-1200, 900], [5500, 1500], [1500, -15000]]) {
+    const ll = CT.canonicalToLeaflet(appMap2, lat, lng);
+    const back = CT.leafletToCanonical(appMap2, ll[0], ll[1]);
+    assert(Math.hypot(back.lat - lat, back.lng - lng) < 1e-3, `AppSample Map 2 round-trip failed for (${lat},${lng})`);
+  }
+  for (const subId of [7, 9, 34, 36, 37, 40]) {
+    const stf = CT.getTransform('appsample', subId);
+    assert(stf, `Missing AppSample sub-map transform for ${subId}`);
+    const ll = CT.canonicalToLeaflet(stf, -200, 300);
+    const back = CT.leafletToCanonical(stf, ll[0], ll[1]);
+    assert(Math.hypot(back.lat - (-200), back.lng - 300) < 1e-3, `AppSample sub-map ${subId} round-trip failed`);
+  }
 
   console.log('NODE_RUNTIME_OK');
 })().catch((err) => {

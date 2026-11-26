@@ -63,12 +63,16 @@ pub const TIER6_KEYWORDS: &[&str] = &[
     "神瞳",
     "mã não",
     "crimson agate",
+    "绯红玉髓",
     "lưu minh",
     "lumenspar",
+    "流明晶石",
     "thương linh",
     "cá chép",
     "spirit carp",
+    "苍灵鲤",
     "tịnh quang vũ",
+    "净光翎",
     "giọt cánh",
     "khối ký ức",
     "phiếu quà",
@@ -78,6 +82,7 @@ pub const TIER5_KEYWORDS: &[&str] = &[
     "đền địa linh",
     "hòm địa linh",
     "shrine of depths",
+    "地灵龛",
     "đền kuuhenki",
     "rương hiếm",
     "rương hoa lệ",
@@ -89,22 +94,29 @@ pub const TIER4_KEYWORDS: &[&str] = &[
     "rương siêu cấp",
     "rương quý",
     "precious chest",
+    "珍贵宝箱",
     "rương cao cấp",
     "rương tinh xảo",
     "exquisite chest",
+    "精致宝箱",
     "rương kỳ dị",
     "remarkable chest",
+    "奇馈宝箱",
     "rương snezhnaya",
     "rương báu",
 ];
 
-pub const TIER3_KEYWORDS: &[&str] = &["rương thường", "common chest"];
+pub const TIER3_KEYWORDS: &[&str] = &["rương thường", "common chest", "普通宝箱"];
 
 pub const TIER2_KEYWORDS: &[&str] = &[
     "tiên linh",
     "seelie",
+    "仙灵",
+    "雷灵",
+    "幻写灵",
     "khiêu chiến",
     "time trial",
+    "限时挑战",
     "câu đố",
     "puzzle",
     "cơ quan",
@@ -116,10 +128,12 @@ pub const TIER2_KEYWORDS: &[&str] = &[
 pub const TIER1_KEYWORDS: &[&str] = &[
     "ngọc thạch",
     "spincrystal",
+    "旋曜玉帛",
     "ấn khóa",
     "ốc biển",
     "điểm ngắm cảnh",
     "viewpoint",
+    "观景点",
     "đặc sản",
 ];
 
@@ -1512,6 +1526,25 @@ impl NavigationController {
     pub fn clear_route_queue(&mut self) {
         self.route_queue = None;
         self.route_index = 0;
+    }
+
+    /// Clears transient nearby pins, target lock, and route queue when the active
+    /// browser tab switches between different map providers (e.g. HoYoLAB <-> AppSample
+    /// or Kongying), preventing stale pin IDs from one provider from being marked on another.
+    pub fn clear_for_provider_switch(&mut self) -> bool {
+        let had_lock = self.target_lock_pin.is_some();
+        self.pins_by_id.clear();
+        self.pin_order.clear();
+        self.selected_by_space.clear();
+        self.orders.clear();
+        self.pinned_override_id = None;
+        self.target_lock_pin = None;
+        self.user_locked_id = None;
+        self.closer_candidate = None;
+        self.route_queue = None;
+        self.route_index = 0;
+        self.last_guidance = None;
+        had_lock
     }
 
     /// Locks navigation onto a single target pin until collected/skipped/blacklisted,

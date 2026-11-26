@@ -444,8 +444,12 @@
     typeof chrome.runtime.getURL === 'function'
   );
   const isExtensionPage = window.location.protocol === 'chrome-extension:';
-  const isHoyolabMap = window.location.hostname.includes('hoyolab.com') &&
-    window.location.pathname.includes('/interactive-map/');
+  const hostLower = String(window.location.hostname || '').toLowerCase();
+  const isHoyolabMap = (hostLower.includes('hoyolab.com') &&
+    window.location.pathname.includes('/interactive-map/')) ||
+    hostLower === 'v3.yuanshen.site' ||
+    hostLower === 'yuanshen.site' ||
+    hostLower === 'genshin-impact-map.appsample.com';
 
   async function fetchJsonSafe(url) {
     try {

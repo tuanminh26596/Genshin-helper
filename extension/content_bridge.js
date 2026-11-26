@@ -1,7 +1,17 @@
 (function () {
   'use strict';
 
-  if (!window.location.pathname.includes('/interactive-map/')) {
+  function isSupportedMapPage(loc) {
+    if (!loc) return false;
+    const host = String(loc.hostname || '').toLowerCase();
+    const path = String(loc.pathname || '');
+    if (host.includes('hoyolab.com')) return path.includes('/interactive-map/');
+    if (host === 'v3.yuanshen.site' || host === 'yuanshen.site') return true;
+    if (host === 'genshin-impact-map.appsample.com') return true;
+    return false;
+  }
+
+  if (!isSupportedMapPage(window.location)) {
     return;
   }
 

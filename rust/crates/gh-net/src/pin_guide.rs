@@ -173,7 +173,20 @@ fn url_path_is_gif(url: &str) -> bool {
 
 const ALLOWED_IMAGE_DOMAINS: &[&str] = &["hoyoverse.com", "hoyolab.com", "mihoyo.com"];
 
-fn is_allowed_hoyolab_host(host: &str) -> bool {
+/// Additional HTTPS image hosts verified for third-party map providers (Kongying, AppSample,
+/// MapGenie, GameDot) used strictly for extension-supplied inline guide images (SSRF-safe).
+const ALLOWED_PROVIDER_IMAGE_DOMAINS: &[&str] = &[
+    "hoyoverse.com",
+    "hoyolab.com",
+    "mihoyo.com",
+    "assets.yuanshen.site",
+    "tiles.yuanshen.site",
+    "game-cdn.appsample.com",
+    "media.mapgenie.io",
+    "assets.gamedot.org",
+];
+
+fn host_matches_allowlist(host: &str, allowlist: &[&str]) -> bool {
     if host.is_empty()
         || host.starts_with('.')
         || host.ends_with('.')
@@ -184,7 +197,7 @@ fn is_allowed_hoyolab_host(host: &str) -> bool {
     {
         return false;
     }
-    ALLOWED_IMAGE_DOMAINS.iter().any(|d| {
+    allowlist.iter().any(|d| {
         host == *d
             || host
                 .strip_suffix(d)
@@ -192,20 +205,20 @@ fn is_allowed_hoyolab_host(host: &str) -> bool {
     })
 }
 
-/// Returns `true` iff `url` is a valid HTTPS URL pointing to an official HoYoLAB /
-/// HoYoverse / miHoYo image host (SSRF-safe).
-pub fn is_allowed_image_url(url: &str) -> bool {
+fn is_allowed_hoyolab_host(host: &str) -> bool {
+    host_matches_allowlist(host, ALLOWED_IMAGE_DOMAINS)
+}
+
+fn extract_verified_https_host(url: &str) -> Option<String> {
     let trimmed = url.trim();
     if trimmed.is_empty()
         || trimmed
             .chars()
             .any(|c| c.is_control() || c.is_whitespace())
     {
-        return false;
+        return None;
     }
-    let Some(rest) = trimmed.strip_prefix("https://") else {
-        return false;
-    };
+    let rest = trimmed.strip_prefix("https://")?;
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     if authority.is_empty()
@@ -213,10 +226,22 @@ pub fn is_allowed_image_url(url: &str) -> bool {
         || authority.contains(':')
         || authority.contains('\\')
     {
-        return false;
+        return None;
     }
-    let host = authority.to_ascii_lowercase();
-    is_allowed_hoyolab_host(&host)
+    Some(authority.to_ascii_lowercase())
+}
+
+/// Returns `true` iff `url` is a valid HTTPS URL pointing to an official HoYoLAB /
+/// HoYoverse / miHoYo image host (SSRF-safe).
+pub fn is_allowed_image_url(url: &str) -> bool {
+    extract_verified_https_host(url).is_some_and(|h| is_allowed_hoyolab_host(&h))
+}
+
+/// Returns `true` iff `url` is a valid HTTPS URL pointing to an allowlisted official or
+/// verified third-party map provider image CDN (SSRF-safe).
+pub fn is_allowed_provider_image_url(url: &str) -> bool {
+    extract_verified_https_host(url)
+        .is_some_and(|h| host_matches_allowlist(&h, ALLOWED_PROVIDER_IMAGE_DOMAINS))
 }
 
 fn http_loopback_authority(url: &str) -> Option<&str> {
@@ -341,7 +366,12 @@ impl Default for PinGuideConfig {
     }
 }
 
-type PendingJob = (String, String, i32, GuideCallback);
+enum GuideJobKind {
+    Hoyolab { map_id: i32 },
+    Inline { description: String, image_url: String },
+}
+
+type PendingJob = (String, String, GuideJobKind, GuideCallback);
 
 #[derive(Default)]
 struct PinGuideState {
@@ -482,7 +512,118 @@ impl PinGuideFetcher {
             return false;
         }
 
-        st.pending = Some((lang_tag, pid, map_id, on_done));
+        st.pending = Some((lang_tag, pid, GuideJobKind::Hoyolab { map_id }, on_done));
+        if !st.thread_alive {
+            st.thread_alive = true;
+            let inner = Arc::clone(&self.inner);
+            if std::thread::Builder::new()
+                .name("GH_PinGuide".to_owned())
+                .spawn(move || worker_loop(inner))
+                .is_err()
+            {
+                st.thread_alive = false;
+                st.pending = None;
+                return false;
+            }
+        }
+        self.inner.cv.notify_one();
+        true
+    }
+
+    /// Registers a text-only inline guide supplied directly by a third-party map provider
+    /// (e.g. Kongying / AppSample) into the LRU cache without hitting HoYoLAB HTTP APIs.
+    pub fn register_inline_guide(
+        &self,
+        pin_id: &str,
+        description: &str,
+        image_url: &str,
+        lang: Option<&str>,
+    ) {
+        let pid = pin_id.trim().to_owned();
+        if pid.is_empty() {
+            return;
+        }
+        let clean_desc = clean_guide_text(description);
+        let safe_img = if is_allowed_provider_image_url(image_url) {
+            image_url.trim().to_owned()
+        } else {
+            String::new()
+        };
+        if clean_desc.is_empty() && safe_img.is_empty() {
+            return;
+        }
+        let lang_tag = self.active_lang_tag(lang).to_owned();
+        let cache_key = (lang_tag.clone(), pid.clone());
+        let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, existing)) = st.cache.iter().find(|(k, _)| k == &cache_key)
+            && existing.image_bytes.as_ref().is_some_and(|b| !b.is_empty())
+        {
+            return;
+        }
+        if safe_img.is_empty() {
+            let guide = PinGuide {
+                pin_id: pid,
+                description: clean_desc,
+                image_url: String::new(),
+                image_bytes: None,
+                ok: true,
+                lang: lang_tag,
+            };
+            insert_guide_into_cache(&mut st, cache_key, guide);
+        }
+    }
+
+    /// Queues an SSRF-safe background image fetch for a third-party map provider pin whose
+    /// description and allowlisted HTTPS `image_url` were supplied by the browser extension.
+    pub fn request_inline_guide<F>(
+        &self,
+        pin_id: &str,
+        description: &str,
+        image_url: &str,
+        on_done: F,
+        lang: Option<&str>,
+    ) -> bool
+    where
+        F: FnOnce(PinGuide) + Send + 'static,
+    {
+        let pid = pin_id.trim().to_owned();
+        if pid.is_empty() {
+            return false;
+        }
+        let safe_img = if is_allowed_provider_image_url(image_url) {
+            image_url.trim().to_owned()
+        } else {
+            String::new()
+        };
+        let clean_desc = clean_guide_text(description);
+        if safe_img.is_empty() {
+            return false;
+        }
+        let lang_tag = self.active_lang_tag(lang).to_owned();
+        let cache_key = (lang_tag.clone(), pid.clone());
+
+        let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.stopped {
+            return false;
+        }
+        if let Some((_, existing)) = st.cache.iter().find(|(k, _)| k == &cache_key)
+            && existing.image_bytes.as_ref().is_some_and(|b| !b.is_empty())
+        {
+            return false;
+        }
+        if st.inflight.as_ref() == Some(&cache_key) {
+            return false;
+        }
+
+        st.pending = Some((
+            lang_tag,
+            pid,
+            GuideJobKind::Inline {
+                description: clean_desc,
+                image_url: safe_img,
+            },
+            Box::new(on_done),
+        ));
         if !st.thread_alive {
             st.thread_alive = true;
             let inner = Arc::clone(&self.inner);
@@ -752,9 +893,73 @@ fn fetch_sync_inner(
     }
 }
 
+fn insert_guide_into_cache(st: &mut PinGuideState, cache_key: (String, String), guide: PinGuide) {
+    if let Some(pos) = st.cache.iter().position(|(k, _)| k == &cache_key)
+        && let Some((_, old)) = st.cache.remove(pos)
+    {
+        st.cache_image_bytes = st
+            .cache_image_bytes
+            .saturating_sub(guide_image_bytes(&old));
+    }
+    st.cache_image_bytes = st
+        .cache_image_bytes
+        .saturating_add(guide_image_bytes(&guide));
+    st.cache.push_back((cache_key, guide));
+    while st.cache.len() > MAX_CACHE
+        || (st.cache_image_bytes > MAX_CACHE_IMAGE_BYTES && st.cache.len() > 1)
+    {
+        if let Some((_, evicted)) = st.cache.pop_front() {
+            st.cache_image_bytes = st
+                .cache_image_bytes
+                .saturating_sub(guide_image_bytes(&evicted));
+        } else {
+            break;
+        }
+    }
+}
+
+fn fetch_inline_image_inner(
+    inner: &PinGuideInner,
+    pin_id: &str,
+    description: &str,
+    image_url: &str,
+    lang_tag: &str,
+) -> PinGuide {
+    let mut image_bytes = None;
+    if is_allowed_provider_image_url(image_url) {
+        let img_total_timeout = inner
+            .timeout
+            .saturating_mul(3)
+            .min(Duration::from_secs(25))
+            .max(inner.timeout);
+        let bytes_res = match &inner.fetch_bytes {
+            Some(hook) => hook(image_url),
+            None => http_get_bytes_with_timeouts(
+                image_url,
+                inner.timeout,
+                img_total_timeout,
+                MAX_IMAGE_BYTES,
+            ),
+        };
+        if let Ok(bytes) = bytes_res
+            && !bytes.is_empty()
+        {
+            image_bytes = Some(bytes);
+        }
+    }
+    PinGuide {
+        pin_id: pin_id.to_owned(),
+        description: description.to_owned(),
+        image_url: image_url.to_owned(),
+        image_bytes,
+        ok: true,
+        lang: lang_tag.to_owned(),
+    }
+}
+
 fn worker_loop(inner: Arc<PinGuideInner>) {
     loop {
-        let (lang_tag, pid, map_id, cb) = {
+        let (lang_tag, pid, job_kind, cb) = {
             let mut st = inner.state.lock().unwrap_or_else(|e| e.into_inner());
             while st.pending.is_none() && !st.stopped {
                 let (guard, _wait_res) = inner
@@ -771,14 +976,20 @@ fn worker_loop(inner: Arc<PinGuideInner>) {
                 st.thread_alive = false;
                 return;
             }
-            let Some((lt, p, mid, callback)) = st.pending.take() else {
+            let Some((lt, p, kind, callback)) = st.pending.take() else {
                 continue;
             };
             st.inflight = Some((lt.clone(), p.clone()));
-            (lt, p, mid, callback)
+            (lt, p, kind, callback)
         };
 
-        let guide = fetch_sync_inner(&inner, &pid, map_id, &lang_tag);
+        let guide = match job_kind {
+            GuideJobKind::Hoyolab { map_id } => fetch_sync_inner(&inner, &pid, map_id, &lang_tag),
+            GuideJobKind::Inline {
+                description,
+                image_url,
+            } => fetch_inline_image_inner(&inner, &pid, &description, &image_url, &lang_tag),
+        };
         let cache_key = (lang_tag, pid);
 
         let should_cache = guide.ok
@@ -789,28 +1000,7 @@ fn worker_loop(inner: Arc<PinGuideInner>) {
             let mut st = inner.state.lock().unwrap_or_else(|e| e.into_inner());
             st.inflight = None;
             if should_cache {
-                if let Some(pos) = st.cache.iter().position(|(k, _)| k == &cache_key)
-                    && let Some((_, old)) = st.cache.remove(pos)
-                {
-                    st.cache_image_bytes = st
-                        .cache_image_bytes
-                        .saturating_sub(guide_image_bytes(&old));
-                }
-                st.cache_image_bytes = st
-                    .cache_image_bytes
-                    .saturating_add(guide_image_bytes(&guide));
-                st.cache.push_back((cache_key, guide.clone()));
-                while st.cache.len() > MAX_CACHE
-                    || (st.cache_image_bytes > MAX_CACHE_IMAGE_BYTES && st.cache.len() > 1)
-                {
-                    if let Some((_, evicted)) = st.cache.pop_front() {
-                        st.cache_image_bytes = st
-                            .cache_image_bytes
-                            .saturating_sub(guide_image_bytes(&evicted));
-                    } else {
-                        break;
-                    }
-                }
+                insert_guide_into_cache(&mut st, cache_key, guide.clone());
             }
         }
 
@@ -2481,6 +2671,50 @@ mod tests {
             assert!(hits[3].contains("lang=ja-jp"));
             assert_eq!(hits[4], "/snez_ja.png");
         }
+    }
+
+    #[test]
+    fn third_party_provider_inline_guide_ssrf_allowlist_and_async_fetch() {
+        assert!(is_allowed_provider_image_url(
+            "https://assets.yuanshen.site/images/560.jpg"
+        ));
+        assert!(is_allowed_provider_image_url(
+            "https://game-cdn.appsample.com/gim/images/123.jpg"
+        ));
+        assert!(!is_allowed_provider_image_url(
+            "http://assets.yuanshen.site/images/560.jpg"
+        ));
+        assert!(!is_allowed_provider_image_url(
+            "https://127.0.0.1/evil.png"
+        ));
+        assert!(!is_allowed_provider_image_url(
+            "https://evil.example.com/assets.yuanshen.site/a.png"
+        ));
+
+        let fetcher = PinGuideFetcher::with_config(PinGuideConfig {
+            fetch_bytes: Some(Arc::new(|url| {
+                assert_eq!(url, "https://assets.yuanshen.site/images/560.jpg");
+                Ok(b"KY_IMG_OK".to_vec())
+            })),
+            ..Default::default()
+        });
+        assert!(!PinGuideFetcher::is_fetchable_id("kongying:560"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(fetcher.request_inline_guide(
+            "kongying:560",
+            "<b>Under the bridge</b>",
+            "https://assets.yuanshen.site/images/560.jpg",
+            move |g| {
+                let _ = tx.send(g);
+            },
+            Some("en"),
+        ));
+        let g = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(g.ok);
+        assert_eq!(g.description, "Under the bridge");
+        assert_eq!(g.image_bytes.as_deref(), Some(b"KY_IMG_OK".as_slice()));
+        assert!(fetcher.get_cached("kongying:560", Some("en")).is_some());
+        fetcher.stop();
     }
 
     #[test]

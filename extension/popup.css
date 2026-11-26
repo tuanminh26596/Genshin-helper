@@ -984,6 +984,36 @@ a:focus-visible,
   padding-top: 2px;
 }
 
+.open-map-group {
+  display: flex;
+  gap: 5px;
+  align-items: stretch;
+  width: 100%;
+}
+
+.open-map-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.provider-select {
+  flex: 0 0 auto;
+  max-width: 108px;
+  padding: 0 6px;
+  border-radius: 7px;
+  border: 1px solid rgba(212, 175, 55, 0.32);
+  background: rgba(15, 23, 42, 0.85);
+  color: #e2e8f0;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.provider-select:focus-visible {
+  outline: 2px solid rgba(212, 175, 55, 0.65);
+  outline-offset: 1px;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;

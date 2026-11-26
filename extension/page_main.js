@@ -2564,6 +2564,7 @@
                 method: 'POST',
                 body: {
                     tab_id: GH_TAB_ID,
+                    provider_id: 'hoyolab',
                     tab_visible: !document.hidden,
                     tab_focused: typeof document.hasFocus === 'function' ? Boolean(document.hasFocus()) : false,
                     center: [center.lat, center.lng],
@@ -5484,6 +5485,7 @@
                 method: 'POST',
                 body: {
                     tab_id: GH_TAB_ID,
+                    provider_id: 'hoyolab',
                     tab_visible: !document.hidden,
                     tab_focused: typeof document.hasFocus === 'function' ? Boolean(document.hasFocus()) : false,
                     user_initiated: userInitiated,
@@ -5685,6 +5687,7 @@
                 method: 'POST',
                 body: {
                     tab_id: GH_TAB_ID,
+                    provider_id: 'hoyolab',
                     tab_visible: !document.hidden,
                     tab_focused: typeof document.hasFocus === 'function' ? Boolean(document.hasFocus()) : false,
                     user_initiated: Boolean(userInitiated || force),

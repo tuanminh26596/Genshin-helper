@@ -22,7 +22,7 @@ use axum::Router;
 use gh_core::atomic_io::{write_json_atomic, write_str_atomic};
 use gh_core::config::{AppConfig, VALID_MMAP_OVERLAY_MODES};
 use gh_core::i18n::{resolve_language, set_language};
-use gh_core::map_bridge::execute_cross_map_export;
+use gh_core::map_bridge::{execute_cross_map_export, execute_provider_calibration};
 use gh_core::nav_controller::{
     NavAction, NavPin, NavigationController, normalize_raw_nav_pin,
 };
@@ -207,6 +207,7 @@ struct SyncInner {
     feedback_seen: Mutex<VecDeque<FeedbackSeenEntry>>,
     tab_visibility: Mutex<HashMap<String, TabVisibility>>,
     pin_owner: Mutex<Option<PinOwnerState>>,
+    active_provider: Mutex<String>,
     nav_state: Mutex<StandaloneNavState>,
     lifecycle: Mutex<ServerLifecycle>,
 }
@@ -304,6 +305,59 @@ impl SyncInner {
             }
         }
     }
+
+    /// Updates the active map provider if `raw_provider` differs from the current one.
+    /// Returns `Some((new_provider, had_standalone_lock))` when switched.
+    fn update_active_provider(&self, raw_provider: Option<&str>) -> Option<(String, bool)> {
+        let norm = raw_provider
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty() && s.len() <= 32)?;
+        let mut guard = self
+            .active_provider
+            .lock()
+            .expect("active_provider lock poisoned");
+        if *guard == norm {
+            return None;
+        }
+        *guard = norm.clone();
+        drop(guard);
+        let had_lock = self
+            .nav_state
+            .lock()
+            .expect("nav_state lock poisoned")
+            .controller
+            .clear_for_provider_switch();
+        Some((norm, had_lock))
+    }
+
+    fn current_provider(&self) -> String {
+        self.active_provider
+            .lock()
+            .expect("active_provider lock poisoned")
+            .clone()
+    }
+}
+
+async fn notify_provider_if_switched(inner: &Arc<SyncInner>, raw_provider: Option<&str>) {
+    let Some((new_prov, had_lock)) = inner.update_active_provider(raw_provider) else {
+        return;
+    };
+    if had_lock {
+        let _ = broadcast_inner(
+            inner,
+            json!({"type": "TARGET_LOCK_UPDATED", "locked_target": Value::Null}),
+            false,
+            false,
+        );
+    }
+    let cb_opt = inner
+        .callbacks
+        .read()
+        .expect("callbacks lock poisoned")
+        .clone();
+    if let Some(cb) = cb_opt {
+        let _ = tokio::task::spawn_blocking(move || cb.on_active_provider_change(&new_prov)).await;
+    }
 }
 
 /// Last Page Visibility report (`document.hidden`) of one HoYoLAB map tab.
@@ -364,6 +418,7 @@ impl SyncServer {
                 feedback_seen: Mutex::new(VecDeque::with_capacity(FEEDBACK_SEEN_MAXLEN)),
                 tab_visibility: Mutex::new(HashMap::new()),
                 pin_owner: Mutex::new(None),
+                active_provider: Mutex::new("hoyolab".to_owned()),
                 nav_state: Mutex::new(StandaloneNavState {
                     controller: NavigationController::new(),
                     route_legs: Vec::new(),
@@ -390,6 +445,10 @@ impl SyncServer {
 
     pub fn is_running(&self) -> bool {
         self.inner.is_running.load(Ordering::Acquire)
+    }
+
+    pub fn active_provider(&self) -> String {
+        self.inner.current_provider()
     }
 
     /// Returns `true` when `/shutdown` was initiated by a native Setup/Uninstaller process that
@@ -1088,6 +1147,7 @@ fn build_router(inner: Arc<SyncInner>) -> Router {
         .route("/lan_pins", any(handle_lan_pins))
         .route("/launch_borderless", any(handle_launch_borderless))
         .route("/cross_map_export", any(handle_cross_map_export))
+        .route("/calibrate_provider", any(handle_calibrate_provider))
         .route("/app_update", any(handle_app_update))
         .route("/poll", any(handle_poll))
         .fallback(handle_not_found)
@@ -1990,6 +2050,11 @@ async fn handle_report_state(
     if !inner.claim_or_check_pin_owner(tab_id, visible, focused, false, Instant::now()) {
         return json_response(StatusCode::OK, &json!({"ignored_secondary_client": true}));
     }
+    let provider_id = req_map
+        .get("provider_id")
+        .or_else(|| req_map.get("provider"))
+        .and_then(Value::as_str);
+    notify_provider_if_switched(&inner, provider_id).await;
     if !req_map.is_empty() {
         let mut st = inner
             .browser_state
@@ -2919,6 +2984,11 @@ async fn handle_nearby_pins(
             &json!({"ok": true, "count": 0, "ignored_secondary_client": true}),
         );
     }
+    let provider_id = req
+        .get("provider_id")
+        .or_else(|| req.get("provider"))
+        .and_then(Value::as_str);
+    notify_provider_if_switched(&inner, provider_id).await;
     let map_id = json_i64(req.get("map_id")).unwrap_or(2) as i32;
     let raw_pins = req
         .get("pins")
@@ -3838,6 +3908,11 @@ async fn handle_lan_pins(State(inner): State<Arc<SyncInner>>, body: Bytes) -> Re
                 &json!({"ok": true, "rev": 0, "ignored_secondary_client": true}),
             );
         }
+        let provider_id = obj
+            .get("provider_id")
+            .or_else(|| obj.get("provider"))
+            .and_then(Value::as_str);
+        notify_provider_if_switched(&inner, provider_id).await;
     }
     let cb_opt = inner
         .callbacks
@@ -3997,6 +4072,46 @@ async fn handle_cross_map_export(
                 "format": target_format,
                 "payload": Value::Null,
                 "report": Value::Null,
+                "error": e.to_string(),
+            }),
+        ),
+    }
+}
+
+async fn handle_calibrate_provider(
+    State(inner): State<Arc<SyncInner>>,
+    body: Bytes,
+) -> Response {
+    mark_client_poll(&inner);
+    let req = parse_lenient_json_map(&body);
+    let req_val = Value::Object(req);
+    let cb_opt = inner
+        .callbacks
+        .read()
+        .expect("callbacks lock poisoned")
+        .clone();
+    let res: CoreResult<Value> = if let Some(cb) = cb_opt {
+        tokio::task::spawn_blocking(move || cb.on_calibrate_provider(&req_val))
+            .await
+            .unwrap_or_else(|e| Err(CoreError::Sync(e.to_string())))
+    } else {
+        tokio::task::spawn_blocking(move || execute_provider_calibration(&req_val, &[]))
+            .await
+            .unwrap_or_else(|e| Err(CoreError::Sync(e.to_string())))
+    };
+    match res {
+        Ok(val) => {
+            let status = if val.get("ok").and_then(Value::as_bool) == Some(false) {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::OK
+            };
+            json_response(status, &val)
+        }
+        Err(e) => json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({
+                "ok": false,
                 "error": e.to_string(),
             }),
         ),
@@ -4183,6 +4298,64 @@ mod tests {
             headers.get("connection").and_then(|v| v.to_str().ok()),
             Some("close")
         );
+    }
+
+    #[tokio::test]
+    async fn calibrate_provider_and_multi_provider_switch_clears_stale_lock() {
+        let srv = SyncServer::new(SyncServerConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            poll_timeout: Duration::from_millis(120),
+            ..Default::default()
+        });
+        let port = srv.start().await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let cli = reqwest::Client::new();
+
+        // 1. /calibrate_provider returns verified seed transform for appsample (including Inazuma & Easybreeze zones)
+        let cal_resp = cli
+            .post(format!("{base}/calibrate_provider"))
+            .json(&json!({"provider": "appsample", "map_id": 2, "anchors": []}))
+            .send()
+            .await
+            .expect("calibrate_provider");
+        assert_eq!(cal_resp.status(), StatusCode::OK);
+        let cal_json: Value = cal_resp.json().await.expect("cal json");
+        assert_eq!(cal_json["ok"], true);
+        assert_eq!(cal_json["provider"], "appsample");
+        assert_eq!(cal_json["transform"]["zones"].as_array().map(Vec::len), Some(2));
+
+        // 2. Lock a pin on HoYoLAB, then switch active tab to Kongying -> stale lock is cleared
+        assert_eq!(srv.active_provider(), "hoyolab");
+        let lock_resp = cli
+            .post(format!("{base}/nav_command"))
+            .json(&json!({
+                "action": "lock_target",
+                "pin": {"id": "1001", "name": "HoYo Pin", "lat": 10.0, "lng": 20.0, "map_id": 2}
+            }))
+            .send()
+            .await
+            .expect("lock_target");
+        assert_eq!(lock_resp.status(), StatusCode::OK);
+
+        let ky_resp = cli
+            .post(format!("{base}/nearby_pins"))
+            .json(&json!({
+                "tab_id": "tab_ky",
+                "provider_id": "kongying",
+                "tab_visible": true,
+                "tab_focused": true,
+                "user_initiated": true,
+                "map_id": 2,
+                "pins": [{"id": "kongying:560", "name": "普通宝箱", "lat": 12.0, "lng": 22.0, "map_id": 2}]
+            }))
+            .send()
+            .await
+            .expect("ky nearby_pins");
+        assert_eq!(ky_resp.status(), StatusCode::OK);
+        assert_eq!(srv.active_provider(), "kongying");
+
+        srv.stop().await;
     }
 
     #[tokio::test]

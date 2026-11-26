@@ -13,6 +13,8 @@
   ],
   "host_permissions": [
     "https://act.hoyolab.com/*",
+    "https://v3.yuanshen.site/*",
+    "https://genshin-impact-map.appsample.com/*",
     "http://127.0.0.1:8765/*",
     "http://localhost:8765/*"
   ],
@@ -48,7 +50,9 @@
     },
     {
       "matches": [
-        "https://act.hoyolab.com/*"
+        "https://act.hoyolab.com/*",
+        "https://v3.yuanshen.site/*",
+        "https://genshin-impact-map.appsample.com/*"
       ],
       "js": [
         "content_bridge.js",
@@ -58,10 +62,14 @@
     },
     {
       "matches": [
-        "https://act.hoyolab.com/*"
+        "https://act.hoyolab.com/*",
+        "https://v3.yuanshen.site/*",
+        "https://genshin-impact-map.appsample.com/*"
       ],
       "js": [
         "i18n.js",
+        "coord_transform.js",
+        "provider_runtime.js",
         "page_main.js"
       ],
       "world": "MAIN",
@@ -75,7 +83,9 @@
         "locales/en.json"
       ],
       "matches": [
-        "https://act.hoyolab.com/*"
+        "https://act.hoyolab.com/*",
+        "https://v3.yuanshen.site/*",
+        "https://genshin-impact-map.appsample.com/*"
       ]
     }
   ]

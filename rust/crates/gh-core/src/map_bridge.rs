@@ -3842,10 +3842,989 @@ pub fn execute_cross_map_export(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Live Multi-Provider Piecewise Coordinate Transform & Auto-Calibration
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SpatialBbox {
+    pub min_x: f64,
+    pub max_x: f64,
+    pub min_y: f64,
+    pub max_y: f64,
+}
+
+impl SpatialBbox {
+    pub fn from_points(pts: &[(f64, f64)]) -> Option<Self> {
+        let first = *pts.first()?;
+        let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.0, first.0, first.1, first.1);
+        for &(x, y) in pts.iter().skip(1) {
+            if x < min_x {
+                min_x = x;
+            }
+            if x > max_x {
+                max_x = x;
+            }
+            if y < min_y {
+                min_y = y;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+        }
+        Some(Self {
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+        })
+    }
+
+    pub fn contains(&self, x: f64, y: f64, pad_x: f64, pad_y: f64) -> bool {
+        x >= self.min_x - pad_x
+            && x <= self.max_x + pad_x
+            && y >= self.min_y - pad_y
+            && y <= self.max_y + pad_y
+    }
+
+    pub fn distance_sq(&self, x: f64, y: f64) -> f64 {
+        let dx = if x < self.min_x {
+            self.min_x - x
+        } else if x > self.max_x {
+            x - self.max_x
+        } else {
+            0.0
+        };
+        let dy = if y < self.min_y {
+            self.min_y - y
+        } else if y > self.max_y {
+            y - self.max_y
+        } else {
+            0.0
+        };
+        dx * dx + dy * dy
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZoneAffine {
+    pub id: String,
+    pub canonical_bbox: SpatialBbox,
+    pub provider_bbox: SpatialBbox,
+    pub affine: AxisAffine,
+}
+
+/// Bidirectional transform between Canonical Internal CRS (HoYoLAB World Coordinates)
+/// and an external map provider's coordinate space, supporting per-region piecewise
+/// shifts (e.g. AppSample shifting Inazuma and Easybreeze Resort closer to the mainland)
+/// and swapped Leaflet axes (e.g. Kongying v3 mapping `lat = +X East, lng = +Y South`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PiecewiseMapTransform {
+    pub provider: String,
+    pub map_id: i64,
+    #[serde(default)]
+    pub swap_lat_lng: bool,
+    pub base: AxisAffine,
+    #[serde(default)]
+    pub zones: Vec<ZoneAffine>,
+    #[serde(default)]
+    pub matched_anchors: usize,
+    #[serde(default)]
+    pub total_canonical_anchors: usize,
+    #[serde(default)]
+    pub rmse_canonical: f64,
+    #[serde(default)]
+    pub source: String,
+}
+
+impl PiecewiseMapTransform {
+    /// Projects Canonical `(cx, cy)` (`lng = cx`, `lat = cy`) -> Provider `(px, py)`.
+    pub fn forward(&self, cx: f64, cy: f64) -> (f64, f64) {
+        let pad = 350.0;
+        let mut best_zone: Option<(&ZoneAffine, f64)> = None;
+        for z in &self.zones {
+            if z.canonical_bbox.contains(cx, cy, pad, pad) {
+                let d2 = z.canonical_bbox.distance_sq(cx, cy);
+                if best_zone.is_none_or(|(_, bd)| d2 < bd) {
+                    best_zone = Some((z, d2));
+                }
+            }
+        }
+        if let Some((zone, _)) = best_zone {
+            return zone.affine.transform(cx, cy);
+        }
+        self.base.transform(cx, cy)
+    }
+
+    /// Projects Provider `(px, py)` -> Canonical `(cx, cy)`.
+    pub fn inverse(&self, px: f64, py: f64) -> CoreResult<(f64, f64)> {
+        let pad_x = 350.0 * self.base.ax.abs();
+        let pad_y = 350.0 * self.base.cy.abs();
+        let mut best_zone: Option<(&ZoneAffine, f64)> = None;
+        for z in &self.zones {
+            if z.provider_bbox.contains(px, py, pad_x, pad_y) {
+                let d2 = z.provider_bbox.distance_sq(px, py);
+                if best_zone.is_none_or(|(_, bd)| d2 < bd) {
+                    best_zone = Some((z, d2));
+                }
+            }
+        }
+        if let Some((zone, _)) = best_zone {
+            return Ok(zone.affine.inverse()?.transform(px, py));
+        }
+        Ok(self.base.inverse()?.transform(px, py))
+    }
+
+    /// Converts Canonical `(cx, cy)` into Leaflet `(lat, lng)` respecting `swap_lat_lng`.
+    pub fn to_leaflet_latlng(&self, cx: f64, cy: f64) -> (f64, f64) {
+        let (px, py) = self.forward(cx, cy);
+        if self.swap_lat_lng {
+            (px, py)
+        } else {
+            (py, px)
+        }
+    }
+
+    /// Converts Leaflet `(lat, lng)` into Canonical `(cx, cy)` respecting `swap_lat_lng`.
+    pub fn from_leaflet_latlng(&self, lat: f64, lng: f64) -> CoreResult<(f64, f64)> {
+        let (px, py) = if self.swap_lat_lng {
+            (lat, lng)
+        } else {
+            (lng, lat)
+        };
+        self.inverse(px, py)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CanonicalAnchor {
+    pub x: f64,
+    pub y: f64,
+    pub label_id: i32,
+    pub area_id: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderAnchor {
+    pub x: f64,
+    pub y: f64,
+    pub is_statue: bool,
+}
+
+fn make_seed_affine(
+    ax: f64,
+    bx: f64,
+    cy: f64,
+    dy: f64,
+    map_id: i64,
+    source: &str,
+) -> AxisAffine {
+    AxisAffine {
+        ax,
+        bx,
+        cy,
+        dy,
+        map_id: Some(map_id),
+        rmse: 0.0,
+        max_residual: 0.0,
+        anchor_count: 0,
+        source: source.to_owned(),
+    }
+}
+
+/// Returns empirically verified default [`PiecewiseMapTransform`] seeds for live
+/// multi-provider sync (used as zero-latency initial fallback before runtime
+/// auto-calibration runs against the page's live waypoints).
+pub fn provider_default_transform(provider: &str, map_id: i64) -> Option<PiecewiseMapTransform> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "hoyolab" | "miyoushe" => Some(PiecewiseMapTransform {
+            provider: provider.trim().to_ascii_lowercase(),
+            map_id,
+            swap_lat_lng: false,
+            base: make_seed_affine(1.0, 0.0, 1.0, 0.0, map_id, "identity"),
+            zones: Vec::new(),
+            matched_anchors: 0,
+            total_canonical_anchors: 0,
+            rmse_canonical: 0.0,
+            source: "identity".to_owned(),
+        }),
+        "kongying" => match map_id {
+            2 => Some(PiecewiseMapTransform {
+                provider: "kongying".to_owned(),
+                map_id: 2,
+                swap_lat_lng: true,
+                base: make_seed_affine(
+                    1.335301544,
+                    1527.748294,
+                    1.335165651,
+                    -3931.249166,
+                    2,
+                    "seed_kongying_twt702",
+                ),
+                zones: Vec::new(),
+                matched_anchors: 0,
+                total_canonical_anchors: 0,
+                rmse_canonical: 0.0,
+                source: "seed_kongying_twt702".to_owned(),
+            }),
+            _ => None,
+        },
+        "appsample" => match map_id {
+            2 => {
+                let sx = 8.58624949353e-5;
+                let sy = -8.58625216451e-5;
+                let base = make_seed_affine(
+                    sx,
+                    0.522689857989,
+                    sy,
+                    0.199458672905,
+                    2,
+                    "seed_appsample_v72_m2",
+                );
+                let inazuma = ZoneAffine {
+                    id: "area_3".to_owned(),
+                    canonical_bbox: SpatialBbox {
+                        min_x: -169.0,
+                        max_x: 3840.0,
+                        min_y: 4087.0,
+                        max_y: 9019.2,
+                    },
+                    provider_bbox: SpatialBbox {
+                        min_x: sx * -169.0 + 0.3334857058,
+                        max_x: sx * 3840.0 + 0.3334857058,
+                        min_y: sy * 9019.2 + 0.1994622811,
+                        max_y: sy * 4087.0 + 0.1994622811,
+                    },
+                    affine: make_seed_affine(
+                        sx,
+                        0.3334857058,
+                        sy,
+                        0.1994622811,
+                        2,
+                        "seed_appsample_v72_inazuma",
+                    ),
+                };
+                let easybreeze = ZoneAffine {
+                    id: "area_11_west".to_owned(),
+                    canonical_bbox: SpatialBbox {
+                        min_x: -15949.9,
+                        max_x: -14339.4,
+                        min_y: 695.5,
+                        max_y: 2662.2,
+                    },
+                    provider_bbox: SpatialBbox {
+                        min_x: sx * -15949.9 + 0.6943898695,
+                        max_x: sx * -14339.4 + 0.6943898695,
+                        min_y: sy * 2662.2 + 0.1994580854,
+                        max_y: sy * 695.5 + 0.1994580854,
+                    },
+                    affine: make_seed_affine(
+                        sx,
+                        0.6943898695,
+                        sy,
+                        0.1994580854,
+                        2,
+                        "seed_appsample_v72_easybreeze",
+                    ),
+                };
+                Some(PiecewiseMapTransform {
+                    provider: "appsample".to_owned(),
+                    map_id: 2,
+                    swap_lat_lng: false,
+                    base,
+                    zones: vec![inazuma, easybreeze],
+                    matched_anchors: 0,
+                    total_canonical_anchors: 0,
+                    rmse_canonical: 0.0,
+                    source: "seed_appsample_v72".to_owned(),
+                })
+            }
+            7 => Some(PiecewiseMapTransform {
+                provider: "appsample".to_owned(),
+                map_id: 7,
+                swap_lat_lng: false,
+                base: make_seed_affine(
+                    0.0003425009681,
+                    -0.06889919302,
+                    -0.0003424994737,
+                    0.09208809008,
+                    7,
+                    "seed_appsample_v72_m7",
+                ),
+                zones: Vec::new(),
+                matched_anchors: 0,
+                total_canonical_anchors: 0,
+                rmse_canonical: 0.0,
+                source: "seed_appsample_v72".to_owned(),
+            }),
+            9 => Some(PiecewiseMapTransform {
+                provider: "appsample".to_owned(),
+                map_id: 9,
+                swap_lat_lng: false,
+                base: make_seed_affine(
+                    0.0006849998113,
+                    0.1389419667,
+                    -0.0006849998961,
+                    -0.007533606738,
+                    9,
+                    "seed_appsample_v72_m9",
+                ),
+                zones: Vec::new(),
+                matched_anchors: 0,
+                total_canonical_anchors: 0,
+                rmse_canonical: 0.0,
+                source: "seed_appsample_v72".to_owned(),
+            }),
+            34 => Some(PiecewiseMapTransform {
+                provider: "appsample".to_owned(),
+                map_id: 34,
+                swap_lat_lng: false,
+                base: make_seed_affine(
+                    0.0003433756412,
+                    0.03262133342,
+                    -0.000343387891,
+                    -0.03090441433,
+                    34,
+                    "seed_appsample_v72_m34",
+                ),
+                zones: Vec::new(),
+                matched_anchors: 0,
+                total_canonical_anchors: 0,
+                rmse_canonical: 0.0,
+                source: "seed_appsample_v72".to_owned(),
+            }),
+            36 => Some(PiecewiseMapTransform {
+                provider: "appsample".to_owned(),
+                map_id: 36,
+                swap_lat_lng: false,
+                base: make_seed_affine(
+                    0.0005150052408,
+                    0.0,
+                    -0.0005150024515,
+                    0.0,
+                    36,
+                    "seed_appsample_v72_m36",
+                ),
+                zones: Vec::new(),
+                matched_anchors: 0,
+                total_canonical_anchors: 0,
+                rmse_canonical: 0.0,
+                source: "seed_appsample_v72".to_owned(),
+            }),
+            37 => Some(PiecewiseMapTransform {
+                provider: "appsample".to_owned(),
+                map_id: 37,
+                swap_lat_lng: false,
+                base: make_seed_affine(
+                    0.0003430005951,
+                    -0.00411639969,
+                    -0.0003429997946,
+                    0.04287577188,
+                    37,
+                    "seed_appsample_v72_m37",
+                ),
+                zones: Vec::new(),
+                matched_anchors: 0,
+                total_canonical_anchors: 0,
+                rmse_canonical: 0.0,
+                source: "seed_appsample_v72".to_owned(),
+            }),
+            40 => Some(PiecewiseMapTransform {
+                provider: "appsample".to_owned(),
+                map_id: 40,
+                swap_lat_lng: false,
+                base: make_seed_affine(
+                    0.0001495201733,
+                    -0.3464388249,
+                    -0.0001495198016,
+                    0.0001504959339,
+                    40,
+                    "seed_appsample_v72_m40",
+                ),
+                zones: Vec::new(),
+                matched_anchors: 0,
+                total_canonical_anchors: 0,
+                rmse_canonical: 0.0,
+                source: "seed_appsample_v72".to_owned(),
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Zero-seed robust multi-cluster RANSAC + per-area piecewise zone discovery between
+/// canonical HoYoLAB landmarks (`multimap_v4.json`) and live provider waypoints.
+pub fn calibrate_piecewise_from_anchors(
+    provider: &str,
+    map_id: i64,
+    canonical_anchors: &[CanonicalAnchor],
+    provider_anchors: &[ProviderAnchor],
+    expected_y_flip: Option<bool>,
+    swap_lat_lng: bool,
+    seed_override: Option<&PiecewiseMapTransform>,
+) -> CoreResult<PiecewiseMapTransform> {
+    let prov = provider.trim().to_ascii_lowercase();
+    if canonical_anchors.len() < 3 || provider_anchors.len() < 3 {
+        if let Some(seed) = seed_override
+            .cloned()
+            .or_else(|| provider_default_transform(&prov, map_id))
+        {
+            return Ok(seed);
+        }
+        return Err(CoreError::InvalidArgument(format!(
+            "Need at least 3 canonical ({}) and provider ({}) anchors for {prov} map {map_id}",
+            canonical_anchors.len(),
+            provider_anchors.len()
+        )));
+    }
+
+    // 1. Evaluate seed hypothesis first if available (handles single-area partial loads cleanly).
+    let mut best_hyp: Option<(usize, f64, f64, f64, f64)> = None;
+    let eval_hyp = |sx: f64, bx: f64, sy: f64, dy: f64, thresh: f64| -> usize {
+        if !sx.is_finite() || !sy.is_finite() || sx.abs() < 1e-10 || sy.abs() < 1e-10 {
+            return 0;
+        }
+        let inv_sx = 1.0 / sx.abs();
+        let inv_sy = 1.0 / sy.abs();
+        let mut count = 0usize;
+        for p in provider_anchors {
+            let mut min_err = f64::INFINITY;
+            for c in canonical_anchors {
+                let ex = (p.x - (sx * c.x + bx)) * inv_sx;
+                let ey = (p.y - (sy * c.y + dy)) * inv_sy;
+                let err = ex.hypot(ey);
+                if err < min_err {
+                    min_err = err;
+                }
+            }
+            if min_err < thresh {
+                count += 1;
+            }
+        }
+        count
+    };
+
+    if let Some(seed) = seed_override
+        .cloned()
+        .or_else(|| provider_default_transform(&prov, map_id))
+    {
+        let inl = eval_hyp(seed.base.ax, seed.base.bx, seed.base.cy, seed.base.dy, 60.0);
+        if inl >= 4 {
+            best_hyp = Some((inl, seed.base.ax, seed.base.bx, seed.base.cy, seed.base.dy));
+        }
+    }
+
+    // 2. Pair-voting RANSAC on Statues (label_id == 2) first, falling back to full anchors
+    //    when fewer than 4 Statues exist on the map (e.g. Chasm / Enkanomiya / partial area).
+    let need_ransac = best_hyp.is_none_or(|(inl, ..)| inl * 2 < provider_anchors.len().min(canonical_anchors.len()));
+    if need_ransac {
+        let can_statues: Vec<&CanonicalAnchor> = canonical_anchors
+            .iter()
+            .filter(|a| a.label_id == 2)
+            .collect();
+        let prv_statues: Vec<&ProviderAnchor> = provider_anchors
+            .iter()
+            .filter(|a| a.is_statue)
+            .collect();
+
+        type Point2Pair = (Vec<(f64, f64)>, Vec<(f64, f64)>);
+        let (src_sub, dst_sub): Point2Pair =
+            if can_statues.len() >= 4 && prv_statues.len() >= 4 && can_statues.len() <= 80 && prv_statues.len() <= 80 {
+                (
+                    can_statues.iter().map(|a| (a.x, a.y)).collect(),
+                    prv_statues.iter().map(|a| (a.x, a.y)).collect(),
+                )
+            } else {
+                // Subsample deterministically to <= 45 points so O(n^2 * m^2) finishes in < 5ms.
+                let step_c = (canonical_anchors.len() / 40).max(1);
+                let step_p = (provider_anchors.len() / 40).max(1);
+                (
+                    canonical_anchors
+                        .iter()
+                        .step_by(step_c)
+                        .take(45)
+                        .map(|a| (a.x, a.y))
+                        .collect(),
+                    provider_anchors
+                        .iter()
+                        .step_by(step_p)
+                        .take(45)
+                        .map(|a| (a.x, a.y))
+                        .collect(),
+                )
+            };
+
+        let target_early = (dst_sub.len().min(src_sub.len()) * 85) / 100;
+        let span_x = src_sub
+            .iter()
+            .map(|p| p.0)
+            .fold(f64::NEG_INFINITY, f64::max)
+            - src_sub.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+        let span_y = src_sub
+            .iter()
+            .map(|p| p.1)
+            .fold(f64::NEG_INFINITY, f64::max)
+            - src_sub.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+        let min_dx = (span_x * 0.12).max(120.0);
+        let min_dy = (span_y * 0.12).max(120.0);
+
+        'outer: for i in 0..src_sub.len() {
+            for j in (i + 1)..src_sub.len() {
+                let dx_c = src_sub[j].0 - src_sub[i].0;
+                let dy_c = src_sub[j].1 - src_sub[i].1;
+                if dx_c.abs() < min_dx || dy_c.abs() < min_dy {
+                    continue;
+                }
+                for a in 0..dst_sub.len() {
+                    for b in 0..dst_sub.len() {
+                        if a == b {
+                            continue;
+                        }
+                        let sx = (dst_sub[b].0 - dst_sub[a].0) / dx_c;
+                        let sy = (dst_sub[b].1 - dst_sub[a].1) / dy_c;
+                        if sx <= 1e-10 {
+                            continue;
+                        }
+                        if let Some(flip) = expected_y_flip {
+                            if flip && sy >= -1e-10 {
+                                continue;
+                            }
+                            if !flip && sy <= 1e-10 {
+                                continue;
+                            }
+                        } else if sy.abs() <= 1e-10 {
+                            continue;
+                        }
+                        if ((sx.abs() / sy.abs()) - 1.0).abs() > 0.06 {
+                            continue;
+                        }
+                        let bx = dst_sub[a].0 - sx * src_sub[i].0;
+                        let dy = dst_sub[a].1 - sy * src_sub[i].1;
+                        let inv_sx = 1.0 / sx.abs();
+                        let inv_sy = 1.0 / sy.abs();
+                        let mut inl = 0usize;
+                        for &(px, py) in &dst_sub {
+                            let mut ok = false;
+                            for &(cx, cy) in &src_sub {
+                                let err = ((px - (sx * cx + bx)) * inv_sx)
+                                    .hypot((py - (sy * cy + dy)) * inv_sy);
+                                if err < 45.0 {
+                                    ok = true;
+                                    break;
+                                }
+                            }
+                            if ok {
+                                inl += 1;
+                            }
+                        }
+                        if best_hyp.is_none_or(|(b_inl, ..)| inl > b_inl) {
+                            best_hyp = Some((inl, sx, bx, sy, dy));
+                            if inl >= target_early.max(4) {
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let Some((_, mut sx, mut bx, mut sy, mut dy)) = best_hyp else {
+        if let Some(seed) = seed_override
+            .cloned()
+            .or_else(|| provider_default_transform(&prov, map_id))
+        {
+            return Ok(seed);
+        }
+        return Err(CoreError::NotFound(format!(
+            "Auto-calibration found no consistent affine for {prov} map {map_id}"
+        )));
+    };
+
+    // 3. Iterative ICP refinement on all anchors with progressive outlier rejection.
+    const ICP_THRESHOLDS: [f64; 6] = [65.0, 35.0, 15.0, 6.0, 3.0, 3.0];
+    let mut matched_can = Vec::new();
+    let mut prev_matched = 0usize;
+    for &thresh in &ICP_THRESHOLDS {
+        let inv_sx = 1.0 / sx.abs();
+        let inv_sy = 1.0 / sy.abs();
+        let mut round_can = Vec::new();
+        let mut round_prv = Vec::new();
+        for c in canonical_anchors {
+            let pred_x = sx * c.x + bx;
+            let pred_y = sy * c.y + dy;
+            let mut best_j = None;
+            let mut best_err = f64::INFINITY;
+            for (j, p) in provider_anchors.iter().enumerate() {
+                let err = ((p.x - pred_x) * inv_sx).hypot((p.y - pred_y) * inv_sy);
+                if err < best_err {
+                    best_err = err;
+                    best_j = Some(j);
+                }
+            }
+            if let Some(j) = best_j
+                && best_err < thresh
+            {
+                round_can.push((c.x, c.y));
+                round_prv.push((provider_anchors[j].x, provider_anchors[j].y));
+            }
+        }
+        // Keep the tighter pass only if enough consistent anchors survive (protects noisier maps).
+        if round_can.len() < 3 || (thresh <= 6.0 && prev_matched >= 10 && round_can.len() * 2 < prev_matched) {
+            break;
+        }
+        prev_matched = round_can.len();
+        matched_can = round_can;
+        let cx_v: Vec<f64> = matched_can.iter().map(|p| p.0).collect();
+        let cy_v: Vec<f64> = matched_can.iter().map(|p| p.1).collect();
+        let px_v: Vec<f64> = round_prv.iter().map(|p| p.0).collect();
+        let py_v: Vec<f64> = round_prv.iter().map(|p| p.1).collect();
+        if let (Ok((ax_n, bx_n)), Ok((cy_n, dy_n))) =
+            (fit_1d_linear(&cx_v, &px_v), fit_1d_linear(&cy_v, &py_v))
+            && ax_n.is_finite()
+            && cy_n.is_finite()
+            && ax_n.abs() > 1e-10
+            && cy_n.abs() > 1e-10
+        {
+            sx = ax_n;
+            bx = bx_n;
+            sy = cy_n;
+            dy = dy_n;
+        }
+    }
+
+    if matched_can.len() < 3 {
+        if let Some(seed) = seed_override
+            .cloned()
+            .or_else(|| provider_default_transform(&prov, map_id))
+        {
+            return Ok(seed);
+        }
+        return Err(CoreError::NotFound(format!(
+            "Calibration matched too few anchors ({}) for {prov} map {map_id}",
+            matched_can.len()
+        )));
+    }
+
+    // 4. Piecewise zone discovery for unmatched area clusters (e.g. AppSample Inazuma & Easybreeze).
+    let inv_sx = 1.0 / sx.abs();
+    let inv_sy = 1.0 / sy.abs();
+    let mut unmatched_by_area: BTreeMap<i32, Vec<&CanonicalAnchor>> = BTreeMap::new();
+    let mut total_sq_err = 0.0;
+    let mut total_matched = 0usize;
+
+    for c in canonical_anchors {
+        let pred_x = sx * c.x + bx;
+        let pred_y = sy * c.y + dy;
+        let mut best_err = f64::INFINITY;
+        for p in provider_anchors {
+            let err = ((p.x - pred_x) * inv_sx).hypot((p.y - pred_y) * inv_sy);
+            if err < best_err {
+                best_err = err;
+            }
+        }
+        if best_err < 12.0 {
+            total_sq_err += best_err * best_err;
+            total_matched += 1;
+        } else if best_err >= 35.0 {
+            unmatched_by_area.entry(c.area_id).or_default().push(c);
+        }
+    }
+
+    let mut zones = Vec::new();
+    for (area_id, cluster) in unmatched_by_area {
+        if cluster.len() < 4 {
+            continue;
+        }
+        // Translation voting at fixed base scale (sx, sy).
+        let mut best_shift: Option<(usize, f64, f64)> = None;
+        for c0 in cluster.iter().take(6) {
+            for p0 in provider_anchors {
+                let cand_bx = p0.x - sx * c0.x;
+                let cand_dy = p0.y - sy * c0.y;
+                let mut inl = 0usize;
+                for c in &cluster {
+                    let px = sx * c.x + cand_bx;
+                    let py = sy * c.y + cand_dy;
+                    let ok = provider_anchors
+                        .iter()
+                        .any(|p| ((p.x - px) * inv_sx).hypot((p.y - py) * inv_sy) < 20.0);
+                    if ok {
+                        inl += 1;
+                    }
+                }
+                if best_shift.is_none_or(|(bi, ..)| inl > bi) {
+                    best_shift = Some((inl, cand_bx, cand_dy));
+                }
+            }
+        }
+        let Some((inl, z_bx, z_dy)) = best_shift else {
+            continue;
+        };
+        if inl < 4 || inl * 10 < cluster.len() * 7 {
+            continue;
+        }
+        // Refine zone offset via mean residual and verify sub-15u RMSE.
+        let mut c_pts = Vec::new();
+        let mut p_pts = Vec::new();
+        let mut z_sq = 0.0;
+        let mut z_max = 0.0_f64;
+        for c in &cluster {
+            let px = sx * c.x + z_bx;
+            let py = sy * c.y + z_dy;
+            if let Some((best_p, err)) = provider_anchors
+                .iter()
+                .map(|p| (p, ((p.x - px) * inv_sx).hypot((p.y - py) * inv_sy)))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                && err < 20.0
+            {
+                c_pts.push((c.x, c.y));
+                p_pts.push((best_p.x, best_p.y));
+                z_sq += err * err;
+                z_max = z_max.max(err);
+            }
+        }
+        if c_pts.len() < 4 {
+            continue;
+        }
+        let z_rmse = (z_sq / c_pts.len() as f64).sqrt();
+        if z_rmse > 15.0 {
+            continue;
+        }
+        // Compute exact mean offset for the zone at shared scale (or refit if well-spread).
+        let mean_bx = p_pts
+            .iter()
+            .zip(c_pts.iter())
+            .map(|(p, c)| p.0 - sx * c.0)
+            .sum::<f64>()
+            / c_pts.len() as f64;
+        let mean_dy = p_pts
+            .iter()
+            .zip(c_pts.iter())
+            .map(|(p, c)| p.1 - sy * c.1)
+            .sum::<f64>()
+            / c_pts.len() as f64;
+        let (Some(cbbox), Some(pbbox)) =
+            (SpatialBbox::from_points(&c_pts), SpatialBbox::from_points(&p_pts))
+        else {
+            continue;
+        };
+        total_sq_err += z_sq;
+        total_matched += c_pts.len();
+        zones.push(ZoneAffine {
+            id: format!("area_{area_id}"),
+            canonical_bbox: cbbox,
+            provider_bbox: pbbox,
+            affine: AxisAffine {
+                ax: sx,
+                bx: mean_bx,
+                cy: sy,
+                dy: mean_dy,
+                map_id: Some(map_id),
+                rmse: z_rmse,
+                max_residual: z_max,
+                anchor_count: c_pts.len(),
+                source: "auto_calibrated_zone".to_owned(),
+            },
+        });
+    }
+
+    let overall_rmse = if total_matched > 0 {
+        (total_sq_err / total_matched as f64).sqrt()
+    } else {
+        0.0
+    };
+
+    Ok(PiecewiseMapTransform {
+        provider: prov,
+        map_id,
+        swap_lat_lng,
+        base: AxisAffine {
+            ax: sx,
+            bx,
+            cy: sy,
+            dy,
+            map_id: Some(map_id),
+            rmse: overall_rmse,
+            max_residual: 0.0,
+            anchor_count: matched_can.len(),
+            source: "auto_calibrated".to_owned(),
+        },
+        zones,
+        matched_anchors: total_matched,
+        total_canonical_anchors: canonical_anchors.len(),
+        rmse_canonical: overall_rmse,
+        source: "auto_calibrated".to_owned(),
+    })
+}
+
+/// Unified `POST /calibrate_provider` entrypoint invoked by `gh-net::sync_server`
+/// and `gh-app::callbacks`.
+pub fn execute_provider_calibration(
+    payload: &Value,
+    canonical_anchors: &[CanonicalAnchor],
+) -> CoreResult<Value> {
+    let obj = payload
+        .as_object()
+        .ok_or_else(|| CoreError::InvalidData("Calibration payload must be a JSON object".into()))?;
+    let provider = obj
+        .get("provider")
+        .or_else(|| obj.get("provider_id"))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| CoreError::InvalidArgument("Missing provider".into()))?;
+    let map_id = obj
+        .get("map_id")
+        .and_then(|v| coerce_strict_int(v, "map_id").ok())
+        .unwrap_or(2);
+    let swap_lat_lng = obj
+        .get("swap_lat_lng")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| provider == "kongying");
+    let expected_y_flip = obj.get("expected_y_flip").and_then(Value::as_bool).or(
+        match provider.as_str() {
+            "appsample" | "mapgenie" => Some(true),
+            "kongying" | "hoyolab" | "miyoushe" => Some(false),
+            _ => None,
+        },
+    );
+
+    let mut provider_anchors = Vec::new();
+    if let Some(arr) = obj.get("anchors").and_then(Value::as_array) {
+        for item in arr {
+            let Some(m) = item.as_object() else {
+                continue;
+            };
+            let x_v = m.get("x").or_else(|| m.get("lng"));
+            let y_v = m.get("y").or_else(|| m.get("lat"));
+            let (Some(xv), Some(yv)) = (x_v, y_v) else {
+                continue;
+            };
+            let (Ok(x), Ok(y)) = (coerce_f64(xv, "anchor.x"), coerce_f64(yv, "anchor.y")) else {
+                continue;
+            };
+            let is_statue = m
+                .get("is_statue")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| {
+                    m.get("category")
+                        .or_else(|| m.get("type"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| {
+                            let low = t.to_ascii_lowercase();
+                            low == "o2"
+                                || low.contains("statue")
+                                || low.contains("七天神像")
+                        })
+                });
+            provider_anchors.push(ProviderAnchor { x, y, is_statue });
+        }
+    }
+
+    let transform = calibrate_piecewise_from_anchors(
+        &provider,
+        map_id,
+        canonical_anchors,
+        &provider_anchors,
+        expected_y_flip,
+        swap_lat_lng,
+        None,
+    )?;
+
+    Ok(json!({
+        "ok": true,
+        "provider": provider,
+        "map_id": map_id,
+        "transform": transform,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn piecewise_auto_calibration_discovers_shifted_island_zones() {
+        // Synthetic Teyvat mainland (area 1) + shifted Inazuma island (area 3)
+        // mimicking AppSample v7.2's -2203.6u horizontal island shift.
+        let sx = 8.58625e-5_f64;
+        let sy = -8.58625e-5_f64;
+        let bx_main = 0.52269_f64;
+        let dy_main = 0.19946_f64;
+        let bx_inazuma = 0.33349_f64;
+
+        let mut canonical = Vec::new();
+        let mut provider = Vec::new();
+        for i in 0..16 {
+            let cx = -8000.0 + (i as f64) * 650.0;
+            let cy = -4000.0 + ((i % 4) as f64) * 1800.0;
+            let is_statue = i % 2 == 0;
+            canonical.push(CanonicalAnchor {
+                x: cx,
+                y: cy,
+                label_id: if is_statue { 2 } else { 3 },
+                area_id: 1,
+            });
+            provider.push(ProviderAnchor {
+                x: sx * cx + bx_main,
+                y: sy * cy + dy_main,
+                is_statue,
+            });
+        }
+        for i in 0..8 {
+            let cx = 1200.0 + (i as f64) * 320.0;
+            let cy = 5000.0 + ((i % 3) as f64) * 1100.0;
+            let is_statue = i % 2 == 0;
+            canonical.push(CanonicalAnchor {
+                x: cx,
+                y: cy,
+                label_id: if is_statue { 2 } else { 3 },
+                area_id: 3,
+            });
+            provider.push(ProviderAnchor {
+                x: sx * cx + bx_inazuma,
+                y: sy * cy + dy_main,
+                is_statue,
+            });
+        }
+
+        let tf = calibrate_piecewise_from_anchors(
+            "appsample",
+            2,
+            &canonical,
+            &provider,
+            Some(true),
+            false,
+            None,
+        )
+        .expect("piecewise calibration must succeed");
+        assert_eq!(tf.matched_anchors, 24);
+        assert!(tf.rmse_canonical < 0.05, "rmse={}", tf.rmse_canonical);
+        assert_eq!(tf.zones.len(), 1);
+        assert_eq!(tf.zones[0].id, "area_3");
+
+        // Verify round-trip forward <-> inverse on both mainland and shifted Inazuma.
+        for &(cx, cy) in &[(-2500.0, 500.0), (2000.0, 6200.0)] {
+            let (lat, lng) = tf.to_leaflet_latlng(cx, cy);
+            let (rcx, rcy) = tf.from_leaflet_latlng(lat, lng).unwrap();
+            assert!((rcx - cx).abs() < 1e-4 && (rcy - cy).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn kongying_seed_swaps_leaflet_lat_lng_axes() {
+        let tf = provider_default_transform("kongying", 2).expect("kongying map 2 seed");
+        assert!(tf.swap_lat_lng);
+        let (lat, lng) = tf.to_leaflet_latlng(1000.0, -500.0);
+        // lat corresponds to +X East, lng corresponds to +Y South
+        assert!((lat - (1.335301544 * 1000.0 + 1527.748294)).abs() < 1e-4);
+        assert!((lng - (1.335165651 * -500.0 - 3931.249166)).abs() < 1e-4);
+        let (cx, cy) = tf.from_leaflet_latlng(lat, lng).unwrap();
+        assert!((cx - 1000.0).abs() < 1e-4 && (cy - (-500.0)).abs() < 1e-4);
+    }
 
     #[test]
     fn category_aliases_n_to_1_and_duplicate_rejection() {

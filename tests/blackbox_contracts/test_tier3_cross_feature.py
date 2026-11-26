@@ -257,6 +257,97 @@ class TestTier3CrossFeature(unittest.TestCase):
                 self.assertEqual(resp.status, 400)
                 self.assertFalse(resp.json()["ok"])
 
+    def test_multi_provider_calibration_and_active_provider_switch_clears_lock(self) -> None:
+        if not get_config().is_rust:
+            self.skipTest("Multi-provider calibration is Rust-only")
+
+        # 1. Calibrate against sandbox Map 2 canonical waypoints (-100,100), (0,0), (500,500)
+        cal_resp = self.client.post_json(
+            "/calibrate_provider",
+            {
+                "provider_id": "appsample",
+                "map_id": 2,
+                "anchors": [
+                    {"x": 0.531276, "y": 0.208045, "area": "area_1"},
+                    {"x": 0.522690, "y": 0.199459, "area": "area_1"},
+                    {"x": 0.565621, "y": 0.156528, "area": "area_2"},
+                ],
+            },
+        )
+        self.assertEqual(cal_resp.status, 200)
+        cal = cal_resp.json()
+        self.assertTrue(cal["ok"])
+        self.assertEqual(cal["provider"], "appsample")
+        self.assertIn("transform", cal)
+
+        # 2. Report AppSample pins and lock an AppSample target
+        self.client.post_json(
+            "/nearby_pins",
+            {
+                "provider_id": "appsample",
+                "map_id": 2,
+                "lat": 0.0,
+                "lng": 0.0,
+                "pins": [
+                    {
+                        "id": "appsample:5001",
+                        "name": "Exquisite Chest",
+                        "category": "Exquisite Chest",
+                        "lat": 20.0,
+                        "lng": 15.0,
+                        "map_id": 2,
+                        "provider_id": "appsample",
+                    }
+                ],
+            },
+        )
+        st_app = self.client.get("/status").json()
+        self.assertEqual(st_app.get("active_map_provider"), "appsample")
+
+        lock_r = self.client.post_json(
+            "/nav_command",
+            {
+                "action": "lock_target",
+                "provider_id": "appsample",
+                "pin": {
+                    "id": "appsample:5001",
+                    "name": "Exquisite Chest",
+                    "category": "Exquisite Chest",
+                    "lat": 20.0,
+                    "lng": 15.0,
+                    "map_id": 2,
+                },
+            },
+        ).json()
+        self.assertTrue(lock_r["ok"])
+
+        # 3. Switch active provider to Kongying -> clears stale AppSample lock & emits TARGET_LOCK_UPDATED: null
+        seq_before_switch = self._current_seq()
+        self.client.post_json(
+            "/nearby_pins",
+            {
+                "provider_id": "kongying",
+                "map_id": 2,
+                "lat": 0.0,
+                "lng": 0.0,
+                "pins": [
+                    {
+                        "id": "kongying:9001",
+                        "name": "普通宝箱",
+                        "category": "普通宝箱",
+                        "lat": 10.0,
+                        "lng": 10.0,
+                        "map_id": 2,
+                        "provider_id": "kongying",
+                    }
+                ],
+            },
+        )
+        st_ky = self.client.get("/status").json()
+        self.assertEqual(st_ky.get("active_map_provider"), "kongying")
+        ev_clear = self._drain_until_type(seq_before_switch, "TARGET_LOCK_UPDATED")
+        self.assertIsNone(ev_clear.get("pin"))
+
 
 class TestTier3PortTakeover(unittest.TestCase):
     """Real WSAEADDRINUSE port takeover across two isolated server instances."""

@@ -1182,7 +1182,7 @@ impl AppState {
             return;
         }
         let state_weak = Arc::downgrade(self);
-        if self.guide_fetcher.request(
+        let queued = self.guide_fetcher.request(
             &pin.id,
             pin.map_id,
             move |guide| {
@@ -1191,7 +1191,22 @@ impl AppState {
                 }
             },
             None,
-        ) {
+        ) || (!pin.image_url.is_empty()
+            && self.guide_fetcher.request_inline_guide(
+                &pin.id,
+                &pin.description,
+                &pin.image_url,
+                {
+                    let state_weak = Arc::downgrade(self);
+                    move |guide| {
+                        if let Some(st) = state_weak.upgrade() {
+                            st.apply_guide(&guide);
+                        }
+                    }
+                },
+                None,
+            ));
+        if queued {
             self.nav_hud.set_guide_status("loading");
         } else if !self.guide_fetcher.is_loading(&pin.id, None) {
             self.nav_hud.set_guide_status(if pin.has_spot_content() {

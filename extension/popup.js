@@ -40,7 +40,10 @@ function notifyMapTabs(payload) {
     if (typeof chrome === 'undefined' || !chrome.tabs || typeof chrome.tabs.query !== 'function') {
       return;
     }
-    chrome.tabs.query({ url: 'https://act.hoyolab.com/*' }, (tabs) => {
+    const queryUrls = (window.GHMapProviders && Array.isArray(window.GHMapProviders.ALL_TAB_QUERY_URLS))
+      ? window.GHMapProviders.ALL_TAB_QUERY_URLS
+      : ['https://act.hoyolab.com/*'];
+    chrome.tabs.query({ url: queryUrls }, (tabs) => {
       void (chrome.runtime && chrome.runtime.lastError);
       if (!Array.isArray(tabs)) return;
       for (const tab of tabs) {
@@ -597,13 +600,27 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function applyState({ connected, engineActive, statusData, lastSync, tabCount }) {
+  let cachedActiveProvider = null;
+  const selectMapProvider = document.getElementById('select-map-provider');
+
+  function applyState({ connected, engineActive, statusData, lastSync, tabCount, activeProvider }) {
     if (typeof connected === 'boolean') currentConnected = connected;
     if (typeof engineActive === 'boolean') currentEngineActive = engineActive;
     if (statusData !== undefined) currentLastStatus = statusData;
     if (typeof tabCount === 'number') cachedTabCount = tabCount;
+    if (typeof activeProvider === 'string' && activeProvider) {
+      cachedActiveProvider = activeProvider;
+    } else if (tabCount === 0) {
+      cachedActiveProvider = null;
+    }
 
-    mapTabStatus.textContent = t('popup.footer.map_tabs', { count: cachedTabCount });
+    const baseTabText = t('popup.footer.map_tabs', { count: cachedTabCount });
+    if (cachedTabCount > 0 && cachedActiveProvider && window.GHMapProviders) {
+      const pMeta = window.GHMapProviders.getProvider(cachedActiveProvider);
+      mapTabStatus.textContent = `${pMeta.shortName} · ${baseTabText}`;
+    } else {
+      mapTabStatus.textContent = baseTabText;
+    }
 
     const verRaw = (currentLastStatus && currentLastStatus.version) ? String(currentLastStatus.version) : '5.7.0';
     const curVerText = verRaw.startsWith('v') ? verRaw : `v${verRaw}`;
@@ -830,7 +847,8 @@ document.addEventListener('DOMContentLoaded', () => {
         engineActive: typeof bgState.engineActive === 'boolean' ? bgState.engineActive : true,
         statusData: bgState.lastStatus || null,
         lastSync: bgState.lastSync !== undefined ? bgState.lastSync : currentLastSync,
-        tabCount: typeof bgState.tabCount === 'number' ? bgState.tabCount : cachedTabCount
+        tabCount: typeof bgState.tabCount === 'number' ? bgState.tabCount : cachedTabCount,
+        activeProvider: bgState.activeProvider || (bgState.lastStatus && bgState.lastStatus.active_map_provider) || null
       });
       if (activeTabName === 'tools' && currentConnected) {
         refreshRouteStatus();
@@ -843,9 +861,15 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.GHI18n && typeof window.GHI18n.init === 'function') {
       await window.GHI18n.init();
     }
-    const storedPrefs = await readLocalStorage(['gh_compact_ui', 'gh_export_format']);
+    const storedPrefs = await readLocalStorage(['gh_compact_ui', 'gh_export_format', 'gh_preferred_provider']);
     if (toggleCompactUi) {
       toggleCompactUi.checked = Boolean(storedPrefs.gh_compact_ui);
+    }
+    if (selectMapProvider && typeof storedPrefs.gh_preferred_provider === 'string') {
+      const allowed = ['hoyolab', 'kongying', 'appsample'];
+      if (allowed.includes(storedPrefs.gh_preferred_provider)) {
+        selectMapProvider.value = storedPrefs.gh_preferred_provider;
+      }
     }
     if (selectExportFormat && typeof storedPrefs.gh_export_format === 'string') {
       const valid = ['kongying', 'appsample', 'genshinmap', 'canonical'];
@@ -2016,9 +2040,17 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  if (selectMapProvider) {
+    selectMapProvider.addEventListener('change', () => {
+      const val = String(selectMapProvider.value || 'hoyolab');
+      writeLocalStorage({ gh_preferred_provider: val });
+    });
+  }
+
   btnOpenMap.addEventListener('click', async () => {
     btnOpenMap.disabled = true;
-    await sendBg({ kind: 'OPEN_MAP_TAB' });
+    const providerId = selectMapProvider ? String(selectMapProvider.value || 'hoyolab') : 'hoyolab';
+    await sendBg({ kind: 'OPEN_MAP_TAB', providerId });
     window.close();
   });
 

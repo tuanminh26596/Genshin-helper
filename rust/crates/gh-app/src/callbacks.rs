@@ -2,7 +2,9 @@
 
 use crate::state::{AppState, get_hotkey_field, json_f64, json_i64, json_str_trimmed, json_truthy};
 use gh_core::i18n::{get_language, t};
-use gh_core::map_bridge::execute_cross_map_export;
+use gh_core::map_bridge::{
+    CanonicalAnchor, execute_cross_map_export, execute_provider_calibration,
+};
 use gh_core::nav_controller::{NavAction, NavPin, normalize_raw_nav_pin};
 use gh_core::traits::{ConflictAdvisor, ServerCallbacks};
 use gh_core::tsp_route::{
@@ -11,7 +13,7 @@ use gh_core::tsp_route::{
 };
 use gh_core::{CoreError, CoreResult};
 use gh_hud::toast::ToastKind;
-use gh_net::pin_guide::HoYoLABLabelCatalog;
+use gh_net::pin_guide::{HoYoLABLabelCatalog, PinGuideFetcher};
 use gh_net::sync_server::HOTKEY_ACTIONS;
 use gh_win32::capture::WindowFinder;
 use gh_win32::game_settings::launch_genshin_borderless;
@@ -110,6 +112,10 @@ impl ServerCallbacks for AppServerCallbacks {
             m.insert(
                 "app_update".into(),
                 self.state.updater.status_summary_json(&cfg.app_update_mode),
+            );
+            m.insert(
+                "active_map_provider".into(),
+                Value::String(self.state.server.active_provider()),
             );
         }
         out
@@ -339,6 +345,16 @@ impl ServerCallbacks for AppServerCallbacks {
             .collect();
 
         for pin in &mut norm_pins {
+            if !PinGuideFetcher::is_fetchable_id(&pin.id)
+                && (!pin.description.is_empty() || !pin.image_url.is_empty())
+            {
+                self.state.guide_fetcher.register_inline_guide(
+                    &pin.id,
+                    &pin.description,
+                    &pin.image_url,
+                    None,
+                );
+            }
             if let Some(cached) = self.state.guide_fetcher.get_cached(&pin.id, None) {
                 if !cached.description.is_empty() {
                     pin.description = cached.description;
@@ -887,6 +903,54 @@ impl ServerCallbacks for AppServerCallbacks {
 
     fn on_app_update(&self, payload: &Value) -> CoreResult<Value> {
         self.state.handle_app_update_command(payload)
+    }
+
+    fn on_calibrate_provider(&self, payload: &Value) -> CoreResult<Value> {
+        let map_id = payload
+            .as_object()
+            .and_then(|o| json_i64(o.get("map_id")))
+            .unwrap_or(2) as i32;
+        let canonical_anchors: Vec<CanonicalAnchor> = self
+            .state
+            .maps_db
+            .maps
+            .get(&map_id)
+            .map(|m| {
+                m.waypoints
+                    .iter()
+                    .filter(|w| matches!(w.label_id, 2 | 3 | 154))
+                    .map(|w| CanonicalAnchor {
+                        x: w.x_pos,
+                        y: w.y_pos,
+                        label_id: w.label_id,
+                        area_id: w.area_id,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        execute_provider_calibration(payload, &canonical_anchors)
+    }
+
+    fn on_active_provider_change(&self, _provider_id: &str) {
+        let had_lock = {
+            let mut nav = self
+                .state
+                .nav_controller
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            nav.clear_for_provider_switch()
+        };
+        if had_lock {
+            self.state.server.broadcast(
+                json!({
+                    "type": "TARGET_LOCK_UPDATED",
+                    "locked_target": Value::Null,
+                }),
+                false,
+                false,
+            );
+        }
+        self.state.push_lan_snapshot(true);
     }
 }
 

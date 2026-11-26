@@ -426,5 +426,9 @@
   "popup.update.map_sync_btn": "Refresh Map",
   "popup.update.map_syncing_btn": "Syncing...",
   "popup.update.uninstall_ext_hint": "Uninstalled Desktop App?",
-  "popup.update.uninstall_ext_btn": "Remove Extension"
+  "popup.update.uninstall_ext_btn": "Remove Extension",
+  "popup.provider.select_title": "Choose interactive map to open (HoYoLAB / Kongying / AppSample)",
+  "popup.provider.hoyolab": "HoYoLAB",
+  "popup.provider.kongying": "Kongying (OS)",
+  "popup.provider.appsample": "AppSample"
 }

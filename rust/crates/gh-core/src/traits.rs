@@ -160,4 +160,8 @@ pub trait ServerCallbacks: Send + Sync {
     fn on_app_update(&self, _payload: &Value) -> CoreResult<Value> {
         Ok(serde_json::json!({"ok": true}))
     }
+    fn on_calibrate_provider(&self, _payload: &Value) -> CoreResult<Value> {
+        Ok(serde_json::json!({"ok": false, "error": "Provider calibration not configured"}))
+    }
+    fn on_active_provider_change(&self, _provider_id: &str) {}
 }

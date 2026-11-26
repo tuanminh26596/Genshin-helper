@@ -1,9 +1,29 @@
 'use strict';
 
+importScripts('providers_registry.js');
+
 const API_BASE = 'http://127.0.0.1:8765';
 const ALARM_NAME = 'gh-keepalive-poll';
-const MAP_DEFAULT_URL = 'https://act.hoyolab.com/ys/app/interactive-map/index.html#/map/2';
+const MAP_DEFAULT_URL = GHMapProviders.getProvider('hoyolab').defaultUrl;
 const NATIVE_HOST_NAME = 'com.genshinhelper.host';
+
+function getConnectedProvidersSummary() {
+  const providerCounts = {};
+  let activeProvider = null;
+  for (const port of ports) {
+    const tab = port && port.sender && port.sender.tab;
+    const pid = (tab && tab.url) ? (GHMapProviders.detectProviderFromUrl(tab.url) || 'hoyolab') : 'hoyolab';
+    providerCounts[pid] = (providerCounts[pid] || 0) + 1;
+    if (tab && typeof tab.id === 'number' && tab.id === primaryMapTabId) {
+      activeProvider = pid;
+    }
+  }
+  if (!activeProvider) {
+    const keys = Object.keys(providerCounts);
+    if (keys.length > 0) activeProvider = keys[0];
+  }
+  return { activeProvider, providerCounts };
+}
 
 const ports = new Set();
 let primaryMapTabId = null;
@@ -664,7 +684,7 @@ function scheduleNextPoll(gen, delayMs) {
 
 async function focusBestMapTab() {
   try {
-    const tabs = await chrome.tabs.query({ url: 'https://act.hoyolab.com/*' });
+    const tabs = await chrome.tabs.query({ url: GHMapProviders.ALL_TAB_QUERY_URLS });
     if (!Array.isArray(tabs) || tabs.length === 0) return;
 
     const connectedTabIds = new Set();
@@ -674,9 +694,10 @@ async function focusBestMapTab() {
     }
 
     const scoreTab = (t) => {
-      const url = String((t && t.url) || '').toLowerCase();
+      const url = String((t && t.url) || '');
       let score = 0;
-      if (url.includes('/interactive-map/')) score += 100;
+      if (GHMapProviders.isSupportedMapUrl(url)) score += 100;
+      if (typeof primaryMapTabId === 'number' && t && t.id === primaryMapTabId) score += 40;
       if (connectedTabIds.has(t.id)) score += 20;
       if (t.active) score += 5;
       return score;
@@ -934,7 +955,7 @@ function reinjectOpenMapTabs(opts = {}) {
           connectedTabIds.add(p.sender.tab.id);
         }
       }
-      chrome.tabs.query({ url: 'https://act.hoyolab.com/*' }, (tabs) => {
+      chrome.tabs.query({ url: GHMapProviders.ALL_TAB_QUERY_URLS }, (tabs) => {
         void chrome.runtime.lastError;
         const targets = Array.isArray(tabs)
           ? tabs.filter(
@@ -942,7 +963,7 @@ function reinjectOpenMapTabs(opts = {}) {
                 t &&
                 typeof t.id === 'number' &&
                 typeof t.url === 'string' &&
-                t.url.includes('/interactive-map/') &&
+                GHMapProviders.isSupportedMapUrl(t.url) &&
                 (forceAll || !connectedTabIds.has(t.id))
             )
           : [];
@@ -961,7 +982,7 @@ function reinjectOpenMapTabs(opts = {}) {
               await chrome.scripting.executeScript({
                 target: { tabId: tab.id },
                 world: 'MAIN',
-                files: ['i18n.js', 'page_main.js']
+                files: ['i18n.js', 'coord_transform.js', 'provider_runtime.js', 'page_main.js']
               });
               injected += 1;
             } catch (e) {}
@@ -1036,12 +1057,13 @@ function forwardCommandToMapTab(cmdType, payload = {}, broadcastAll = false) {
     };
 
     try {
-      chrome.tabs.query({ url: 'https://act.hoyolab.com/*' }, (tabs) => {
+      chrome.tabs.query({ url: GHMapProviders.ALL_TAB_QUERY_URLS }, (tabs) => {
         void chrome.runtime.lastError;
         const activeMapTab = Array.isArray(tabs)
           ? (
-              tabs.find((t) => t && t.active && typeof t.url === 'string' && t.url.includes('/interactive-map/')) ||
-              tabs.find((t) => t && typeof t.url === 'string' && t.url.includes('/interactive-map/'))
+              tabs.find((t) => t && t.active && typeof t.url === 'string' && GHMapProviders.isSupportedMapUrl(t.url)) ||
+              tabs.find((t) => t && typeof t.id === 'number' && t.id === primaryMapTabId) ||
+              tabs.find((t) => t && typeof t.url === 'string' && GHMapProviders.isSupportedMapUrl(t.url))
             )
           : null;
         pickAndSend(activeMapTab && typeof activeMapTab.id === 'number' ? activeMapTab.id : null);
@@ -1084,7 +1106,6 @@ function getSanitizedExtensionInfo(extra = {}) {
 }
 
 function captureHoYoLABMapViewport() {
-  const MAP_PREFIX = 'https://act.hoyolab.com/ys/app/interactive-map/';
   return new Promise((resolve) => {
     try {
       if (
@@ -1097,7 +1118,7 @@ function captureHoYoLABMapViewport() {
         return;
       }
 
-      chrome.tabs.query({ active: true, url: 'https://act.hoyolab.com/*' }, (tabs) => {
+      chrome.tabs.query({ active: true, url: GHMapProviders.ALL_TAB_QUERY_URLS }, (tabs) => {
         const qErr = chrome.runtime && chrome.runtime.lastError;
         if (qErr) {
           resolve({ ok: false, reason: 'tab_query_error' });
@@ -1110,7 +1131,7 @@ function captureHoYoLABMapViewport() {
                 typeof t.id === 'number' &&
                 typeof t.windowId === 'number' &&
                 typeof t.url === 'string' &&
-                t.url.startsWith(MAP_PREFIX)
+                GHMapProviders.isSupportedMapUrl(t.url)
             )
           : [];
         if (candidates.length === 0) {
@@ -1146,24 +1167,21 @@ function captureHoYoLABMapViewport() {
             return;
           }
 
+          const chosenProvider = GHMapProviders.detectProviderFromUrl(chosen.url) || 'hoyolab';
+          const privacyCss = GHMapProviders.getPrivacyMaskCss(chosenProvider);
+
           const applyPrivacyMask = async () => {
             if (!chrome.scripting || typeof chrome.scripting.executeScript !== 'function') return false;
             try {
               await chrome.scripting.executeScript({
                 target: { tabId: chosen.id },
-                func: () => {
+                args: [privacyCss],
+                func: (cssText) => {
                   const old = document.getElementById('gh-diag-privacy-mask');
                   if (old) old.remove();
                   const st = document.createElement('style');
                   st.id = 'gh-diag-privacy-mask';
-                  st.textContent = [
-                    '.mhy-header, .hoyolab-header, .mhy-hoyolab-app-header,',
-                    '[class*="mhy-header"], [class*="hoyolab-header"], [class*="bbs-header"],',
-                    '[class*="avatar"], [class*="account"], [class*="user-info"], [class*="login-btn"] {',
-                    '  opacity: 0 !important;',
-                    '  pointer-events: none !important;',
-                    '}'
-                  ].join('\n');
+                  st.textContent = cssText;
                   (document.head || document.documentElement).appendChild(st);
                   return new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
                 }
@@ -1371,30 +1389,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.kind === 'GET_STATE') {
+    const buildStatePayload = () => {
+      const prov = getConnectedProvidersSummary();
+      return {
+        connected,
+        engineActive,
+        lastStatus,
+        lastSync,
+        lastUpdateState,
+        tabCount: ports.size,
+        activeProvider: prov.activeProvider,
+        providerCounts: prov.providerCounts
+      };
+    };
     if (ports.size === 0) {
       reinjectOpenMapTabs().then(async (res) => {
         if (res.injected > 0 && ports.size === 0) {
           await sleep(180);
         }
-        sendResponse({
-          connected,
-          engineActive,
-          lastStatus,
-          lastSync,
-          lastUpdateState,
-          tabCount: ports.size
-        });
+        sendResponse(buildStatePayload());
       });
       return true;
     }
-    sendResponse({
-      connected,
-      engineActive,
-      lastStatus,
-      lastSync,
-      lastUpdateState,
-      tabCount: ports.size
-    });
+    sendResponse(buildStatePayload());
     return false;
   }
 
@@ -1409,13 +1426,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.kind === 'OPEN_MAP_TAB') {
-    chrome.tabs.query({ url: 'https://act.hoyolab.com/*' }, (tabs) => {
+    const reqProvider = typeof msg.providerId === 'string' && msg.providerId.trim()
+      ? GHMapProviders.getProvider(msg.providerId)
+      : null;
+    const queryUrls = reqProvider ? [reqProvider.tabQueryUrl] : GHMapProviders.ALL_TAB_QUERY_URLS;
+    const defaultUrl = reqProvider ? reqProvider.defaultUrl : MAP_DEFAULT_URL;
+    chrome.tabs.query({ url: queryUrls }, (tabs) => {
       if (chrome.runtime.lastError) {
         sendResponse({ ok: false, error: chrome.runtime.lastError.message });
         return;
       }
       const mapTab = Array.isArray(tabs)
-        ? tabs.find((t) => t && typeof t.url === 'string' && t.url.includes('/interactive-map/'))
+        ? tabs.find((t) =>
+            t && typeof t.url === 'string' &&
+            (reqProvider ? reqProvider.matchesUrl(t.url) : GHMapProviders.isSupportedMapUrl(t.url))
+          )
         : null;
       if (mapTab && typeof mapTab.id === 'number') {
         chrome.windows.update(mapTab.windowId, { focused: true }, () => {
@@ -1426,7 +1451,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           });
         });
       } else {
-        chrome.tabs.create({ url: MAP_DEFAULT_URL, active: true }, (created) => {
+        chrome.tabs.create({ url: defaultUrl, active: true }, (created) => {
           const err = chrome.runtime.lastError;
           sendResponse(err ? { ok: false, error: err.message } : { ok: true, created: true, tabId: created ? created.id : null });
         });

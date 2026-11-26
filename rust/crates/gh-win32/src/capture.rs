@@ -116,11 +116,16 @@ pub const GAME_IGNORED_TITLE_SUBSTRINGS: [&str; 6] = [
 pub const GAME_IGNORED_CLASSES: [&str; 2] =
     ["ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"];
 
-pub const BROWSER_KEYWORDS: [&str; 4] = [
+pub const BROWSER_KEYWORDS: [&str; 9] = [
     "hoyolab",
     "interactive map",
     "bản đồ tương tác",
     "genshin helper",
+    "appsample",
+    "yuanshen",
+    "原神地图",
+    "mapgenie",
+    "gamedot",
 ];
 
 pub const BROWSER_CLASSES: [&str; 2] = ["chrome_widgetwin_1", "mozillawindowclass"];
