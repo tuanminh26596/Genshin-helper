@@ -6,6 +6,7 @@
 pub mod assets;
 pub mod atomic_io;
 pub mod config;
+pub mod cross_map_import;
 pub mod frame;
 pub mod i18n;
 pub mod map_bridge;

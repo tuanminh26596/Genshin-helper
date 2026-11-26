@@ -16,6 +16,11 @@
     "http://127.0.0.1:8765/*",
     "http://localhost:8765/*"
   ],
+  "optional_host_permissions": [
+    "https://genshin-impact-map.appsample.com/*",
+    "https://v3.yuanshen.site/*",
+    "https://yuanshen.site/*"
+  ],
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",

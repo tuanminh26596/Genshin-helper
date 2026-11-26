@@ -167,6 +167,15 @@ def verify_extension_i18n_and_manifest() -> None:
     missing_page_js = sorted(page_keys - set(ext_en.keys()))
     assert not missing_page_js, f"Undefined i18n keys referenced in page_main.js: {missing_page_js}"
 
+    importer_html = _read_text("extension/importer.html")
+    importer_html_keys = set(re.findall(r'data-(?:i18n(?:-[a-z]+)?|label-i18n)="([^"]+)"', importer_html))
+    missing_imp_html = sorted(importer_html_keys - set(ext_en.keys()))
+    assert not missing_imp_html, f"Undefined i18n keys referenced in importer.html: {missing_imp_html}"
+    importer_js = _read_text("extension/importer.js")
+    importer_js_keys = set(re.findall(r"\bt\(\s*'([a-z0-9_.]+)'", importer_js))
+    missing_imp_js = sorted(importer_js_keys - set(ext_en.keys()))
+    assert not missing_imp_js, f"Undefined i18n keys referenced in importer.js: {missing_imp_js}"
+
     # Verify zero eval() in all extension JS files
     ext_dir = os.path.join(PROJECT_ROOT, "extension")
     for fn in os.listdir(ext_dir):
@@ -305,6 +314,7 @@ def verify_js_with_node() -> None:
         "extension/i18n.js",
         "extension/i18n_bridge.js",
         "extension/popup.js",
+        "extension/importer.js",
         "extension/page_main.js",
         "extension/content_bridge.js",
         "extension/background.js",

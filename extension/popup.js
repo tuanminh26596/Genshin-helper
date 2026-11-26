@@ -168,6 +168,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let activeTabName = 'control';
   const selectExportFormat = document.getElementById('select-export-format');
   const btnExportPins = document.getElementById('btn-export-pins');
+  const btnOpenImporter = document.getElementById('btn-open-importer');
   const lanStatusBadge = document.getElementById('lan-status-badge');
   const btnToggleLan = document.getElementById('btn-toggle-lan');
   const lanDetails = document.getElementById('lan-details');
@@ -1934,6 +1935,13 @@ document.addEventListener('DOMContentLoaded', () => {
   if (selectExportFormat) {
     selectExportFormat.addEventListener('change', () => {
       writeLocalStorage({ gh_export_format: selectExportFormat.value });
+    });
+  }
+
+  if (btnOpenImporter) {
+    btnOpenImporter.addEventListener('click', async () => {
+      await sendBg({ kind: 'OPEN_IMPORTER_TAB' });
+      window.close();
     });
   }
 
