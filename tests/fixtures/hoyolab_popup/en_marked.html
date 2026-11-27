@@ -10,16 +10,17 @@
     and copyrighted item names while preserving exact popup nesting, classes, attributes, and
     button markup/text.
 
-  DERIVED FIXTURE (not a live capture): copied from en_unmarked.html; only the popup button labels
-  were replaced with HoYoLAB's own mi18n strings for en-us (keys `mark`, `unmark`,
-  `batch_mark`; https://fastcdn.hoyoverse.com/mi18n/hk4e_global/m03311749131601/m03311749131601-<lang>.json, checked 2026-11-28). The marked button keeps the unmarked button's classes,
-  which is the hardest case for a structure-only matcher. Other popup text is left as captured.
+  MARKED STATE: the .map-popup__footer below was captured live on 2026-11-28 from the signed-in
+  HoYoLAB test profile (scripts/hoyolab_test_profile.ps1, tests/hoyolab_live_mark.mjs) right after
+  marking a pin (then unmarked again). The rest of the popup is the en_unmarked capture above.
+  In the real marked state the action button reads "Unhide Pin" and its class changes from
+  gt-button-ys--primary to gt-button-ys--default.
 -->
 <!DOCTYPE html>
 <html lang="en-US">
 <head>
   <meta charset="utf-8">
-  <title>HoYoLAB Pin Popup Fixture (en-us, marked; derived)</title>
+  <title>HoYoLAB Pin Popup Fixture (en-us, marked; live footer)</title>
   <style>
     html, body { margin: 0; padding: 0; }
     .expand-popup { display: flex; position: fixed; inset: 0; width: 1424px; height: 749px; }
@@ -76,11 +77,9 @@
                           Update Time:2022-01-12 11:15:27
                         </div>
                       </div>
-                      <div class="map-popup__footer">
-                        <div title="Submit Pin Description" class="map-popup__btn-edit map-popup__btn-edit--sea"><!----></div>
+                      <div class="map-popup__footer"><div title="Submit Pin Description" class="map-popup__btn-edit map-popup__btn-edit--sea"><!----></div>
                         <button theme="dark" class="map-popup__btn gt-button-ys--flex gt-button-ys gt-button-ys--size-s gt-button-ys--linear map-popup__btn--en-us map-popup__btn--batch"><div theme="dark" class=""></div><!----><!----><span size="s" with-left-icon="0" with-right-icon="0" class="gt_desktop_button_b2_3 gt-button-ys--label gt-button-ys--label-s"> Batch Mark </span><!----><!----></button>
-                        <button theme="dark" class="map-popup__btn gt-button-ys--flex gt-button-ys gt-button-ys--size-s gt-button-ys--primary map-popup__btn--en-us"><div theme="dark" class="gt-button-ys--texture gt-button-ys--texture-primary"></div><!----><!----><span size="s" with-left-icon="0" with-right-icon="0" class="gt_desktop_button_b2_3 gt-button-ys--label gt-button-ys--label-s"> Unhide Pin </span><!----><!----></button>
-                      </div>
+                        <button theme="dark" class="map-popup__btn gt-button-ys--flex gt-button-ys gt-button-ys--size-s gt-button-ys--default map-popup__btn--en-us"><div theme="dark" class="gt-button-ys--texture gt-button-ys--texture-default"></div><!----><!----><span size="s" with-left-icon="0" with-right-icon="0" class="gt_desktop_button_b2_3 gt-button-ys--label gt-button-ys--label-s"> Unhide Pin </span><!----><!----></button></div>
                       <!---->
                     </div>
                   </div>
