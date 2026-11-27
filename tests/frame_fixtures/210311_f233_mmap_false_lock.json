@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "name": "210311_f233_mmap_false_lock",
+  "description": "Nod-Krai Dark Side of the Moon (Map 40) collinear-waypoint M-Map capture where prior-position bonus pulls 2-point matching ~4630w away to (5014, -152).",
+  "notes": "Exported from sess_20261127_210311 frame i=233 (0-based n=232, 2560x1440). Player stands just west of easternmost collinear WP 99308 (390.5, -4.0) at ~(385, -4), corroborated by f294 layer_switch_sift (352.0, 4.6) and f369 AutoSync 5 inliers (346.7, -0.7) after walking slightly west. prev_hint WAS REQUIRED to reproduce the live false-lock in isolation: with cold last_known_pos=None f233 locks near (385, -4), whereas priming MapLocator with prior session anchor f146 (Map 40, 5072, -174) activates match_single_map's 2-point prev_bonus and reproduces the live false-lock at (5014, -152) [~4630w off].",
+  "image": "scratch/frame_fixtures/sess_20261127_210311_f233.png",
+  "width": 2560,
+  "height": 1440,
+  "is_gamepad": false,
+  "known_bug": "M-Map locate on collinear Dark Side of the Moon waypoints (Map 40) with prior last_known_pos near (5072,-174) false-locks via 2-point prev_bonus at (5014,-152) [~4630w off true 385,-4].",
+  "mmap_locate": {
+    "expected_map_id": 40,
+    "expected_world_x": 385.0,
+    "expected_world_y": -4.0,
+    "pos_tolerance_w": 50.0,
+    "prev_hint": {
+      "map_id": 40,
+      "world_x": 5072.0,
+      "world_y": -174.0,
+      "prime_image": "scratch/frame_fixtures/sess_20261127_210311_f146.png"
+    },
+    "perturb_seeds": [303, 404]
+  }
+}

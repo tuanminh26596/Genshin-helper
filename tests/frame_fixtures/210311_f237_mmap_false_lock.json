@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "210311_f237_mmap_false_lock",
+  "description": "Nod-Krai Dark Side of the Moon (Map 40) PendingVerify M-Map capture that false-locked ~200w off true position.",
+  "notes": "Exported from sess_20261127_210311 frame i=237 (0-based n=236, 2560x1440). Same player position ~(385, -4) adjacent to WP 99308 (390.5, -4.0), corroborated by f294 layer_switch_sift (352.0, 4.6) and f369 AutoSync 5 inliers (346.7, -0.7). Live PendingVerify M-Map locate false-locked at (512, -164) [~204w off true].",
+  "image": "scratch/frame_fixtures/sess_20261127_210311_f237.png",
+  "width": 2560,
+  "height": 1440,
+  "is_gamepad": false,
+  "known_bug": "M-Map locate on collinear Dark Side of the Moon waypoints (Map 40) false-locks (~200w off true position 385,-4).",
+  "mmap_locate": {
+    "expected_map_id": 40,
+    "expected_world_x": 385.0,
+    "expected_world_y": -4.0,
+    "pos_tolerance_w": 50.0,
+    "perturb_seeds": [505, 606]
+  }
+}

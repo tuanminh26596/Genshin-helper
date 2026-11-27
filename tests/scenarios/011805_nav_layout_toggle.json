@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "name": "nav_layout_toggle",
+  "session": "sess_20261127_011805",
+  "description": "Verify nav_edit_mode starts false, press nav_layout to enter edit mode, then press nav_layout again to return to false.",
+  "inputs": [
+    {
+      "frame": 6,
+      "hotkey": "nav_layout"
+    },
+    {
+      "frame": 10,
+      "hotkey": "nav_layout"
+    }
+  ],
+  "expect": [
+    {
+      "frame": 4,
+      "ui": {
+        "nav_edit_mode": false
+      }
+    },
+    {
+      "frame": 6,
+      "ui": {
+        "nav_edit_mode": true
+      }
+    },
+    {
+      "frame": 10,
+      "ui": {
+        "nav_edit_mode": false
+      }
+    }
+  ]
+}

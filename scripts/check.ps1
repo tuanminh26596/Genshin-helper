@@ -14,7 +14,7 @@ scratch\web_scenario_all.json) are absent from the current worktree, they are
 resolved automatically from the main checkout reported by `git worktree list`.
 
 Fixed check order:
-  guards, audit, ext-i18n, clippy, nextest, ext-smoke, blackbox, qa, web-bench
+  guards, audit, ext-i18n, clippy, nextest, frames, ext-smoke, blackbox, qa, web-bench
 
 Additional repeatable parameter:
   -QaOnly <session>
@@ -84,7 +84,8 @@ param(
     [switch]$AllowBaselineChange,
     [switch]$WebBench,
     [switch]$DryRun,
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$PruneWorktreeTargets
 )
 
 Set-StrictMode -Version Latest
@@ -99,6 +100,7 @@ $script:CheckOrder = @(
     'ext-i18n'
     'clippy'
     'nextest'
+    'frames'
     'ext-smoke'
     'blackbox'
     'qa'
@@ -230,7 +232,23 @@ function Select-CheckPlan {
     $paths = @($normalizedPaths.ToArray())
 
     $extMatches = @($paths | Where-Object { $_ -like 'extension/*' })
+    $extSmokeMatches = @(
+        $paths | Where-Object {
+            $_ -like 'extension/*' -or
+            $_ -eq 'tests/extension_browser_smoke.mjs' -or
+            $_ -eq 'tests/extension_dom_fixtures.mjs' -or
+            $_ -like 'tests/fixtures/hoyolab_popup/*'
+        }
+    )
     $rustMatches = @($paths | Where-Object { $_ -like 'rust/*' })
+    $framesMatches = @(
+        $paths | Where-Object {
+            $_ -like 'rust/crates/gh-sim/*' -or
+            $_ -eq 'rust/crates/gh-core/src/ui_layout.rs' -or
+            $_ -like 'rust/crates/gh-cv/*' -or
+            $_ -like 'tests/frame_fixtures/*'
+        }
+    )
     $blackboxMatches = @(
         $paths | Where-Object {
             $_ -like 'rust/crates/gh-net/*' -or
@@ -310,10 +328,16 @@ function Select-CheckPlan {
                         $reason = Format-MatchReason -MatchedPaths $rustMatches
                     }
                 }
-                'ext-smoke' {
-                    if ($extMatches.Count -gt 0) {
+                'frames' {
+                    if ($framesMatches.Count -gt 0) {
                         $selected = $true
-                        $reason = Format-MatchReason -MatchedPaths $extMatches
+                        $reason = Format-MatchReason -MatchedPaths $framesMatches
+                    }
+                }
+                'ext-smoke' {
+                    if ($extSmokeMatches.Count -gt 0) {
+                        $selected = $true
+                        $reason = Format-MatchReason -MatchedPaths $extSmokeMatches
                     }
                 }
                 'blackbox' {
@@ -532,6 +556,20 @@ function Resolve-FallbackPath {
     return $null
 }
 
+function Get-WorktreeTargetName {
+    param([string]$RepoRoot)
+    $full = [System.IO.Path]::GetFullPath($RepoRoot).TrimEnd('\')
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($full.ToLowerInvariant()))).Replace('-', '').Substring(0, 8).ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+    $leaf = (Split-Path -Path $full -Leaf).ToLowerInvariant() -replace '[^a-z0-9._-]', '_'
+    if ($leaf.Length -gt 48) { $leaf = $leaf.Substring(0, 48) }
+    return "$leaf-$hash"
+}
+
 function Resolve-CheckEnvironment {
     param([string]$RepoRoot)
 
@@ -557,12 +595,29 @@ function Resolve-CheckEnvironment {
         }
     }
 
+    # Linked worktrees must not share the main CARGO_TARGET_DIR: cargo hashes workspace crates by their
+    # path relative to the workspace root, so every worktree writes the same build units (e.g.
+    # debug\build\gh-core\<hash>) and freshness is judged against whichever tree built last. A run
+    # could then test another worktree's code and still pass. Give each linked worktree its own
+    # subdirectory of the shared target dir (cold the first time, incremental after); the main
+    # checkout keeps using the shared dir. Remove it with -PruneWorktreeTargets once the worktree is gone.
+    $worktreeTargetDir = $null
+    if (-not [string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR) -and -not [string]::IsNullOrWhiteSpace($mainCheckout) -and
+        -not [string]::Equals([System.IO.Path]::GetFullPath($mainCheckout).TrimEnd('\'), $fullRepoRoot.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+        $sharedTarget = [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR).TrimEnd('\')
+        if ($sharedTarget -notmatch '(?i)[\\/]worktrees[\\/][^\\/]+$') {
+            $worktreeTargetDir = Join-Path (Join-Path $sharedTarget 'worktrees') (Get-WorktreeTargetName -RepoRoot $fullRepoRoot)
+            $env:CARGO_TARGET_DIR = $worktreeTargetDir
+        }
+    }
+
     $ffmpegCmd = Get-Command ffmpeg -ErrorAction SilentlyContinue | Select-Object -First 1
     $ffmpegExe = if ($null -ne $ffmpegCmd) { $ffmpegCmd.Source } else { $null }
 
     return [PSCustomObject]@{
         RepoRoot               = $fullRepoRoot
         MainCheckout           = $mainCheckout
+        WorktreeTargetDir      = $worktreeTargetDir
         CargoTargetDir         = $env:CARGO_TARGET_DIR
         CargoLinker            = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER
         ExportedCargoTargetDir = $exportedCargoTargetDir
@@ -815,6 +870,71 @@ function Resolve-CargoTargetDirectory {
     return [System.IO.Path]::GetFullPath($meta.target_directory)
 }
 
+# Parallel agents run check.ps1 from several worktrees that share one CARGO_TARGET_DIR, and cargo
+# copies each tree's binaries to the same final path (cv-bench\gh-sim.exe, debug\GenshinHelper.exe).
+# Building and then running that shared file lets run A execute the binary run B built a moment
+# later (testing B's code), and on Windows a running exe cannot be replaced, so B's build fails with
+# "Access is denied". So: build and copy the binaries under one cross-process lock per target dir,
+# then run the private copy. The lock is a named mutex, so waiting is event-driven.
+function Invoke-LockedBuildAndCopy {
+    param(
+        [string]$RepoRoot,
+        [string[]]$BuildArgs,
+        [string[]]$RelativeExes,
+        [string]$Label
+    )
+
+    $targetDir = Resolve-CargoTargetDirectory -RepoRoot $RepoRoot
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($targetDir.ToLowerInvariant()))).Replace('-', '').Substring(0, 16)
+    } finally {
+        $sha.Dispose()
+    }
+    $mutex = [System.Threading.Mutex]::new($false, "Local\GenshinHelperCheckBuild-$hash")
+    $acquired = $false
+    try {
+        try {
+            $acquired = $mutex.WaitOne(0)
+            if (-not $acquired) {
+                [Console]::Out.WriteLine("[$Label] Waiting for another check run to finish building in $targetDir ...")
+                $acquired = $mutex.WaitOne([TimeSpan]::FromMinutes(30))
+            }
+        } catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+        if (-not $acquired) {
+            [Console]::Out.WriteLine("[$Label] FAIL: build lock for $targetDir still held after 30 min.")
+            return @{ ExitCode = 1 }
+        }
+
+        $rc = Invoke-NativeStream -FilePath 'cargo' -ArgumentList $BuildArgs
+        if ($rc -ne 0) {
+            return @{ ExitCode = $rc }
+        }
+        $copyDir = Join-Path ([System.IO.Path]::GetTempPath()) ('gh-check-bin-' + [guid]::NewGuid().ToString('N').Substring(0, 12))
+        New-Item -ItemType Directory -Path $copyDir | Out-Null
+        $exes = New-Object System.Collections.Generic.List[string]
+        foreach ($rel in $RelativeExes) {
+            $src = Join-Path $targetDir $rel
+            if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
+                [Console]::Out.WriteLine("[$Label] FAIL: built exe not found at $src")
+                Remove-Item -LiteralPath $copyDir -Recurse -Force -ErrorAction SilentlyContinue
+                return @{ ExitCode = 1 }
+            }
+            $dst = Join-Path $copyDir (Split-Path -Path $rel -Leaf)
+            Copy-Item -LiteralPath $src -Destination $dst
+            $exes.Add($dst)
+        }
+        return @{ ExitCode = 0; CopyDir = $copyDir; Exes = $exes.ToArray() }
+    } finally {
+        if ($acquired) {
+            $mutex.ReleaseMutex()
+        }
+        $mutex.Dispose()
+    }
+}
+
 function Build-RealExecutors {
     param(
         [object]$EnvInfo,
@@ -890,11 +1010,36 @@ function Build-RealExecutors {
             $outcome.ExitCode = Invoke-NativeStream -FilePath 'cargo' -ArgumentList @('nextest', 'run', '--manifest-path', $manifestPath, '--workspace')
         }.GetNewClosure()
 
+        'frames' = {
+            param($outcome)
+            if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+                [Console]::Out.WriteLine('[frames] FAIL: cargo not found on PATH.')
+                $outcome.ExitCode = 1
+                return
+            }
+            $bin = Invoke-LockedBuildAndCopy -RepoRoot $repoRoot -Label 'frames' -RelativeExes @('cv-bench\gh-sim.exe') `
+                -BuildArgs @('build', '-q', '--manifest-path', $manifestPath, '--profile', 'cv-bench', '-p', 'gh-sim')
+            if ($bin.ExitCode -ne 0) {
+                $outcome.ExitCode = $bin.ExitCode
+                return
+            }
+            try {
+                $outcome.ExitCode = Invoke-NativeStream -FilePath $bin.Exes[0] -ArgumentList @('frames')
+            } finally {
+                Remove-Item -LiteralPath $bin.CopyDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }.GetNewClosure()
+
         'ext-smoke' = {
             param($outcome)
             if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
                 [Console]::Out.WriteLine('[ext-smoke] FAIL: node not found on PATH.')
                 $outcome.ExitCode = 1
+                return
+            }
+            $domRc = Invoke-NativeStream -FilePath 'node' -ArgumentList @((Join-Path $repoRoot 'tests\extension_dom_fixtures.mjs'))
+            if ($domRc -ne 0) {
+                $outcome.ExitCode = $domRc
                 return
             }
             $outcome.ExitCode = Invoke-NativeStream -FilePath 'node' -ArgumentList @((Join-Path $repoRoot 'tests\extension_browser_smoke.mjs'))
@@ -913,34 +1058,27 @@ function Build-RealExecutors {
                 return
             }
             [Console]::Out.WriteLine('[blackbox] Building GenshinHelper.exe and GenshinHelperHost.exe from current tree...')
-            $buildRc = Invoke-NativeStream -FilePath 'cargo' -ArgumentList @('build', '--manifest-path', $manifestPath, '-p', 'gh-app', '-p', 'gh-host', '--bins')
-            if ($buildRc -ne 0) {
-                $outcome.ExitCode = $buildRc
-                return
-            }
-
             $targetDir = Resolve-CargoTargetDirectory -RepoRoot $repoRoot
-            $serverExe = [System.IO.Path]::GetFullPath((Join-Path $targetDir 'debug\GenshinHelper.exe'))
-            $hostExe = [System.IO.Path]::GetFullPath((Join-Path $targetDir 'debug\GenshinHelperHost.exe'))
-
-            if ($serverExe -match '(?i)[\\/]dist[\\/]' -or $hostExe -match '(?i)[\\/]dist[\\/]') {
-                [Console]::Out.WriteLine("[blackbox] FAIL: Refusing to test binaries under dist/: server=$serverExe host=$hostExe")
+            if ($targetDir -match '(?i)[\\/]dist([\\/]|$)') {
+                [Console]::Out.WriteLine("[blackbox] FAIL: Refusing to test binaries from a target dir under dist/: $targetDir")
                 $outcome.ExitCode = 1
                 return
             }
-            if (-not (Test-Path -LiteralPath $serverExe -PathType Leaf)) {
-                [Console]::Out.WriteLine("[blackbox] FAIL: Built server exe not found at $serverExe")
-                $outcome.ExitCode = 1
+            $bin = Invoke-LockedBuildAndCopy -RepoRoot $repoRoot -Label 'blackbox' `
+                -RelativeExes @('debug\GenshinHelper.exe', 'debug\GenshinHelperHost.exe') `
+                -BuildArgs @('build', '--manifest-path', $manifestPath, '-p', 'gh-app', '-p', 'gh-host', '--bins')
+            if ($bin.ExitCode -ne 0) {
+                $outcome.ExitCode = $bin.ExitCode
                 return
             }
-            if (-not (Test-Path -LiteralPath $hostExe -PathType Leaf)) {
-                [Console]::Out.WriteLine("[blackbox] FAIL: Built host exe not found at $hostExe")
-                $outcome.ExitCode = 1
-                return
+            $serverExe = $bin.Exes[0]
+            $hostExe = $bin.Exes[1]
+            try {
+                [Console]::Out.WriteLine("[blackbox] Testing private copies built from this tree: server=$serverExe host=$hostExe")
+                $outcome.ExitCode = Invoke-NativeStream -FilePath $EnvInfo.PythonExe -ArgumentList @((Join-Path $repoRoot 'tests\test_blackbox_contracts.py'), '--server-exe', $serverExe, '--host-exe', $hostExe)
+            } finally {
+                Remove-Item -LiteralPath $bin.CopyDir -Recurse -Force -ErrorAction SilentlyContinue
             }
-
-            [Console]::Out.WriteLine("[blackbox] Testing server=$serverExe host=$hostExe")
-            $outcome.ExitCode = Invoke-NativeStream -FilePath $EnvInfo.PythonExe -ArgumentList @((Join-Path $repoRoot 'tests\test_blackbox_contracts.py'), '--server-exe', $serverExe, '--host-exe', $hostExe)
         }.GetNewClosure()
 
         'qa' = {
@@ -966,14 +1104,24 @@ function Build-RealExecutors {
                 return
             }
             $qaArgs = New-Object System.Collections.Generic.List[string]
-            foreach ($a in @('run', '-q', '--manifest-path', $manifestPath, '--profile', 'cv-bench', '-p', 'gh-sim', '--', 'qa', '--sessions', $EnvInfo.QaSessionsDir, '--data-dir', $EnvInfo.DataDir, '--ffmpeg', $EnvInfo.FfmpegExe)) {
+            foreach ($a in @('qa', '--sessions', $EnvInfo.QaSessionsDir, '--data-dir', $EnvInfo.DataDir, '--ffmpeg', $EnvInfo.FfmpegExe)) {
                 $qaArgs.Add($a)
             }
             foreach ($sess in $QaOnly) {
                 $qaArgs.Add('--only')
                 $qaArgs.Add($sess)
             }
-            $outcome.ExitCode = Invoke-NativeStream -FilePath 'cargo' -ArgumentList @($qaArgs.ToArray())
+            $bin = Invoke-LockedBuildAndCopy -RepoRoot $repoRoot -Label 'qa' -RelativeExes @('cv-bench\gh-sim.exe') `
+                -BuildArgs @('build', '-q', '--manifest-path', $manifestPath, '--profile', 'cv-bench', '-p', 'gh-sim')
+            if ($bin.ExitCode -ne 0) {
+                $outcome.ExitCode = $bin.ExitCode
+                return
+            }
+            try {
+                $outcome.ExitCode = Invoke-NativeStream -FilePath $bin.Exes[0] -ArgumentList @($qaArgs.ToArray())
+            } finally {
+                Remove-Item -LiteralPath $bin.CopyDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }.GetNewClosure()
 
         'web-bench' = {
@@ -1021,6 +1169,24 @@ function Invoke-SelfTest {
             RecWb    = $true
         }
         @{
+            Name     = 'tests/extension_browser_smoke.mjs -> ext-smoke'
+            Paths    = @('tests/extension_browser_smoke.mjs')
+            Expected = @('guards', 'audit', 'ext-smoke')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'tests/extension_dom_fixtures.mjs -> ext-smoke'
+            Paths    = @('tests/extension_dom_fixtures.mjs')
+            Expected = @('guards', 'audit', 'ext-smoke')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'tests/fixtures/hoyolab_popup/** -> ext-smoke'
+            Paths    = @('tests/fixtures/hoyolab_popup/en.html')
+            Expected = @('guards', 'audit', 'ext-smoke')
+            RecWb    = $false
+        }
+        @{
             Name     = 'rust/** (gh-hud) -> clippy, nextest only'
             Paths    = @('rust/crates/gh-hud/src/lib.rs')
             Expected = @('guards', 'audit', 'clippy', 'nextest')
@@ -1063,21 +1229,33 @@ function Invoke-SelfTest {
             RecWb    = $false
         }
         @{
-            Name     = 'rust/crates/gh-cv/** -> clippy, nextest, qa'
+            Name     = 'rust/crates/gh-cv/** -> clippy, nextest, frames, qa'
             Paths    = @('rust/crates/gh-cv/src/locator.rs')
-            Expected = @('guards', 'audit', 'clippy', 'nextest', 'qa')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'frames', 'qa')
             RecWb    = $false
         }
         @{
-            Name     = 'rust/crates/gh-core/** -> clippy, nextest, qa'
+            Name     = 'rust/crates/gh-core/** (non-ui_layout) -> clippy, nextest, qa'
             Paths    = @('rust/crates/gh-core/src/lib.rs')
             Expected = @('guards', 'audit', 'clippy', 'nextest', 'qa')
             RecWb    = $false
         }
         @{
-            Name     = 'rust/crates/gh-sim/** -> clippy, nextest, qa'
+            Name     = 'rust/crates/gh-core/src/ui_layout.rs -> clippy, nextest, frames, qa'
+            Paths    = @('rust/crates/gh-core/src/ui_layout.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'frames', 'qa')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-sim/** -> clippy, nextest, frames, qa'
             Paths    = @('rust/crates/gh-sim/src/qa.rs')
-            Expected = @('guards', 'audit', 'clippy', 'nextest', 'qa')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'frames', 'qa')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'tests/frame_fixtures/** -> frames'
+            Paths    = @('tests/frame_fixtures/21x9_2560x1080_hud_shift.json')
+            Expected = @('guards', 'audit', 'frames')
             RecWb    = $false
         }
         @{
@@ -1101,7 +1279,7 @@ function Invoke-SelfTest {
         @{
             Name     = 'mixed paths (README + extension + gh-cv)'
             Paths    = @('README.md', 'extension/i18n.js', 'rust/crates/gh-cv/src/minimap_tracker.rs')
-            Expected = @('guards', 'audit', 'ext-i18n', 'clippy', 'nextest', 'ext-smoke', 'qa')
+            Expected = @('guards', 'audit', 'ext-i18n', 'clippy', 'nextest', 'frames', 'ext-smoke', 'qa')
             RecWb    = $true
         }
         @{
@@ -1124,12 +1302,12 @@ function Invoke-SelfTest {
     # Tier full, -WebBench, explicit -Checks ordering
     $fullPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'full'
     $fullGot = (@($fullPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
-    $fullExp = 'guards,audit,ext-i18n,clippy,nextest,ext-smoke,blackbox,qa'
+    $fullExp = 'guards,audit,ext-i18n,clippy,nextest,frames,ext-smoke,blackbox,qa'
     Assert-True ($fullGot -eq $fullExp) "tier full without -WebBench: expected=[$fullExp] got=[$fullGot]"
 
     $fullWbPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'full' -WebBench
     $fullWbGot = (@($fullWbPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
-    $fullWbExp = 'guards,audit,ext-i18n,clippy,nextest,ext-smoke,blackbox,qa,web-bench'
+    $fullWbExp = 'guards,audit,ext-i18n,clippy,nextest,frames,ext-smoke,blackbox,qa,web-bench'
     Assert-True ($fullWbGot -eq $fullWbExp) "tier full with -WebBench: expected=[$fullWbExp] got=[$fullWbGot]"
 
     $autoWbPlan = Select-CheckPlan -ChangedPaths @('extension/popup.js') -Tier 'auto' -WebBench
@@ -1137,9 +1315,9 @@ function Invoke-SelfTest {
     Assert-True ($autoWbGot -eq 'guards,audit,ext-i18n,ext-smoke,web-bench') "auto with -WebBench: got=[$autoWbGot]"
     Assert-True (-not $autoWbPlan.RecommendWebBench) 'auto with -WebBench should not duplicate recommendation'
 
-    $explicitPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'auto' -ExplicitChecks @('qa,guards', 'clippy')
+    $explicitPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'auto' -ExplicitChecks @('qa,frames,guards', 'clippy,nextest')
     $explicitGot = (@($explicitPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
-    Assert-True ($explicitGot -eq 'guards,clippy,qa') "explicit -Checks preserves fixed order: got=[$explicitGot]"
+    Assert-True ($explicitGot -eq 'guards,clippy,nextest,frames,qa') "explicit -Checks preserves fixed order (frames after nextest): got=[$explicitGot]"
 
     # Extra args parser for repeatable -QaOnly
     $parsedExtra = Parse-ExtraArgs -RawArgs @('-QaOnly', 'sess_A', '-QaOnly', 'sess_B,sess_C', '-QaOnly:sess_D')
@@ -1200,6 +1378,15 @@ function Invoke-SelfTest {
         $parsedCargo = Read-CargoConfigValues -ConfigPath $fakeCargoToml
         Assert-True ($parsedCargo.TargetDir -eq $expectedTargetDir) "Read-CargoConfigValues target-dir: expected=$expectedTargetDir got=$($parsedCargo.TargetDir)"
         Assert-True ($parsedCargo.Linker -eq 'lld-link.exe') "Read-CargoConfigValues linker: got=$($parsedCargo.Linker)"
+
+        # Per-worktree target names: stable across slash style / case / trailing separator (git worktree
+        # list prints forward slashes), distinct for two worktrees with the same leaf name.
+        $wtA = Get-WorktreeTargetName -RepoRoot 'C:/work/x/.t3/worktrees/Genshin-Helper/crew-abc'
+        $wtB = Get-WorktreeTargetName -RepoRoot 'c:\WORK\x\.t3\worktrees\genshin-helper\CREW-ABC\'
+        $wtC = Get-WorktreeTargetName -RepoRoot 'D:\other\crew-abc'
+        Assert-True ($wtA -eq $wtB) "Get-WorktreeTargetName must ignore slash style/case: $wtA vs $wtB"
+        Assert-True ($wtA -ne $wtC) "Get-WorktreeTargetName must differ for different paths with the same leaf: $wtA vs $wtC"
+        Assert-True ($wtA -match '^crew-abc-[0-9a-f]{8}$') "Get-WorktreeTargetName format: $wtA"
     } finally {
         if (Test-Path -LiteralPath $tmpRoot) {
             Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -1208,7 +1395,7 @@ function Invoke-SelfTest {
 
     # 3. Runner tests (fake steps + seeded fault)
     $runnerPlan = (Select-CheckPlan -ChangedPaths @('rust/crates/gh-cv/src/lib.rs') -Tier 'auto').Plan
-    # Selected: guards, audit, clippy, nextest, qa
+    # Selected: guards, audit, clippy, nextest, frames, qa
 
     $passInvoked = New-Object System.Collections.Generic.List[string]
     $passExecs = @{}
@@ -1224,7 +1411,7 @@ function Invoke-SelfTest {
     Assert-True ($passRun.ExitCode -eq 0) "runner all-pass: ExitCode expected=0 got=$($passRun.ExitCode)"
     Assert-True ($passRun.ResultLine -eq 'RESULT: PASS') "runner all-pass: ResultLine expected='RESULT: PASS' got='$($passRun.ResultLine)'"
     Assert-True ($passRun.SummaryLines[-1] -eq 'RESULT: PASS') "runner all-pass: last summary line is RESULT: PASS"
-    Assert-True (($passInvoked -join ',') -eq 'guards,audit,clippy,nextest,qa') "runner all-pass: invoked=[$($passInvoked -join ',')]"
+    Assert-True (($passInvoked -join ',') -eq 'guards,audit,clippy,nextest,frames,qa') "runner all-pass: invoked=[$($passInvoked -join ',')]"
 
     # Seeded fault: flip clippy from 0 -> 1
     $failInvoked = New-Object System.Collections.Generic.List[string]
@@ -1252,6 +1439,7 @@ function Invoke-SelfTest {
     Assert-True ($statusByCheck['ext-i18n'] -eq 'NOT SELECTED') 'runner seeded-fault: ext-i18n=NOT SELECTED'
     Assert-True ($statusByCheck['clippy'] -eq 'FAIL') 'runner seeded-fault: clippy=FAIL'
     Assert-True ($statusByCheck['nextest'] -eq 'NOT RUN') 'runner seeded-fault: nextest=NOT RUN'
+    Assert-True ($statusByCheck['frames'] -eq 'NOT RUN') 'runner seeded-fault: frames=NOT RUN'
     Assert-True ($statusByCheck['qa'] -eq 'NOT RUN') 'runner seeded-fault: qa=NOT RUN'
     Assert-True ($passRun.ResultLine -ne $failRun.ResultLine -and $passRun.ExitCode -ne $failRun.ExitCode) 'runner seeded-fault: flipping fake step flips RESULT and exit code'
 
@@ -1274,6 +1462,39 @@ try {
 } catch {
     [Console]::Error.WriteLine("[check.ps1] ERROR: $($_.Exception.Message)")
     exit 2
+}
+
+if ($PruneWorktreeTargets) {
+    # Delete <shared CARGO_TARGET_DIR>\worktrees\<name> folders whose linked worktree no longer exists.
+    $pruneRoot = [System.IO.Path]::GetFullPath($PSScriptRoot + '\..')
+    $mainCo = Resolve-MainCheckout -RepoRoot $pruneRoot
+    $null = Resolve-CheckEnvironment -RepoRoot $mainCo
+    # The main checkout usually gets its target dir from its own .cargo/config.toml, not the env var.
+    $sharedTargetDir = Resolve-CargoTargetDirectory -RepoRoot $mainCo
+    $wtRoot = Join-Path $sharedTargetDir 'worktrees'
+    if (-not (Test-Path -LiteralPath $wtRoot -PathType Container)) {
+        [Console]::Out.WriteLine("[prune] $wtRoot does not exist; nothing to prune.")
+        exit 0
+    }
+    $live = @{}
+    foreach ($line in @(& git -C $mainCo worktree list --porcelain 2>$null)) {
+        $s = [string]$line
+        if ($s.StartsWith('worktree ')) {
+            $live[(Get-WorktreeTargetName -RepoRoot $s.Substring('worktree '.Length).Trim())] = $true
+        }
+    }
+    $removed = 0
+    foreach ($d in @(Get-ChildItem -LiteralPath $wtRoot -Directory)) {
+        if ($live.ContainsKey($d.Name)) {
+            [Console]::Out.WriteLine("[prune] keep   $($d.Name) (worktree still exists)")
+            continue
+        }
+        Remove-Item -LiteralPath $d.FullName -Recurse -Force
+        [Console]::Out.WriteLine("[prune] removed $($d.Name)")
+        $removed++
+    }
+    [Console]::Out.WriteLine("[prune] removed $removed orphaned worktree target dir(s).")
+    exit 0
 }
 
 if ($SelfTest) {
@@ -1314,6 +1535,9 @@ try {
     }
     if ($envInfo.ExportedCargoLinker) {
         [Console]::Out.WriteLine("[env] Exported CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$($envInfo.CargoLinker) (from main checkout .cargo/config.toml)")
+    }
+    if ($envInfo.WorktreeTargetDir) {
+        [Console]::Out.WriteLine("[env] Linked worktree: using its own CARGO_TARGET_DIR=$($envInfo.WorktreeTargetDir) (shared dir would mix build units between worktrees)")
     }
 
     $executors = Build-RealExecutors `

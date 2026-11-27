@@ -27,7 +27,13 @@ const EXT_ID = 'nfkijdoblmphmdljfogooajhbldkeojh';
 const MAP_URL = 'https://act.hoyolab.com/ys/app/interactive-map/index.html';
 const APP_ORIGIN = 'http://127.0.0.1:8765';
 const BOOT_TIMEOUT_MS = 45000;
+// Hang guards: every CDP call / DevTools HTTP request gets its own deadline, and the whole run
+// has a hard watchdog, so a stalled page or browser fails the check instead of blocking the gate.
+const CDP_CALL_TIMEOUT_MS = 15000;
+const HTTP_TIMEOUT_MS = 10000;
+const WATCHDOG_MS = Number(process.env.GH_SMOKE_WATCHDOG_MS) || 300000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let abortRun = null;
 
 const SCRIPT_BUILD = (readFileSync(join(EXT_DIR, 'page_main.js'), 'utf8').match(/const SCRIPT_BUILD = '([^']+)'/) || [])[1];
 
@@ -54,19 +60,43 @@ class Cdp {
     this.ws.onmessage = (ev) => {
       const m = JSON.parse(ev.data);
       if (m.id && this.pending.has(m.id)) {
-        this.pending.get(m.id)(m);
+        const p = this.pending.get(m.id);
         this.pending.delete(m.id);
+        clearTimeout(p.timer);
+        p.resolve(m);
       } else if (m.method) {
         for (const h of this.handlers) h(m);
       }
     };
-    this.ready = new Promise((r) => { this.ws.onopen = r; });
+    const failAll = (why) => {
+      for (const [id, p] of this.pending) {
+        clearTimeout(p.timer);
+        p.reject(new Error(`CDP ${p.method} #${id}: ${why}`));
+      }
+      this.pending.clear();
+    };
+    this.ws.onclose = () => failAll('socket closed');
+    this.ready = new Promise((r, j) => {
+      const timer = setTimeout(() => j(new Error(`CDP socket did not open within ${CDP_CALL_TIMEOUT_MS} ms`)), CDP_CALL_TIMEOUT_MS);
+      this.ws.onopen = () => { clearTimeout(timer); r(); };
+      this.ws.onerror = () => { clearTimeout(timer); j(new Error('CDP socket error')); };
+    });
   }
-  send(method, params = {}) {
-    return new Promise((resolveSend) => {
+  send(method, params = {}, timeoutMs = CDP_CALL_TIMEOUT_MS) {
+    return new Promise((resolveSend, rejectSend) => {
       const id = ++this.id;
-      this.pending.set(id, resolveSend);
-      this.ws.send(JSON.stringify({ id, method, params }));
+      const timer = setTimeout(() => {
+        if (!this.pending.delete(id)) return;
+        rejectSend(new Error(`CDP ${method} #${id} timed out after ${timeoutMs} ms`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve: resolveSend, reject: rejectSend, timer, method });
+      try {
+        this.ws.send(JSON.stringify({ id, method, params }));
+      } catch (e) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        rejectSend(e);
+      }
     });
   }
   async eval(expression) {
@@ -96,6 +126,11 @@ async function main() {
     '--no-first-run', '--no-default-browser-check', '--lang=en-US', 'about:blank',
   ], { stdio: 'ignore' });
   const sessions = [];
+  abortRun = () => {
+    for (const c of sessions) c.close();
+    try { proc.kill(); } catch (e) {}
+    try { rmSync(profile, { recursive: true, force: true }); } catch (e) {}
+  };
   try {
     let port = null;
     for (let i = 0; i < 150 && !port; i++) {
@@ -104,7 +139,7 @@ async function main() {
       if (existsSync(f)) port = readFileSync(f, 'utf8').split('\n')[0].trim();
     }
     if (!port) throw new Error('Chromium did not expose a DevTools port');
-    const http = (p, method = 'GET') => fetch(`http://127.0.0.1:${port}${p}`, { method }).then((r) => r.json());
+    const http = (p, method = 'GET') => fetch(`http://127.0.0.1:${port}${p}`, { method, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) }).then((r) => r.json());
 
     let swTarget = null;
     for (let i = 0; i < 50 && !swTarget; i++) {
@@ -221,6 +256,15 @@ async function main() {
   console.log(failed.length ? `FAILED: ${failed.length}/${results.length}` : `ALL ${results.length} EXTENSION BROWSER CHECKS PASSED`);
   return failed.length ? 1 : 0;
 }
+
+const watchdog = setTimeout(() => {
+  console.error(`[ERROR] smoke test exceeded the ${WATCHDOG_MS} ms watchdog; aborting`);
+  if (abortRun) abortRun();
+  process.exit(1);
+}, WATCHDOG_MS);
+// Kept referenced on purpose: main() always ends in process.exit(), and a referenced timer stops
+// Node from exiting 0 on an empty event loop while a promise is still pending.
+void watchdog;
 
 main().then((code) => process.exit(code), (err) => {
   console.error('[ERROR]', err && err.stack ? err.stack : err);

@@ -1,0 +1,97 @@
+<!--
+  Captured from live HoYoLAB Interactive Map (public guest session, zero login/cookies).
+  Capture time: 2026-11-27T14:41:05Z (2026-11-27T21:41:05+07:00)
+  Source URL: https://act.hoyolab.com/ys/app/interactive-map/index.html?lang=en-us#/map/2?shown_types=5
+  Language: en-us (English)
+  Capture method: Headless Chromium (--headless=new, fresh temporary --user-data-dir, --lang=en-US)
+    via CDP; dismissed initial overlays, enabled collectible filter (shown_types=5), clicked a
+    collectible canvas pin on map 2, extracted the .expand-popup -> .leaflet-popup-pane ->
+    .leaflet-popup -> .map-popup subtree, and stripped external image/CDN URLs, contributor info,
+    and copyrighted item names while preserving exact popup nesting, classes, attributes, and
+    button markup/text.
+
+  MARKED STATE: the .map-popup__footer below was captured live on 2026-11-28 from the signed-in
+  HoYoLAB test profile (scripts/hoyolab_test_profile.ps1, tests/hoyolab_live_mark.mjs) right after
+  marking a pin (then unmarked again). The rest of the popup is the en_unmarked capture above.
+  In the real marked state the action button reads "Unhide Pin" and its class changes from
+  gt-button-ys--primary to gt-button-ys--default.
+-->
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+  <meta charset="utf-8">
+  <title>HoYoLAB Pin Popup Fixture (en-us, marked; live footer)</title>
+  <style>
+    html, body { margin: 0; padding: 0; }
+    .expand-popup { display: flex; position: fixed; inset: 0; width: 1424px; height: 749px; }
+    .mhy-map-container, .mhy-game-gis, .mhy-map { position: relative; width: 100%; height: 100%; }
+    .leaflet-popup { position: relative; display: block; width: 401px; }
+    .leaflet-popup-content { width: 401px; }
+    .map-popup { display: block; padding: 12px; }
+    .map-popup__footer { display: flex; align-items: center; gap: 8px; }
+    .map-popup__btn {
+      display: flex;
+      position: relative;
+      align-items: center;
+      justify-content: center;
+      min-width: 141px;
+      height: 32px;
+      padding: 0 12px;
+    }
+    .map-popup__btn--batch { min-width: 143px; }
+    .leaflet-popup-close-button { display: block; position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; }
+  </style>
+</head>
+<body>
+  <div id="root" class="expand-popup">
+    <div class="mhy-map-container">
+      <div class="mhy-game-gis">
+        <div class="mhy-map leaflet-container leaflet-touch leaflet-grab leaflet-touch-drag leaflet-touch-zoom" tabindex="0">
+          <div class="leaflet-pane leaflet-map-pane">
+            <div class="leaflet-pane leaflet-popup-pane">
+              <div class="leaflet-popup  leaflet-zoom-animated">
+                <div class="leaflet-popup-content-wrapper">
+                  <div class="leaflet-popup-content" style="width: 401px;">
+                    <div class="map-popup">
+                      <h4><span class="map-popup__name-link map-popup__name-link--seas"><span class="label label--seas">Collectible Pin</span></span></h4>
+                      <div class="map-popup__content">
+                        <div class="map-popup__type">
+                          <div class="map-popup__attrs">
+                            <div class="map-popup__attr"><!----> <span class="map-popup__attr-value">Low</span></div>
+                          </div>
+                          <!---->
+                        </div>
+                        <!---->
+                        <div class="map-popup__info">
+                          <div class="map-popup__info-switch" style="display: none;">
+                            <div class="map-popup__info-img active"><span></span></div>
+                            <div class="map-popup__info-video"><span></span></div>
+                          </div>
+                          <div preview="previewContainer" class="map-popup__img-container"></div>
+                          <!---->
+                        </div>
+                        <!---->
+                        <div class="map-popup__links"></div>
+                        <div class="map-popup__links"><!----></div>
+                        <div class="map-popup__time">
+                          Update Time:2022-01-12 11:15:27
+                        </div>
+                      </div>
+                      <div class="map-popup__footer"><div title="Submit Pin Description" class="map-popup__btn-edit map-popup__btn-edit--sea"><!----></div>
+                        <button theme="dark" class="map-popup__btn gt-button-ys--flex gt-button-ys gt-button-ys--size-s gt-button-ys--linear map-popup__btn--en-us map-popup__btn--batch"><div theme="dark" class=""></div><!----><!----><span size="s" with-left-icon="0" with-right-icon="0" class="gt_desktop_button_b2_3 gt-button-ys--label gt-button-ys--label-s"> Batch Mark </span><!----><!----></button>
+                        <button theme="dark" class="map-popup__btn gt-button-ys--flex gt-button-ys gt-button-ys--size-s gt-button-ys--default map-popup__btn--en-us"><div theme="dark" class="gt-button-ys--texture gt-button-ys--texture-default"></div><!----><!----><span size="s" with-left-icon="0" with-right-icon="0" class="gt_desktop_button_b2_3 gt-button-ys--label gt-button-ys--label-s"> Unhide Pin </span><!----><!----></button></div>
+                      <!---->
+                    </div>
+                  </div>
+                </div>
+                <div class="leaflet-popup-tip-container"><div class="leaflet-popup-tip"></div></div>
+                <a class="leaflet-popup-close-button" role="button" aria-label="Close popup" href="#close"><span aria-hidden="true">×</span></a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

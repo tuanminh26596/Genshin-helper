@@ -8,7 +8,7 @@
     }
 
     const SCRIPT_VERSION = 'v5.7.0';
-    const SCRIPT_BUILD = '5.7.0-r7';
+    const SCRIPT_BUILD = '5.7.0-r8';
 
     function bootGenshinHelper() {
     if (window.__gh_booted_build === SCRIPT_BUILD) return;
@@ -4780,59 +4780,57 @@
         return getText(el).replace(/\s+/g, ' ').trim().toLowerCase();
     }
 
-    function findGhimButton() {
-        try {
-            const popup = findPopupContainer() || document;
-            const candidates = Array.from(popup.querySelectorAll('.map-popup__btn, button, [role="button"]'));
-            return candidates.find(el => {
-                if (el.offsetWidth === 0 || el.offsetHeight === 0 || isButtonDisabled(el)) return false;
-                const norm = normalizeBtnText(el);
-                if (!norm) return false;
-                if (
-                    norm.includes('nhiều') ||
-                    norm.includes('trong game') ||
-                    norm.includes('mới') ||
-                    norm.includes('đã') ||
-                    norm.includes('bỏ') ||
-                    norm.includes('hủy') ||
-                    norm.includes('huỷ') ||
-                    norm.includes('unmark') ||
-                    norm.includes('marked')
-                ) {
-                    return false;
-                }
-                return norm === 'ghim' || norm === 'mark';
-            });
-        } catch (e) { return null; }
+    // HoYoLAB pin-popup button labels for every UI language, copied verbatim from the map's own
+    // mi18n strings (keys `mark` / `unmark`; source:
+    // https://fastcdn.hoyoverse.com/mi18n/hk4e_global/m03311749131601/m03311749131601-<lang>.json,
+    // checked 2026-11-28), plus labels older builds of this script already matched.
+    // Match whole labels only: several unmark labels contain the mark label (ko "맵 핀" /
+    // "맵 핀 취소", id "Pin" / "Hapus Pin"), and the EN unmark label is "Unhide Pin", not "Unmark".
+    function _popupMarkLabelSets() {
+        if (_popupMarkLabelSets.cache) return _popupMarkLabelSets.cache;
+        const norm = (t) => t.replace(/\s+/g, ' ').trim().toLowerCase().normalize('NFC');
+        const mark = [
+            'Markierung', 'Mark Pin', 'Marcar', 'Marqueur', 'Pin', 'Posiziona', '標記する', '맵 핀',
+            'Pino', 'Метка', 'หมุด', 'İşaretle', 'Ghim', '标记', '標記',
+            'mark'
+        ];
+        const unmark = [
+            'Markierung löschen', 'Unhide Pin', 'Cancelar marcador', 'Supprimer', 'Hapus Pin', 'Rimuovi',
+            '標記解除', '맵 핀 취소', 'Excluir Pino', 'Удалить метку', 'ยกเลิกหมุด', 'İşareti Kaldır',
+            'Huỷ Ghim', '取消标记', '取消標記',
+            'bỏ ghim', 'hủy ghim', 'huỷ ghim', 'đã ghim', 'unmark', 'unmark pin', 'marked'
+        ];
+        _popupMarkLabelSets.cache = { mark: new Set(mark.map(norm)), unmark: new Set(unmark.map(norm)) };
+        return _popupMarkLabelSets.cache;
     }
 
-    function findLayerButton() {
+    // Visible, enabled action buttons of the open pin popup, primary buttons first. Never returns the
+    // batch-mark button or our own injected navigate button.
+    function _popupActionButtons() {
+        const popup = findPopupContainer() || document;
+        const scope = (popup !== document && popup.matches && popup.matches('.map-popup'))
+            ? popup
+            : (Array.from(popup.querySelectorAll('.map-popup')).find(el => _isVisibleEl(el)) || popup);
+        const usable = (el) => Boolean(el) && el.offsetWidth > 0 && el.offsetHeight > 0 && !isButtonDisabled(el)
+            && el.id !== 'gh-popup-navigate-btn'
+            && !(el.classList && el.classList.contains('map-popup__btn--batch'));
+        const primary = Array.from(scope.querySelectorAll('.map-popup__btn.gt-button-ys--primary')).filter(usable);
+        const rest = Array.from(scope.querySelectorAll('.map-popup__btn, button, [role="button"]'))
+            .filter(el => usable(el) && !primary.includes(el));
+        return primary.concat(rest);
+    }
+
+    function findGhimButton() {
         try {
-            const candidates = Array.from(document.querySelectorAll('.map-popup__entrance, [class*="map-popup__entrance"], .map-popup__special-btns > div, .map-popup__special-btns span'));
-            return candidates.find(el => {
-                if (el.offsetWidth === 0 || el.offsetHeight === 0) return false;
-                const txt = getText(el);
-                return (txt === 'Thám Hiểm Phân Tầng' || txt.includes('Thám Hiểm Phân Tầng') || txt.includes('Phân Tầng') || txt.includes('Underground')) && !txt.includes('Lối Vào');
-            });
+            const { mark } = _popupMarkLabelSets();
+            return _popupActionButtons().find(el => mark.has(normalizeBtnText(el).normalize('NFC'))) || null;
         } catch (e) { return null; }
     }
 
     function findAlreadyMarkedButton() {
         try {
-            const popup = findPopupContainer() || document;
-            const candidates = Array.from(popup.querySelectorAll('.map-popup__btn, button, [role="button"]'));
-            return candidates.find(el => {
-                if (el.offsetWidth === 0 || el.offsetHeight === 0 || isButtonDisabled(el)) return false;
-                const norm = normalizeBtnText(el);
-                return (
-                    norm === 'bỏ ghim' ||
-                    norm === 'hủy ghim' ||
-                    norm === 'huỷ ghim' ||
-                    norm === 'đã ghim' ||
-                    norm === 'unmark' ||
-                    norm === 'marked'
-                );
-            });
+            const { unmark } = _popupMarkLabelSets();
+            return _popupActionButtons().find(el => unmark.has(normalizeBtnText(el).normalize('NFC'))) || null;
         } catch (e) { return null; }
     }
 
