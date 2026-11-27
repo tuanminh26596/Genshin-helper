@@ -719,18 +719,35 @@ async function main() {
         zoom_ratio_t: 0.6,
         has_world_coords: true,
         is_underground: false
-      }, 650);
-      const asSyncState = await asTab.page.eval(`(() => {
-        const ctx = window.__GH_BRIDGE__.getContext();
-        const c = ctx.map.getCenter();
-        const ll = window.GHCoordTransform.canonicalToLeaflet(window.__GH_BRIDGE__.getTransform(), ${asVec.canonical.y}, ${asVec.canonical.x});
-        const pExp = ctx.map.latLngToContainerPoint(ll);
-        const wrap = document.querySelector('.gh-player-marker-wrap');
-        const cRect = ctx.map.getContainer().getBoundingClientRect();
-        const wRect = wrap ? wrap.getBoundingClientRect() : null;
-        const mErrPx = wRect ? Math.hypot((wRect.left + wRect.width / 2 - cRect.left) - pExp.x, (wRect.top + wRect.height / 2 - cRect.top) - pExp.y) : 999;
-        return { center: { lat: c.lat, lng: c.lng }, expected: { lat: ll[0], lng: ll[1] }, mErrPx };
-      })()`);
+      }, 100);
+      let asSyncState = null;
+      await waitUntil(async () => {
+        const s = await asTab.page.eval(`(() => {
+          const ctx = window.__GH_BRIDGE__.getContext();
+          const c = ctx.map.getCenter();
+          const ll = window.GHCoordTransform.canonicalToLeaflet(window.__GH_BRIDGE__.getTransform(), ${asVec.canonical.y}, ${asVec.canonical.x});
+          const pExp = ctx.map.latLngToContainerPoint(ll);
+          const wrap = document.querySelector('.gh-player-marker-wrap');
+          const cRect = ctx.map.getContainer().getBoundingClientRect();
+          const wRect = wrap ? wrap.getBoundingClientRect() : null;
+          const mErrPx = wRect ? Math.hypot((wRect.left + wRect.width / 2 - cRect.left) - pExp.x, (wRect.top + wRect.height / 2 - cRect.top) - pExp.y) : 999;
+          return {
+            center: { lat: c.lat, lng: c.lng },
+            expected: { lat: ll[0], lng: ll[1] },
+            zoom: ctx.map.getZoom(),
+            animating: Boolean(ctx.map._animatingZoom),
+            mErrPx
+          };
+        })()`);
+        if (s) asSyncState = s;
+        return Boolean(
+          s &&
+          !s.animating &&
+          Math.abs(s.center.lat - asVec.expected_leaflet.lat) < 0.01 &&
+          Math.abs(s.center.lng - asVec.expected_leaflet.lng) < 0.01 &&
+          s.mErrPx <= 8
+        );
+      }, 5000, 150);
       const asSyncOk = Boolean(
         asSyncState &&
         Math.abs(asSyncState.center.lat - asVec.expected_leaflet.lat) < 0.01 &&
@@ -740,7 +757,9 @@ async function main() {
       record(
         'appsample_live_sync_position',
         asSyncOk,
-        `center=(${asSyncState.center.lat.toFixed(5)},${asSyncState.center.lng.toFixed(5)}) exp=(${asVec.expected_leaflet.lat.toFixed(5)},${asVec.expected_leaflet.lng.toFixed(5)}) markerErrPx=${asSyncState.mErrPx.toFixed(2)}`
+        asSyncState
+          ? `center=(${asSyncState.center.lat.toFixed(5)},${asSyncState.center.lng.toFixed(5)}) exp=(${asVec.expected_leaflet.lat.toFixed(5)},${asVec.expected_leaflet.lng.toFixed(5)}) markerErrPx=${asSyncState.mErrPx.toFixed(2)} zoom=${asSyncState.zoom} animating=${asSyncState.animating}`
+          : 'no sync state'
       );
 
       // Guest mark check on AppSample
@@ -861,18 +880,35 @@ async function main() {
         zoom_ratio_t: 0.6,
         has_world_coords: true,
         is_underground: false
-      }, 650);
-      const kySyncState = await kyTab.page.eval(`(() => {
-        const ctx = window.__GH_BRIDGE__.getContext();
-        const c = ctx.map.getCenter();
-        const ll = window.GHCoordTransform.canonicalToLeaflet(window.__GH_BRIDGE__.getTransform(), ${kyVec.canonical.y}, ${kyVec.canonical.x});
-        const pExp = ctx.map.latLngToContainerPoint(ll);
-        const wrap = document.querySelector('.gh-player-marker-wrap');
-        const cRect = ctx.map.getContainer().getBoundingClientRect();
-        const wRect = wrap ? wrap.getBoundingClientRect() : null;
-        const mErrPx = wRect ? Math.hypot((wRect.left + wRect.width / 2 - cRect.left) - pExp.x, (wRect.top + wRect.height / 2 - cRect.top) - pExp.y) : 999;
-        return { center: { lat: c.lat, lng: c.lng }, expected: { lat: ll[0], lng: ll[1] }, mErrPx };
-      })()`);
+      }, 100);
+      let kySyncState = null;
+      await waitUntil(async () => {
+        const s = await kyTab.page.eval(`(() => {
+          const ctx = window.__GH_BRIDGE__.getContext();
+          const c = ctx.map.getCenter();
+          const ll = window.GHCoordTransform.canonicalToLeaflet(window.__GH_BRIDGE__.getTransform(), ${kyVec.canonical.y}, ${kyVec.canonical.x});
+          const pExp = ctx.map.latLngToContainerPoint(ll);
+          const wrap = document.querySelector('.gh-player-marker-wrap');
+          const cRect = ctx.map.getContainer().getBoundingClientRect();
+          const wRect = wrap ? wrap.getBoundingClientRect() : null;
+          const mErrPx = wRect ? Math.hypot((wRect.left + wRect.width / 2 - cRect.left) - pExp.x, (wRect.top + wRect.height / 2 - cRect.top) - pExp.y) : 999;
+          return {
+            center: { lat: c.lat, lng: c.lng },
+            expected: { lat: ll[0], lng: ll[1] },
+            zoom: ctx.map.getZoom(),
+            animating: Boolean(ctx.map._animatingZoom),
+            mErrPx
+          };
+        })()`);
+        if (s) kySyncState = s;
+        return Boolean(
+          s &&
+          !s.animating &&
+          Math.abs(s.center.lat - kyVec.expected_leaflet.lat) < 50 &&
+          Math.abs(s.center.lng - kyVec.expected_leaflet.lng) < 50 &&
+          s.mErrPx <= 8
+        );
+      }, 5000, 150);
       const kySyncOk = Boolean(
         kySyncState &&
         Math.abs(kySyncState.center.lat - kyVec.expected_leaflet.lat) < 50 &&
@@ -882,7 +918,9 @@ async function main() {
       record(
         'kongying_live_sync_position',
         kySyncOk,
-        `center=(${kySyncState.center.lat.toFixed(1)},${kySyncState.center.lng.toFixed(1)}) exp=(${kyVec.expected_leaflet.lat.toFixed(1)},${kyVec.expected_leaflet.lng.toFixed(1)}) markerErrPx=${kySyncState.mErrPx.toFixed(2)}`
+        kySyncState
+          ? `center=(${kySyncState.center.lat.toFixed(1)},${kySyncState.center.lng.toFixed(1)}) exp=(${kyVec.expected_leaflet.lat.toFixed(1)},${kyVec.expected_leaflet.lng.toFixed(1)}) markerErrPx=${kySyncState.mErrPx.toFixed(2)} zoom=${kySyncState.zoom} animating=${kySyncState.animating}`
+          : 'no sync state'
       );
 
       // Guest mark + unmark check on Kongying v3

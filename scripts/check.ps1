@@ -14,7 +14,7 @@ scratch\web_scenario_all.json) are absent from the current worktree, they are
 resolved automatically from the main checkout reported by `git worktree list`.
 
 Fixed check order:
-  guards, audit, ext-i18n, clippy, nextest, frames, ext-smoke, blackbox, qa, web-bench
+  guards, audit, ext-i18n, multimap-unit, clippy, nextest, frames, provider-fixtures, ext-smoke, blackbox, qa, web-bench, provider-live
 
 Additional repeatable parameter:
   -QaOnly <session>
@@ -29,7 +29,7 @@ comparisons. Default: `main`. On `main` itself this checks uncommitted changes.
 
 .PARAMETER Tier
 Selection tier: `auto` (default, path-based selection) or `full` (every check
-except `web-bench`; add `-WebBench` to include `web-bench`).
+except `web-bench` and `provider-live`; add `-WebBench` / `-ProviderLive` to include them).
 
 .PARAMETER Checks
 Explicit comma-separated list (or array) of check names to run in the fixed
@@ -41,6 +41,9 @@ Use only with explicit user approval; usage is always logged.
 
 .PARAMETER WebBench
 Include `web-bench` (requires port 8765 to be free; close GenshinHelper first).
+
+.PARAMETER ProviderLive
+Include `provider-live` (runs `tests/provider_live_smoke.mjs` against live AppSample, Kongying v3, and HoYoLAB in headless Chromium; requires network).
 
 .PARAMETER DryRun
 Print the selection plan only (`<name>: selected (<reason>)` or
@@ -69,7 +72,7 @@ Run only the specified QA session (repeatable: -QaOnly sess_A -QaOnly sess_B).
 
 .EXAMPLE
 pwsh -NoProfile -File scripts/check.ps1 -Tier full -Base main
-Run every check except web-bench (add -WebBench to include it).
+Run every offline/automated check except web-bench and provider-live.
 
 .EXAMPLE
 pwsh -NoProfile -File scripts/check.ps1 -SelfTest
@@ -83,6 +86,7 @@ param(
     [string[]]$Checks = @(),
     [switch]$AllowBaselineChange,
     [switch]$WebBench,
+    [switch]$ProviderLive,
     [switch]$DryRun,
     [switch]$SelfTest
 )
@@ -97,13 +101,16 @@ $script:CheckOrder = @(
     'guards'
     'audit'
     'ext-i18n'
+    'multimap-unit'
     'clippy'
     'nextest'
     'frames'
+    'provider-fixtures'
     'ext-smoke'
     'blackbox'
     'qa'
     'web-bench'
+    'provider-live'
 )
 
 $script:ProtectedBaselineFiles = @(
@@ -217,7 +224,8 @@ function Select-CheckPlan {
         [ValidateSet('auto', 'full')]
         [string]$Tier = 'auto',
         [string[]]$ExplicitChecks = @(),
-        [switch]$WebBench
+        [switch]$WebBench,
+        [switch]$ProviderLive
     )
 
     $normalizedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
@@ -231,6 +239,22 @@ function Select-CheckPlan {
     $paths = @($normalizedPaths.ToArray())
 
     $extMatches = @($paths | Where-Object { $_ -like 'extension/*' })
+    $multimapUnitMatches = @(
+        $paths | Where-Object {
+            $_ -like 'extension/*' -or
+            $_ -eq 'tests/multimap_unit.mjs' -or
+            $_ -like 'tests/fixtures/multimap/*' -or
+            $_ -eq 'rust/crates/gh-core/src/map_bridge.rs'
+        }
+    )
+    $providerFixturesMatches = @(
+        $paths | Where-Object {
+            $_ -like 'extension/*' -or
+            $_ -eq 'tests/provider_dom_fixtures.mjs' -or
+            $_ -like 'tests/fixtures/providers/*' -or
+            $_ -like 'tests/fixtures/multimap/*'
+        }
+    )
     $extSmokeMatches = @(
         $paths | Where-Object {
             $_ -like 'extension/*' -or
@@ -295,6 +319,11 @@ function Select-CheckPlan {
                     $selected = $true
                     $reason = '-WebBench'
                 }
+            } elseif ($name -eq 'provider-live') {
+                if ($ProviderLive) {
+                    $selected = $true
+                    $reason = '-ProviderLive'
+                }
             } else {
                 $selected = $true
                 $reason = 'tier full'
@@ -315,6 +344,12 @@ function Select-CheckPlan {
                         $reason = Format-MatchReason -MatchedPaths $extMatches
                     }
                 }
+                'multimap-unit' {
+                    if ($multimapUnitMatches.Count -gt 0) {
+                        $selected = $true
+                        $reason = Format-MatchReason -MatchedPaths $multimapUnitMatches
+                    }
+                }
                 'clippy' {
                     if ($rustMatches.Count -gt 0) {
                         $selected = $true
@@ -331,6 +366,12 @@ function Select-CheckPlan {
                     if ($framesMatches.Count -gt 0) {
                         $selected = $true
                         $reason = Format-MatchReason -MatchedPaths $framesMatches
+                    }
+                }
+                'provider-fixtures' {
+                    if ($providerFixturesMatches.Count -gt 0) {
+                        $selected = $true
+                        $reason = Format-MatchReason -MatchedPaths $providerFixturesMatches
                     }
                 }
                 'ext-smoke' {
@@ -355,6 +396,12 @@ function Select-CheckPlan {
                     if ($WebBench) {
                         $selected = $true
                         $reason = '-WebBench'
+                    }
+                }
+                'provider-live' {
+                    if ($ProviderLive) {
+                        $selected = $true
+                        $reason = '-ProviderLive'
                     }
                 }
             }
@@ -771,11 +818,11 @@ function Invoke-CheckRunner {
     $summaryLines = New-Object System.Collections.Generic.List[string]
     $summaryLines.Add('')
     $summaryLines.Add('=== Check Summary ===')
-    $summaryLines.Add(('{0,-12}  {1,-12}  {2,10}' -f 'Check', 'Status', 'Duration'))
-    $summaryLines.Add(('{0,-12}  {1,-12}  {2,10}' -f '------------', '------------', '----------'))
+    $summaryLines.Add(('{0,-17}  {1,-12}  {2,10}' -f 'Check', 'Status', 'Duration'))
+    $summaryLines.Add(('{0,-17}  {1,-12}  {2,10}' -f '-----------------', '------------', '----------'))
     foreach ($r in $rows) {
         $durStr = Format-Duration -Seconds $r.DurationSeconds
-        $summaryLines.Add(('{0,-12}  {1,-12}  {2,10}' -f $r.Name, $r.Status, $durStr))
+        $summaryLines.Add(('{0,-17}  {1,-12}  {2,10}' -f $r.Name, $r.Status, $durStr))
     }
     $summaryLines.Add("Total time: $(Format-Duration -Seconds $totalSeconds)")
     if ($null -ne $slowest) {
@@ -893,6 +940,16 @@ function Build-RealExecutors {
             $outcome.ExitCode = Invoke-NativeStream -FilePath $EnvInfo.PythonExe -ArgumentList @((Join-Path $repoRoot 'tests\verify_i18n_and_ext_v5.py'))
         }.GetNewClosure()
 
+        'multimap-unit' = {
+            param($outcome)
+            if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+                [Console]::Out.WriteLine('[multimap-unit] FAIL: node not found on PATH.')
+                $outcome.ExitCode = 1
+                return
+            }
+            $outcome.ExitCode = Invoke-NativeStream -FilePath 'node' -ArgumentList @((Join-Path $repoRoot 'tests\multimap_unit.mjs'))
+        }.GetNewClosure()
+
         'clippy' = {
             param($outcome)
             if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
@@ -921,6 +978,16 @@ function Build-RealExecutors {
                 return
             }
             $outcome.ExitCode = Invoke-NativeStream -FilePath 'cargo' -ArgumentList @('run', '-q', '--manifest-path', $manifestPath, '--profile', 'cv-bench', '-p', 'gh-sim', '--', 'frames')
+        }.GetNewClosure()
+
+        'provider-fixtures' = {
+            param($outcome)
+            if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+                [Console]::Out.WriteLine('[provider-fixtures] FAIL: node not found on PATH.')
+                $outcome.ExitCode = 1
+                return
+            }
+            $outcome.ExitCode = Invoke-NativeStream -FilePath 'node' -ArgumentList @((Join-Path $repoRoot 'tests\provider_dom_fixtures.mjs'))
         }.GetNewClosure()
 
         'ext-smoke' = {
@@ -1023,6 +1090,16 @@ function Build-RealExecutors {
             }
             $outcome.ExitCode = Invoke-NativeStream -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-File', (Join-Path $repoRoot 'scripts\web_bench.ps1'), '-Scenario', $EnvInfo.WebScenarioFile)
         }.GetNewClosure()
+
+        'provider-live' = {
+            param($outcome)
+            if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+                [Console]::Out.WriteLine('[provider-live] FAIL: node not found on PATH.')
+                $outcome.ExitCode = 1
+                return
+            }
+            $outcome.ExitCode = Invoke-NativeStream -FilePath 'node' -ArgumentList @((Join-Path $repoRoot 'tests\provider_live_smoke.mjs'))
+        }.GetNewClosure()
     }
 }
 
@@ -1053,10 +1130,40 @@ function Invoke-SelfTest {
             RecWb    = $false
         }
         @{
-            Name     = 'extension/** -> ext-i18n, ext-smoke + web-bench recommendation'
+            Name     = 'extension/** -> ext-i18n, multimap-unit, provider-fixtures, ext-smoke + web-bench recommendation'
             Paths    = @('extension/popup.js')
-            Expected = @('guards', 'audit', 'ext-i18n', 'ext-smoke')
+            Expected = @('guards', 'audit', 'ext-i18n', 'multimap-unit', 'provider-fixtures', 'ext-smoke')
             RecWb    = $true
+        }
+        @{
+            Name     = 'tests/multimap_unit.mjs -> multimap-unit'
+            Paths    = @('tests/multimap_unit.mjs')
+            Expected = @('guards', 'audit', 'multimap-unit')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'tests/fixtures/multimap/** -> multimap-unit, provider-fixtures'
+            Paths    = @('tests/fixtures/multimap/transform_vectors.json')
+            Expected = @('guards', 'audit', 'multimap-unit', 'provider-fixtures')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'tests/provider_dom_fixtures.mjs -> provider-fixtures'
+            Paths    = @('tests/provider_dom_fixtures.mjs')
+            Expected = @('guards', 'audit', 'provider-fixtures')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'tests/fixtures/providers/** -> provider-fixtures'
+            Paths    = @('tests/fixtures/providers/appsample_state.json')
+            Expected = @('guards', 'audit', 'provider-fixtures')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-core/src/map_bridge.rs -> multimap-unit, clippy, nextest, qa'
+            Paths    = @('rust/crates/gh-core/src/map_bridge.rs')
+            Expected = @('guards', 'audit', 'multimap-unit', 'clippy', 'nextest', 'qa')
+            RecWb    = $false
         }
         @{
             Name     = 'tests/extension_browser_smoke.mjs -> ext-smoke'
@@ -1169,13 +1276,13 @@ function Invoke-SelfTest {
         @{
             Name     = 'mixed paths (README + extension + gh-cv)'
             Paths    = @('README.md', 'extension/i18n.js', 'rust/crates/gh-cv/src/minimap_tracker.rs')
-            Expected = @('guards', 'audit', 'ext-i18n', 'clippy', 'nextest', 'frames', 'ext-smoke', 'qa')
+            Expected = @('guards', 'audit', 'ext-i18n', 'multimap-unit', 'clippy', 'nextest', 'frames', 'provider-fixtures', 'ext-smoke', 'qa')
             RecWb    = $true
         }
         @{
             Name     = 'Windows backslash separators'
             Paths    = @('extension\page_main.js', 'rust\crates\gh-net\src\hd_assets_cache.rs', 'tests\blackbox_contracts\sandbox.py', 'tests\scenarios\s1.json')
-            Expected = @('guards', 'audit', 'ext-i18n', 'clippy', 'nextest', 'ext-smoke', 'blackbox', 'qa')
+            Expected = @('guards', 'audit', 'ext-i18n', 'multimap-unit', 'clippy', 'nextest', 'provider-fixtures', 'ext-smoke', 'blackbox', 'qa')
             RecWb    = $true
         }
     )
@@ -1189,25 +1296,43 @@ function Invoke-SelfTest {
         Assert-True ($sel.RecommendWebBench -eq $tc.RecWb) "selection [$($tc.Name)] RecommendWebBench: expected=$($tc.RecWb) got=$($sel.RecommendWebBench)"
     }
 
-    # Tier full, -WebBench, explicit -Checks ordering
+    # Tier full, -WebBench, -ProviderLive, explicit -Checks ordering
     $fullPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'full'
     $fullGot = (@($fullPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
-    $fullExp = 'guards,audit,ext-i18n,clippy,nextest,frames,ext-smoke,blackbox,qa'
-    Assert-True ($fullGot -eq $fullExp) "tier full without -WebBench: expected=[$fullExp] got=[$fullGot]"
+    $fullExp = 'guards,audit,ext-i18n,multimap-unit,clippy,nextest,frames,provider-fixtures,ext-smoke,blackbox,qa'
+    Assert-True ($fullGot -eq $fullExp) "tier full without -WebBench/-ProviderLive: expected=[$fullExp] got=[$fullGot]"
 
     $fullWbPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'full' -WebBench
     $fullWbGot = (@($fullWbPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
-    $fullWbExp = 'guards,audit,ext-i18n,clippy,nextest,frames,ext-smoke,blackbox,qa,web-bench'
+    $fullWbExp = "$fullExp,web-bench"
     Assert-True ($fullWbGot -eq $fullWbExp) "tier full with -WebBench: expected=[$fullWbExp] got=[$fullWbGot]"
+
+    $fullPlPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'full' -ProviderLive
+    $fullPlGot = (@($fullPlPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
+    $fullPlExp = "$fullExp,provider-live"
+    Assert-True ($fullPlGot -eq $fullPlExp) "tier full with -ProviderLive: expected=[$fullPlExp] got=[$fullPlGot]"
+
+    $fullBothPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'full' -WebBench -ProviderLive
+    $fullBothGot = (@($fullBothPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
+    $fullBothExp = "$fullExp,web-bench,provider-live"
+    Assert-True ($fullBothGot -eq $fullBothExp) "tier full with -WebBench and -ProviderLive: expected=[$fullBothExp] got=[$fullBothGot]"
 
     $autoWbPlan = Select-CheckPlan -ChangedPaths @('extension/popup.js') -Tier 'auto' -WebBench
     $autoWbGot = (@($autoWbPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
-    Assert-True ($autoWbGot -eq 'guards,audit,ext-i18n,ext-smoke,web-bench') "auto with -WebBench: got=[$autoWbGot]"
+    Assert-True ($autoWbGot -eq 'guards,audit,ext-i18n,multimap-unit,provider-fixtures,ext-smoke,web-bench') "auto with -WebBench: got=[$autoWbGot]"
     Assert-True (-not $autoWbPlan.RecommendWebBench) 'auto with -WebBench should not duplicate recommendation'
+
+    $autoPlPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'auto' -ProviderLive
+    $autoPlGot = (@($autoPlPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
+    Assert-True ($autoPlGot -eq 'guards,audit,provider-live') "auto with -ProviderLive: got=[$autoPlGot]"
 
     $explicitPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'auto' -ExplicitChecks @('qa,frames,guards', 'clippy,nextest')
     $explicitGot = (@($explicitPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
     Assert-True ($explicitGot -eq 'guards,clippy,nextest,frames,qa') "explicit -Checks preserves fixed order (frames after nextest): got=[$explicitGot]"
+
+    $explicitPlPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'auto' -ExplicitChecks @('provider-live,provider-fixtures,multimap-unit,guards')
+    $explicitPlGot = (@($explicitPlPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
+    Assert-True ($explicitPlGot -eq 'guards,multimap-unit,provider-fixtures,provider-live') "explicit -Checks preserves multimap/provider order: got=[$explicitPlGot]"
 
     # Extra args parser for repeatable -QaOnly
     $parsedExtra = Parse-ExtraArgs -RawArgs @('-QaOnly', 'sess_A', '-QaOnly', 'sess_B,sess_C', '-QaOnly:sess_D')
@@ -1355,7 +1480,7 @@ Push-Location -LiteralPath $RepoRoot
 try {
     $mergeBase = Get-MergeBase -RepoRoot $RepoRoot -BaseRef $Base
     $changedPaths = @(Get-ChangedFiles -RepoRoot $RepoRoot -MergeBase $mergeBase)
-    $selection = Select-CheckPlan -ChangedPaths $changedPaths -Tier $Tier -ExplicitChecks $explicitChecks -WebBench:$WebBench
+    $selection = Select-CheckPlan -ChangedPaths $changedPaths -Tier $Tier -ExplicitChecks $explicitChecks -WebBench:$WebBench -ProviderLive:$ProviderLive
 
     $recommendLine = if ($selection.RecommendWebBench) {
         "RECOMMEND: Run with -WebBench (close GenshinHelper first to free port 8765) -- changed: $(Format-MatchReason -MatchedPaths $selection.WebBenchMatches)"
