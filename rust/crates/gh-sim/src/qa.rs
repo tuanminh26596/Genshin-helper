@@ -1227,8 +1227,8 @@ pub fn format_unrec_col(fidelity: Option<&RecordingFidelityReport>) -> String {
     }
 }
 
-/// Informational provenance column marker (`ok`, `data!`, `code!`, `data!code!`, `code?`,
-/// `data!code?`, or `n/a` when the session has no provenance stamp).
+/// Informational provenance column marker (`ok`, `data!`, `code=`, `data!code=`, `code!`,
+/// `data!code!`, `code?`, `data!code?`, or `n/a` when the session has no provenance stamp).
 pub fn format_prov_col(prov: Option<&ReplayProvenance>) -> String {
     let Some(p) = prov else {
         return "n/a".to_owned();
@@ -1237,15 +1237,17 @@ pub fn format_prov_col(prov: Option<&ReplayProvenance>) -> String {
         return "n/a".to_owned();
     }
     let data_diff = p.datasets_match == Some(false);
-    let code_diff = p.same_commit == Some(false);
-    let code_unknown = p.same_commit.is_none();
-    match (data_diff, code_diff, code_unknown) {
-        (true, true, _) => "data!code!".to_owned(),
-        (true, false, true) => "data!code?".to_owned(),
-        (true, false, false) => "data!".to_owned(),
-        (false, true, _) => "code!".to_owned(),
-        (false, false, true) => "code?".to_owned(),
-        (false, false, false) => "ok".to_owned(),
+    let code_tag = match (p.same_commit, p.engine_code_unchanged) {
+        (None, _) => "code?",
+        (Some(true), _) => "",
+        (Some(false), Some(true)) => "code=",
+        (Some(false), Some(false)) | (Some(false), None) => "code!",
+    };
+    match (data_diff, code_tag) {
+        (false, "") => "ok".to_owned(),
+        (true, "") => "data!".to_owned(),
+        (false, tag) => tag.to_owned(),
+        (true, tag) => format!("data!{tag}"),
     }
 }
 
@@ -1262,6 +1264,7 @@ pub fn provenance_notes(prov: Option<&ReplayProvenance>, current_commit: &str) -
     let Some(ref rec) = p.recorded else {
         return vec!["provenance unknown".to_owned()];
     };
+    let effective_current = p.current_commit.as_deref().unwrap_or(current_commit);
     let mut notes = Vec::new();
     if p.datasets_match == Some(false) {
         notes.push(format!(
@@ -1269,18 +1272,25 @@ pub fn provenance_notes(prov: Option<&ReplayProvenance>, current_commit: &str) -
             rec.data_source, p.replay_data_source
         ));
     }
-    match p.same_commit {
-        Some(false) => {
+    match (p.same_commit, p.engine_code_unchanged) {
+        (Some(false), Some(true)) => {
+            notes.push(format!(
+                "commit differs (rec={}, cur={}, engine=)",
+                short_commit(&rec.git_commit),
+                short_commit(effective_current)
+            ));
+        }
+        (Some(false), _) => {
             notes.push(format!(
                 "commit differs (rec={}, cur={})",
                 short_commit(&rec.git_commit),
-                short_commit(current_commit)
+                short_commit(effective_current)
             ));
         }
-        None => {
+        (None, _) => {
             notes.push("commit unknown".to_owned());
         }
-        Some(true) => {}
+        (Some(true), _) => {}
     }
     notes
 }
@@ -1439,7 +1449,11 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
         let session_prov = report.provenance.clone();
         let session_fidelity = report.recording_fidelity.clone();
         let session_input_replay = Some(report.input_replay.clone());
-        let prov_notes = provenance_notes(Some(&session_prov), BUILD_GIT_COMMIT);
+        let prov_cur_commit = session_prov
+            .current_commit
+            .as_deref()
+            .unwrap_or(BUILD_GIT_COMMIT);
+        let prov_notes = provenance_notes(Some(&session_prov), prov_cur_commit);
         let blessed_path = sdir.join(BLESSED_POSES_FILENAME);
 
         let result = if opts.bless {
@@ -2903,7 +2917,9 @@ mod tests {
     fn qa_prov_column_and_notes_cover_all_states_without_affecting_pass_fail() {
         use gh_core::provenance::{DatasetFingerprint, SessionProvenance};
 
-        let mk_prov = |datasets_match: Option<bool>, same_commit: Option<bool>| ReplayProvenance {
+        let mk_prov = |datasets_match: Option<bool>,
+                       same_commit: Option<bool>,
+                       engine_code_unchanged: Option<bool>| ReplayProvenance {
             recorded: Some(SessionProvenance {
                 app_version: "5.7.0".to_owned(),
                 git_commit: "1111111122222222333333334444444455555555".to_owned(),
@@ -2914,6 +2930,8 @@ mod tests {
             replay_datasets: DatasetFingerprint::default(),
             datasets_match,
             same_commit,
+            engine_code_unchanged,
+            current_commit: None,
         };
 
         // None / unrecorded -> n/a
@@ -2925,6 +2943,8 @@ mod tests {
             replay_datasets: DatasetFingerprint::default(),
             datasets_match: None,
             same_commit: None,
+            engine_code_unchanged: None,
+            current_commit: None,
         };
         assert_eq!(format_prov_col(Some(&legacy_prov)), "n/a");
         assert_eq!(
@@ -2933,19 +2953,31 @@ mod tests {
         );
 
         // Exact match -> ok, no notes
-        let p_ok = mk_prov(Some(true), Some(true));
+        let p_ok = mk_prov(Some(true), Some(true), Some(true));
         assert_eq!(format_prov_col(Some(&p_ok)), "ok");
         assert!(provenance_notes(Some(&p_ok), "1111111122222222333333334444444455555555").is_empty());
 
         // Data differs only -> data!
-        let p_data = mk_prov(Some(false), Some(true));
+        let p_data = mk_prov(Some(false), Some(true), Some(true));
         assert_eq!(format_prov_col(Some(&p_data)), "data!");
         let n_data = provenance_notes(Some(&p_data), "1111111122222222333333334444444455555555");
         assert_eq!(n_data.len(), 1);
         assert!(n_data[0].contains("datasets differ"));
 
-        // Commit differs only -> code!
-        let p_code = mk_prov(Some(true), Some(false));
+        // Commit differs only, engine unchanged -> code=
+        let p_code_eq = mk_prov(Some(true), Some(false), Some(true));
+        assert_eq!(format_prov_col(Some(&p_code_eq)), "code=");
+        let n_code_eq = provenance_notes(Some(&p_code_eq), "abcdef1234567890");
+        assert_eq!(n_code_eq.len(), 1);
+        assert!(n_code_eq[0].contains("commit differs"));
+        assert!(n_code_eq[0].contains("engine="));
+
+        // Data differs + commit differs with engine unchanged -> data!code=
+        let p_data_code_eq = mk_prov(Some(false), Some(false), Some(true));
+        assert_eq!(format_prov_col(Some(&p_data_code_eq)), "data!code=");
+
+        // Commit differs + engine changed -> code!
+        let p_code = mk_prov(Some(true), Some(false), Some(false));
         assert_eq!(format_prov_col(Some(&p_code)), "code!");
         let n_code = provenance_notes(Some(&p_code), "abcdef1234567890");
         assert_eq!(n_code.len(), 1);
@@ -2954,7 +2986,7 @@ mod tests {
         assert!(n_code[0].contains("abcdef12"));
 
         // Both differ -> data!code!
-        let p_both = mk_prov(Some(false), Some(false));
+        let p_both = mk_prov(Some(false), Some(false), Some(false));
         assert_eq!(format_prov_col(Some(&p_both)), "data!code!");
         let n_both = provenance_notes(Some(&p_both), "abcdef1234567890");
         assert_eq!(n_both.len(), 2);
@@ -2962,13 +2994,13 @@ mod tests {
         assert!(n_both[1].contains("commit differs"));
 
         // Commit unknown -> code? / data!code?
-        let p_code_unk = mk_prov(Some(true), None);
+        let p_code_unk = mk_prov(Some(true), None, None);
         assert_eq!(format_prov_col(Some(&p_code_unk)), "code?");
         assert_eq!(
             provenance_notes(Some(&p_code_unk), "unknown"),
             vec!["commit unknown"]
         );
-        let p_data_code_unk = mk_prov(Some(false), None);
+        let p_data_code_unk = mk_prov(Some(false), None, None);
         assert_eq!(format_prov_col(Some(&p_data_code_unk)), "data!code?");
 
         // Informational-only end-to-end check: a blessed session with mismatched provenance STILL PASSES QA
@@ -3048,7 +3080,8 @@ mod tests {
         let res = &qa_rep.sessions[0];
         assert_eq!(res.status, "ĐẠT");
         let prov_col = format_prov_col(res.provenance.as_ref());
-        if !BUILD_GIT_COMMIT.eq_ignore_ascii_case("unknown") {
+        let (cur_commit, _) = crate::replay::resolve_current_git_commit_and_root(BUILD_GIT_COMMIT);
+        if !cur_commit.eq_ignore_ascii_case("unknown") {
             assert_eq!(prov_col, "data!code!");
         } else {
             assert_eq!(prov_col, "data!code?");

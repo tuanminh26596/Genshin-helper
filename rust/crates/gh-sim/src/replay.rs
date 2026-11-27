@@ -33,8 +33,8 @@ use gh_core::map_bridge::PerMapAffineRegistry;
 use gh_core::nav_controller::NavigationController;
 use gh_core::paths::{AppPaths, RuntimeMode};
 use gh_core::provenance::{
-    DATASET_FILENAMES, ReplayProvenance, SessionProvenance, compare_git_commits,
-    fingerprint_data_dir,
+    DATASET_FILENAMES, ENGINE_PROVENANCE_PATHS, ReplayProvenance, SessionProvenance,
+    compare_git_commits, fingerprint_data_dir,
 };
 use gh_core::traits::OcrProvider;
 use gh_cv::map_state::MapState;
@@ -1054,6 +1054,100 @@ pub fn resolve_replay_data_dir(
     }
 }
 
+fn find_git_repo_root(start: &Path) -> Option<PathBuf> {
+    for ancestor in start.ancestors() {
+        let dot_git = ancestor.join(".git");
+        if dot_git.is_dir() || dot_git.is_file() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+fn is_git_hex_sha(s: &str) -> bool {
+    let t = s.trim();
+    t.len() >= 7 && t.len() <= 40 && t.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn query_git_head_in_repo(repo_root: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8(out.stdout).ok()?;
+    let trimmed = sha.trim();
+    if is_git_hex_sha(trimmed) {
+        Some(trimmed.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+/// Resolves the active git HEAD commit SHA and repository root at runtime, falling back to
+/// `build_commit` (compiled `BUILD_GIT_COMMIT`) when not inside a git checkout.
+pub fn resolve_current_git_commit_and_root(build_commit: &str) -> (String, Option<PathBuf>) {
+    let mut candidates = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd);
+    }
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+
+    let repo_root = candidates
+        .into_iter()
+        .find_map(|start| find_git_repo_root(&start));
+    if let Some(ref root) = repo_root
+        && let Some(runtime_sha) = query_git_head_in_repo(root)
+    {
+        return (runtime_sha, Some(root.clone()));
+    }
+    (build_commit.trim().to_owned(), repo_root)
+}
+
+/// Returns `Some(true)` if `ENGINE_PROVENANCE_PATHS` have zero git diff between `recorded_commit`
+/// and `current_commit`, `Some(false)` if any engine file differs, or `None` when either commit is
+/// missing/unresolvable in `repo_root`.
+pub fn check_engine_paths_unchanged(
+    repo_root: &Path,
+    recorded_commit: &str,
+    current_commit: &str,
+) -> Option<bool> {
+    let rec = recorded_commit.trim();
+    let cur = current_commit.trim();
+    if !is_git_hex_sha(rec) || !is_git_hex_sha(cur) {
+        return None;
+    }
+    if rec.eq_ignore_ascii_case(cur) {
+        return Some(true);
+    }
+    for rev in [rec, cur] {
+        let obj = format!("{rev}^{{commit}}");
+        let ok = Command::new("git")
+            .args(["cat-file", "-e", &obj])
+            .current_dir(repo_root)
+            .output()
+            .ok()
+            .is_some_and(|o| o.status.success());
+        if !ok {
+            return None;
+        }
+    }
+
+    let mut cmd = Command::new("git");
+    cmd.args(["diff", "--name-only", rec, cur, "--"])
+        .args(ENGINE_PROVENANCE_PATHS)
+        .current_dir(repo_root);
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let changed = String::from_utf8_lossy(&out.stdout);
+    Some(changed.trim().is_empty())
+}
+
 /// Builds the replay report provenance block comparing recorded session metadata against the
 /// dataset directory and build commit actually used during replay.
 pub fn build_replay_provenance(
@@ -1062,6 +1156,24 @@ pub fn build_replay_provenance(
     effective_data_dir: &Path,
     current_commit: &str,
 ) -> ReplayProvenance {
+    build_replay_provenance_with_repo(
+        recorded,
+        replay_data_source,
+        effective_data_dir,
+        current_commit,
+        None,
+    )
+}
+
+/// Like [`build_replay_provenance`], additionally checking `ENGINE_PROVENANCE_PATHS` via git in
+/// `repo_root` when `same_commit == Some(false)`.
+pub fn build_replay_provenance_with_repo(
+    recorded: Option<SessionProvenance>,
+    replay_data_source: &str,
+    effective_data_dir: &Path,
+    current_commit: &str,
+    repo_root: Option<&Path>,
+) -> ReplayProvenance {
     let replay_datasets = fingerprint_data_dir(effective_data_dir);
     let datasets_match = recorded
         .as_ref()
@@ -1069,12 +1181,30 @@ pub fn build_replay_provenance(
     let same_commit = recorded
         .as_ref()
         .and_then(|rec| compare_git_commits(&rec.git_commit, current_commit));
+    let engine_code_unchanged = match same_commit {
+        Some(true) => Some(true),
+        Some(false) => recorded.as_ref().and_then(|rec| {
+            repo_root.and_then(|root| {
+                check_engine_paths_unchanged(root, &rec.git_commit, current_commit)
+            })
+        }),
+        None => None,
+    };
+    let effective_cur = if current_commit.trim().is_empty()
+        || current_commit.trim().eq_ignore_ascii_case("unknown")
+    {
+        None
+    } else {
+        Some(current_commit.trim().to_owned())
+    };
     ReplayProvenance {
         recorded,
         replay_data_source: replay_data_source.to_owned(),
         replay_datasets,
         datasets_match,
         same_commit,
+        engine_code_unchanged,
+        current_commit: effective_cur,
     }
 }
 
@@ -1159,11 +1289,13 @@ pub fn run_replay_with_hook(
     let (effective_data_dir, replay_data_source) =
         resolve_replay_data_dir(&opts.source_dir, &opts.data_dir);
     let recorded_provenance = read_session_provenance(&opts.source_dir);
-    let provenance = build_replay_provenance(
+    let (current_commit, repo_root) = resolve_current_git_commit_and_root(BUILD_GIT_COMMIT);
+    let provenance = build_replay_provenance_with_repo(
         recorded_provenance,
         replay_data_source,
         &effective_data_dir,
-        BUILD_GIT_COMMIT,
+        &current_commit,
+        repo_root.as_deref(),
     );
 
     let enable_mmap_view = opts.verify_mmap_view || opts.render_out.is_some();
@@ -2420,5 +2552,136 @@ mod tests {
             "dropping nav_next must produce nav mismatches"
         );
         assert_eq!(rep_no_next.input_replay.first_nav_mismatch_idx, Some(1));
+    }
+
+    #[test]
+    fn provenance_engine_path_comparison_detects_non_engine_vs_engine_commits() {
+        let sandbox = TempSandboxDir::new("gh_sim_prov_git").unwrap();
+        let repo = sandbox.0.join("repo");
+        let data_dir = sandbox.0.join("data");
+        std::fs::create_dir_all(repo.join("rust/crates/gh-cv/src")).unwrap();
+        std::fs::create_dir_all(repo.join("rust/crates/gh-app/src")).unwrap();
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        write_json_atomic(
+            &data_dir.join(DATASET_FILENAMES[0]),
+            &json!({"version": "4.0.0", "maps": {}}),
+        )
+        .unwrap();
+        let fp = fingerprint_data_dir(&data_dir);
+
+        let git_ok = |args: &[&str]| -> String {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("run git");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+
+        git_ok(&["init"]);
+        git_ok(&["config", "user.email", "test@example.com"]);
+        git_ok(&["config", "user.name", "Test"]);
+
+        std::fs::write(repo.join("rust/crates/gh-cv/src/lib.rs"), "// cv v1\n").unwrap();
+        std::fs::write(
+            repo.join("rust/crates/gh-app/src/tracking_loop.rs"),
+            "// loop v1\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("docs/notes.md"), "v1\n").unwrap();
+        git_ok(&["add", "."]);
+        git_ok(&["commit", "-m", "base"]);
+        let c_base = git_ok(&["rev-parse", "HEAD"]);
+
+        // Non-engine commit: only docs/notes.md changed -> engine_code_unchanged = Some(true)
+        std::fs::write(repo.join("docs/notes.md"), "v2\n").unwrap();
+        git_ok(&["add", "docs/notes.md"]);
+        git_ok(&["commit", "-m", "docs only"]);
+        let c_docs = git_ok(&["rev-parse", "HEAD"]);
+
+        // Engine commit in gh-cv -> engine_code_unchanged = Some(false)
+        std::fs::write(repo.join("rust/crates/gh-cv/src/lib.rs"), "// cv v2\n").unwrap();
+        git_ok(&["add", "rust/crates/gh-cv/src/lib.rs"]);
+        git_ok(&["commit", "-m", "cv change"]);
+        let c_cv = git_ok(&["rev-parse", "HEAD"]);
+
+        // Engine commit in gh-app tracking_loop -> engine_code_unchanged = Some(false) vs c_cv
+        std::fs::write(
+            repo.join("rust/crates/gh-app/src/tracking_loop.rs"),
+            "// loop v2\n",
+        )
+        .unwrap();
+        git_ok(&["add", "rust/crates/gh-app/src/tracking_loop.rs"]);
+        git_ok(&["commit", "-m", "tracking_loop change"]);
+        let c_loop = git_ok(&["rev-parse", "HEAD"]);
+
+        let mk_rec = |sha: &str| SessionProvenance {
+            app_version: "5.7.0".to_owned(),
+            git_commit: sha.to_owned(),
+            data_source: "installed".to_owned(),
+            datasets: fp.clone(),
+        };
+
+        // 1. Same commit -> same_commit=Some(true), engine_code_unchanged=Some(true)
+        let p_same = build_replay_provenance_with_repo(
+            Some(mk_rec(&c_docs)),
+            "data_dir",
+            &data_dir,
+            &c_docs,
+            Some(&repo),
+        );
+        assert_eq!(p_same.same_commit, Some(true));
+        assert_eq!(p_same.engine_code_unchanged, Some(true));
+
+        // 2. Non-engine change only -> same_commit=Some(false), engine_code_unchanged=Some(true) -> code=
+        let p_non_engine = build_replay_provenance_with_repo(
+            Some(mk_rec(&c_base)),
+            "data_dir",
+            &data_dir,
+            &c_docs,
+            Some(&repo),
+        );
+        assert_eq!(p_non_engine.same_commit, Some(false));
+        assert_eq!(p_non_engine.engine_code_unchanged, Some(true));
+
+        // 3. gh-cv engine change -> same_commit=Some(false), engine_code_unchanged=Some(false) -> code!
+        let p_cv = build_replay_provenance_with_repo(
+            Some(mk_rec(&c_docs)),
+            "data_dir",
+            &data_dir,
+            &c_cv,
+            Some(&repo),
+        );
+        assert_eq!(p_cv.same_commit, Some(false));
+        assert_eq!(p_cv.engine_code_unchanged, Some(false));
+
+        // 4. gh-app tracking_loop change -> same_commit=Some(false), engine_code_unchanged=Some(false) -> code!
+        let p_loop = build_replay_provenance_with_repo(
+            Some(mk_rec(&c_cv)),
+            "data_dir",
+            &data_dir,
+            &c_loop,
+            Some(&repo),
+        );
+        assert_eq!(p_loop.same_commit, Some(false));
+        assert_eq!(p_loop.engine_code_unchanged, Some(false));
+
+        // 5. Missing commit SHA -> falls back to None (code!)
+        let p_missing = build_replay_provenance_with_repo(
+            Some(mk_rec(&"0".repeat(40))),
+            "data_dir",
+            &data_dir,
+            &c_loop,
+            Some(&repo),
+        );
+        assert_eq!(p_missing.same_commit, Some(false));
+        assert_eq!(p_missing.engine_code_unchanged, None);
     }
 }
