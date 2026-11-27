@@ -10,6 +10,7 @@ use crate::timeline::{
     InputReplayReport, InputTimeline, TimelineInput, TimelineInputKind, dispatch_timeline_input,
     load_web_inputs_jsonl, record_nav_comparison_with_carryover,
 };
+use crate::truth_oracle::{ReplayTruthMeta, TruthSummary, evaluate_truth_oracle};
 use crate::verified_gt::{SessionCheckpointGt, VerifiedGtFile};
 use gh_app::BUILD_GIT_COMMIT;
 use gh_app::callbacks::AppServerCallbacks;
@@ -242,6 +243,8 @@ pub struct ReplayReport {
     pub recording_fidelity: Option<RecordingFidelityReport>,
     #[serde(default)]
     pub input_replay: InputReplayReport,
+    #[serde(default)]
+    pub truth: TruthSummary,
 }
 
 #[derive(Debug, Clone)]
@@ -1249,6 +1252,7 @@ pub struct ReplayFullOutput {
     pub map_m_syncs: Vec<MapMSyncRecord>,
     pub nav_snapshots: BTreeMap<usize, NavFrameSnapshot>,
     pub ui_snapshots: BTreeMap<usize, UiFrameSnapshot>,
+    pub truth_meta: ReplayTruthMeta,
 }
 
 struct ReplayStateCleanupGuard(Arc<AppState>);
@@ -1530,6 +1534,7 @@ pub fn run_replay_with_hook(
     let mut tick_ms = Vec::with_capacity(records.len());
     let mut observed = Vec::with_capacity(records.len());
     let mut map_m_syncs: Vec<MapMSyncRecord> = Vec::new();
+    let mut truth_meta = ReplayTruthMeta::default();
     let mut last_rendered_idx: Option<usize> = None;
     let wall_t0 = Instant::now();
 
@@ -1746,6 +1751,10 @@ pub fn run_replay_with_hook(
             session_rec_active: false,
             enable_ui_side_effects: false,
         };
+        let locate_inliers = locate_res
+            .as_ref()
+            .and_then(|(_, found)| found.as_ref())
+            .and_then(|r| r.inliers_count);
         let mut noop_hide = || {};
         let summary = apply_tick_output(
             &state,
@@ -1765,6 +1774,9 @@ pub fn run_replay_with_hook(
                 obs.world_x = Some(wx);
                 obs.world_y = Some(wy);
                 obs.is_underground = ug;
+            }
+            if let Some(inliers) = locate_inliers {
+                truth_meta.map_m_inliers.insert(rec.idx, inliers);
             }
         }
         if let Some(payload) = summary.map_m_sync_payload {
@@ -1844,6 +1856,7 @@ pub fn run_replay_with_hook(
     let regression = compute_regression(&records[..frames_processed], &observed, drift_thresh);
     let recording_fidelity = summarize_recording_fidelity(&records[..frames_processed]);
     let accuracy = evaluate_session_accuracy(&opts.gt_file, &session_name, &observed)?;
+    let truth = evaluate_truth_oracle(&observed, &accuracy, &truth_meta);
     let tc_stats = tile_cache.stats();
 
     let report = ReplayReport {
@@ -1880,6 +1893,7 @@ pub fn run_replay_with_hook(
         provenance,
         recording_fidelity,
         input_replay,
+        truth,
     };
 
     drop(_state_cleanup);
@@ -1897,6 +1911,7 @@ pub fn run_replay_with_hook(
         map_m_syncs,
         nav_snapshots,
         ui_snapshots,
+        truth_meta,
     })
 }
 

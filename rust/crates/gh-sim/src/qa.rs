@@ -7,13 +7,14 @@
 
 use crate::replay::{
     DEFAULT_DRIFT_THRESHOLD_W, ObservedFrame, RecordingFidelityReport, ReplayOptions, ReplayReport,
-    angle_diff_deg, percentile, round3, run_replay_with_poses,
+    angle_diff_deg, percentile, round3, run_replay_with_hook,
 };
 use crate::scenario::{
     DEFAULT_SCENARIOS_DIR, ScenarioResult, ScenarioSummary, format_scenario_line,
     load_scenarios_from_dir, run_scenario,
 };
 use crate::timeline::InputReplayReport;
+use crate::truth_oracle::{TruthSummary, evaluate_truth_oracle, format_truth_col};
 use gh_app::BUILD_GIT_COMMIT;
 use gh_core::atomic_io::{write_bytes_atomic, write_json_atomic};
 use gh_core::provenance::ReplayProvenance;
@@ -370,6 +371,8 @@ pub struct QaSessionResult {
     pub recording_fidelity: Option<RecordingFidelityReport>,
     #[serde(default)]
     pub input_replay: Option<InputReplayReport>,
+    #[serde(default)]
+    pub truth: Option<TruthSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1167,7 +1170,7 @@ fn fmt_opt_w(v: Option<f64>) -> String {
 
 pub fn format_qa_header() -> String {
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:<20} {:<24} {:>6}  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:<20} {:<24} {:<26} {:>6}  {}",
         "Session",
         "Status",
         "Frames",
@@ -1181,6 +1184,7 @@ pub fn format_qa_header() -> String {
         "Prov",
         "Unrec",
         "Nav",
+        "Truth",
         "Time",
         "Reason"
     )
@@ -1365,8 +1369,9 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
     let prov_col = format_prov_col(r.provenance.as_ref());
     let unrec_col = format_unrec_col(r.recording_fidelity.as_ref());
     let nav_col = format_nav_col(r.input_replay.as_ref());
+    let truth_col = format_truth_col(r.truth.as_ref());
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:<20} {:<24} {:>5.1}s  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:<20} {:<24} {:<26} {:>5.1}s  {}",
         r.session_name,
         r.status,
         r.frames,
@@ -1380,6 +1385,7 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
         prov_col,
         unrec_col,
         nav_col,
+        truth_col,
         r.wall_elapsed_s,
         r.reason
     )
@@ -1451,7 +1457,14 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
             out_report: None,
         };
 
-        let (report, poses) = run_replay_with_poses(&replay_opts)?;
+        let replay_out = run_replay_with_hook(&replay_opts, None)?;
+        let report = replay_out.report;
+        let poses = replay_out.observed;
+        let session_truth = Some(evaluate_truth_oracle(
+            &poses,
+            &report.accuracy,
+            &replay_out.truth_meta,
+        ));
         let meta_ref = meta_ref_from_report(&report);
         let replay_heading_stability = compute_observed_heading_stability(&poses);
         let meta_path = sdir.join("meta.jsonl");
@@ -1550,6 +1563,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                 provenance: Some(session_prov),
                 recording_fidelity: session_fidelity,
                 input_replay: session_input_replay,
+                truth: session_truth,
             }
         } else {
             match baseline.sessions.get(&session_name) {
@@ -1584,6 +1598,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                     provenance: Some(session_prov),
                     recording_fidelity: session_fidelity,
                     input_replay: session_input_replay,
+                    truth: session_truth,
                 },
                 Some(base_sess) => {
                     let mut reasons = Vec::new();
@@ -1686,6 +1701,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                         provenance: Some(session_prov),
                         recording_fidelity: session_fidelity,
                         input_replay: session_input_replay,
+                        truth: session_truth,
                     }
                 }
             }
@@ -2715,6 +2731,7 @@ mod tests {
             provenance: None,
             recording_fidelity: None,
             input_replay: None,
+            truth: None,
         };
         let formatted = format_qa_row(&row_with_live);
         assert!(
@@ -3174,6 +3191,7 @@ mod tests {
             provenance: None,
             recording_fidelity: fidelity,
             input_replay: None,
+            truth: None,
         };
 
         let row_legacy = format_qa_row(&mk_row(None));
@@ -3248,6 +3266,57 @@ mod tests {
             format_nav_col(Some(&carried)),
             "hk 0/0 web 11 nav 16/389 (+72pre)"
         );
+    }
+
+    #[test]
+    fn qa_truth_column_formats_ok_suspect_and_na_without_affecting_pass_fail() {
+        let hdr = format_qa_header();
+        assert!(hdr.contains("Truth"), "header missing Truth: {hdr}");
+
+        assert_eq!(format_truth_col(None), "n/a");
+        assert_eq!(format_truth_col(Some(&TruthSummary::default())), "ok");
+        let susp = TruthSummary {
+            suspect_frames: 47,
+            worst_frame: Some(233),
+            worst_distance_w: Some(4664.6),
+        };
+        assert_eq!(format_truth_col(Some(&susp)), "susp 47f max 4665w@f233");
+
+        let row = QaSessionResult {
+            session_name: "sess_truth_test".to_owned(),
+            passed: true,
+            status: "ĐẠT".to_owned(),
+            reason: "ok".to_owned(),
+            reasons: vec![],
+            notes: vec![],
+            frames: 389,
+            codec: "libx264rgb".to_owned(),
+            color_safe: true,
+            wall_elapsed_s: 3.0,
+            effective_fps: 129.7,
+            hd_downloads: 0,
+            map_m_synced_count: 5,
+            baseline_map_m_synced_count: Some(5),
+            mmap_view_frames: 50,
+            mmap_view_acquired: 50,
+            baseline_mmap_view_acquired: Some(50),
+            mmap_view_drawer_open: 0,
+            blessed_sha256_ok: true,
+            vs_blessed: None,
+            vs_meta_ref: MetaReferenceSummary::default(),
+            heading_stability: SessionHeadingStability::default(),
+            live_mmap_latency: LiveMMapLatency::default(),
+            provenance: None,
+            recording_fidelity: None,
+            input_replay: None,
+            truth: Some(susp),
+        };
+        let rendered = format_qa_row(&row);
+        assert!(
+            rendered.contains("susp 47f max 4665w@f233"),
+            "row missing Truth column: {rendered}"
+        );
+        assert!(row.passed, "Truth column must remain strictly informational");
     }
 
     fn setup_synthetic_qa_session(
