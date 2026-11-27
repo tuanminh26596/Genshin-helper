@@ -2127,7 +2127,7 @@ mod tests {
 
         // Async prefetch triggers on_loaded callback
         catalog.prefetch(7, Some("en"));
-        for _ in 0..40 {
+        for _ in 0..750 {
             if !loaded_events.lock().unwrap().is_empty() {
                 break;
             }

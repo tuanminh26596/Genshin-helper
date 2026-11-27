@@ -187,10 +187,11 @@ pub fn build_tracking_stack(opts: TrackingStackOptions) -> CoreResult<TrackingSt
         })?,
     );
 
-    let global_relocator = Arc::new(TeyvatGlobalRelocator::from_terrain_data(
+    let global_relocator = Arc::new(TeyvatGlobalRelocator::from_terrain_data_with_fallback(
         locator.terrain_data(),
         opts.global_index_path,
         !opts.sync_relocator_warmup,
+        use_default_npz,
     ));
     let relocator_ready = if opts.sync_relocator_warmup {
         global_relocator.ensure_ready()

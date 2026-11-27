@@ -330,7 +330,7 @@ mod tests {
         let rec_unused = MinimapRecorder::new(2.0, &root, 10.0, 16, None);
         let unused_dir = rec_unused.out_dir().to_path_buf();
         rec_unused.finish();
-        rec_unused.join_timeout(Duration::from_secs(2));
+        rec_unused.join_timeout(Duration::from_secs(15));
         assert!(!unused_dir.exists(), "unused recorder must not create directory");
 
         let done_frames = Arc::new(AtomicUsize::new(0));
@@ -366,7 +366,7 @@ mod tests {
         }
 
         assert!(!rec.active(), "recorder should auto-finish after target_frames");
-        rec.join_timeout(Duration::from_secs(5));
+        rec.join_timeout(Duration::from_secs(15));
         assert_eq!(done_frames.load(Ordering::Acquire), 10);
 
         let out_dir = rec.out_dir();

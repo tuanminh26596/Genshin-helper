@@ -3176,7 +3176,10 @@ mod tests {
             capture_visible: false,
             edit_hint: "Edit".to_owned(),
         });
-        std::thread::sleep(Duration::from_millis(80));
+        assert!(
+            ctrl.host.wait_until_state(Duration::from_secs(15), || ctrl.is_visible()),
+            "timed out waiting for offscreen radar to present"
+        );
         ctrl.close();
         assert!(!ctrl.is_running());
         assert_eq!(ctrl.raw_hwnd(), None);

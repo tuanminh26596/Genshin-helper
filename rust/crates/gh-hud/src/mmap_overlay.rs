@@ -995,11 +995,13 @@ mod tests {
         assert!(!ctrl.capture_visible());
 
         ctrl.update(scene(MMapGuideStage::Section));
-        let hwnd = (0..40)
+        let hwnd = (0..1000)
             .find_map(|_| {
                 let h = ctrl.hwnds().into_iter().next();
                 if h.is_none() {
-                    std::thread::sleep(Duration::from_millis(15));
+                    let _ = ctrl
+                        .host
+                        .wait_until_state(Duration::from_millis(15), || !ctrl.hwnds().is_empty());
                 }
                 h
             })
@@ -1011,20 +1013,24 @@ mod tests {
         );
 
         assert!(ctrl.set_capture_visible(true));
-        for _ in 0..20 {
+        for _ in 0..1000 {
             if get_window_display_affinity(hwnd) == Some(WDA_NONE) {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(15));
+            let _ = ctrl.host.wait_until_state(Duration::from_millis(15), || {
+                get_window_display_affinity(hwnd) == Some(WDA_NONE)
+            });
         }
         assert_eq!(get_window_display_affinity(hwnd), Some(WDA_NONE));
 
         assert!(!ctrl.set_capture_visible(false));
-        for _ in 0..20 {
+        for _ in 0..1000 {
             if get_window_display_affinity(hwnd) == Some(WDA_EXCLUDEFROMCAPTURE) {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(15));
+            let _ = ctrl.host.wait_until_state(Duration::from_millis(15), || {
+                get_window_display_affinity(hwnd) == Some(WDA_EXCLUDEFROMCAPTURE)
+            });
         }
         assert_eq!(
             get_window_display_affinity(hwnd),

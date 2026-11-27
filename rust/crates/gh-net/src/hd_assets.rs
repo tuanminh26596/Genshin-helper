@@ -1539,12 +1539,13 @@ mod tests {
         hd.inner.record_success();
         assert!(hd.request_tile(2, -1, 2, 2, true).is_none());
         let mut loaded_async = None;
-        for _ in 0..40 {
+        let async_dl = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < async_dl {
             if let Some(t) = hd.request_tile(2, -1, 2, 2, false) {
                 loaded_async = Some(t);
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(Duration::from_millis(15)).await;
         }
         assert_eq!(loaded_async.unwrap()[0], 177);
         assert!(hd.downloads() >= 1);

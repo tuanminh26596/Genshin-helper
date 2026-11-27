@@ -3280,22 +3280,22 @@ mod tests {
         )
         .unwrap();
 
-        // 2. Known-bug scenario (known-fail): nav_unlock after nav_next leaves user_locked_id set
+        // 2. Known-bug scenario (known-fail): expects a pin ID that is never delivered in this
+        // synthetic session so known-fail reporting stays independent of real product bugs.
         std::fs::write(
             scenarios_dir.join("02_known_fail.json"),
             serde_json::to_string_pretty(&json!({
                 "schema_version": 1,
-                "name": "unlock_after_next_bug",
+                "name": "synthetic_known_fail",
                 "session": "sess_synth_sc",
                 "description": "nav_unlock should clear user_locked_id from nav_next",
-                "known_bug": "nav_unlock does not clear nav_next user lock",
+                "known_bug": "synthetic known-fail fixture (pin never delivered)",
                 "inputs": [
                     pins_input,
-                    {"frame": 2, "hotkey": "nav_next"},
-                    {"frame": 3, "hotkey": "nav_unlock"}
+                    {"frame": 2, "hotkey": "nav_next"}
                 ],
                 "expect": [
-                    {"frame": 3, "within_frames": 1, "nav": {"user_locked_id": null}}
+                    {"frame": 3, "within_frames": 1, "nav": {"target_id": "never_delivered_pin_999"}}
                 ]
             }))
             .unwrap(),
@@ -3348,6 +3348,9 @@ mod tests {
         assert_eq!(rep.scenarios[0].frames_replayed, 2); // truncated to last needed frame (2 of 5)
         assert_eq!(rep.scenarios[1].outcome, ScenarioOutcome::KnownFail);
         assert_eq!(rep.scenarios[1].frames_replayed, 4); // frame 3 + within_frames 1 = 4 of 5
+        assert_eq!(rep.scenarios[1].checks_passed, 0);
+        assert_eq!(rep.scenarios[1].checks_total, 1);
+        assert!(rep.scenarios[1].known_bug.is_some());
 
         // Verify scenario results were serialized into qa_report.json
         let saved_raw = std::fs::read_to_string(out_dir.join(QA_REPORT_FILENAME)).unwrap();

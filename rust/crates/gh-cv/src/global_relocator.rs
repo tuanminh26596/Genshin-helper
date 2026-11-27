@@ -381,6 +381,7 @@ struct LoadedGlobalIndex {
 struct RelocatorInner {
     terrain_map2: Option<Arc<TerrainRaster>>,
     cache_path: PathBuf,
+    allow_default_npz_fallback: bool,
     build_lock: Mutex<()>,
     warmup_running: AtomicBool,
     ready: AtomicBool,
@@ -408,11 +409,21 @@ impl TeyvatGlobalRelocator {
         cache_path: Option<PathBuf>,
         lazy: bool,
     ) -> Self {
+        Self::new_with_fallback(terrain_map2, cache_path, lazy, true)
+    }
+
+    pub fn new_with_fallback(
+        terrain_map2: Option<Arc<TerrainRaster>>,
+        cache_path: Option<PathBuf>,
+        lazy: bool,
+        allow_default_npz_fallback: bool,
+    ) -> Self {
         let resolved_path = cache_path.unwrap_or_else(default_global_index_path);
         let reloc = Self {
             inner: Arc::new(RelocatorInner {
                 terrain_map2,
                 cache_path: resolved_path,
+                allow_default_npz_fallback,
                 build_lock: Mutex::new(()),
                 warmup_running: AtomicBool::new(false),
                 ready: AtomicBool::new(false),
@@ -433,6 +444,20 @@ impl TeyvatGlobalRelocator {
         lazy: bool,
     ) -> Self {
         Self::new(terrain_data.get(&2).cloned(), cache_path, lazy)
+    }
+
+    pub fn from_terrain_data_with_fallback(
+        terrain_data: &BTreeMap<i32, Arc<TerrainRaster>>,
+        cache_path: Option<PathBuf>,
+        lazy: bool,
+        allow_default_npz_fallback: bool,
+    ) -> Self {
+        Self::new_with_fallback(
+            terrain_data.get(&2).cloned(),
+            cache_path,
+            lazy,
+            allow_default_npz_fallback,
+        )
     }
 
     #[inline]
@@ -807,7 +832,7 @@ fn ensure_ready_inner(inner: &RelocatorInner) -> bool {
             .terrain_map2
             .as_ref()
             .map(Arc::clone)
-            .or_else(load_map2_from_npz)
+            .or_else(|| inner.allow_default_npz_fallback.then(load_map2_from_npz).flatten())
         else {
             return false;
         };

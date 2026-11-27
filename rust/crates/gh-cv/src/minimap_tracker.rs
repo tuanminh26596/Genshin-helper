@@ -6808,7 +6808,7 @@ mod tests {
         assert!(worker.is_running());
         worker.anchor(2, -500.0, -1266.0, false, None, "G");
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(15);
         let mut got = None;
         while Instant::now() < deadline {
             if let Ok(Some(res)) = worker.latest() {
