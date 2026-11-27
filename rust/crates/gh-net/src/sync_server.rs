@@ -7045,7 +7045,7 @@ mod tests {
 
         let seq_as_mismatch = broadcast_inner(
             inner,
-            json!({"type": "NAV_MARK_PIN", "action": "mark", "pin_id": "appsample:5001"}),
+            json!({"type": "NAV_MARK_PIN", "action": "mark", "pin_id": "appsample:7301"}),
             false,
             false,
         );
