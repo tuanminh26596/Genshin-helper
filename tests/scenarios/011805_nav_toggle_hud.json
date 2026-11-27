@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "name": "nav_toggle_hud",
+  "session": "sess_20261127_011805",
+  "description": "Verify nav_hud_enabled starts true, press nav_toggle to disable the HUD, then press nav_toggle again to re-enable it.",
+  "inputs": [
+    {
+      "frame": 6,
+      "hotkey": "nav_toggle"
+    },
+    {
+      "frame": 10,
+      "hotkey": "nav_toggle"
+    }
+  ],
+  "expect": [
+    {
+      "frame": 4,
+      "ui": {
+        "nav_hud_enabled": true
+      }
+    },
+    {
+      "frame": 6,
+      "ui": {
+        "nav_hud_enabled": false
+      }
+    },
+    {
+      "frame": 10,
+      "ui": {
+        "nav_hud_enabled": true
+      }
+    }
+  ]
+}

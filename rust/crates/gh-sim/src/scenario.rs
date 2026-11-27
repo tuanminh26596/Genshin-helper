@@ -9,15 +9,25 @@ use crate::replay::{ReplayOptions, ReplayScenarioHook, round3, run_replay_with_h
 use crate::timeline::TimelineInputKind;
 use gh_app::REPLAY_DISPATCHABLE_HOTKEYS;
 use gh_app::session_recorder::{NavFrameSnapshot, RECORDED_WEB_CALLBACKS};
+use gh_app::state::UiFrameSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub const SCENARIO_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_SCENARIOS_DIR: &str = "tests/scenarios";
 pub const VALID_NAV_FIELDS: &[&str] = &["target_id", "locked_target_id", "user_locked_id", "state"];
+pub const VALID_UI_FIELDS: &[&str] = &[
+    "guide_open",
+    "guide_zoomed",
+    "nav_edit_mode",
+    "nav_hud_enabled",
+    "radar_enabled",
+    "radar_active",
+    "radar_edit_mode",
+];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,7 +64,10 @@ struct RawScenarioWebInput {
 #[serde(deny_unknown_fields)]
 struct RawScenarioExpectation {
     frame: usize,
-    nav: BTreeMap<String, Value>,
+    #[serde(default)]
+    nav: Option<BTreeMap<String, Value>>,
+    #[serde(default)]
+    ui: Option<BTreeMap<String, Value>>,
     #[serde(default)]
     within_frames: usize,
 }
@@ -146,6 +159,118 @@ fn fmt_opt_str(v: Option<&str>) -> String {
     }
 }
 
+/// Expected subset of [`UiFrameSnapshot`] boolean fields. Unlisted fields (`None`) are not checked.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiExpectation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guide_open: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guide_zoomed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nav_edit_mode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nav_hud_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radar_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radar_active: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radar_edit_mode: Option<bool>,
+}
+
+impl UiExpectation {
+    pub fn matches(&self, snap: &UiFrameSnapshot) -> bool {
+        if let Some(exp) = self.guide_open
+            && snap.guide_open != exp
+        {
+            return false;
+        }
+        if let Some(exp) = self.guide_zoomed
+            && snap.guide_zoomed != exp
+        {
+            return false;
+        }
+        if let Some(exp) = self.nav_edit_mode
+            && snap.nav_edit_mode != exp
+        {
+            return false;
+        }
+        if let Some(exp) = self.nav_hud_enabled
+            && snap.nav_hud_enabled != exp
+        {
+            return false;
+        }
+        if let Some(exp) = self.radar_enabled
+            && snap.radar_enabled != exp
+        {
+            return false;
+        }
+        if let Some(exp) = self.radar_active
+            && snap.radar_active != exp
+        {
+            return false;
+        }
+        if let Some(exp) = self.radar_edit_mode
+            && snap.radar_edit_mode != exp
+        {
+            return false;
+        }
+        true
+    }
+
+    pub fn format_expected(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(v) = self.guide_open {
+            parts.push(format!("guide_open={v}"));
+        }
+        if let Some(v) = self.guide_zoomed {
+            parts.push(format!("guide_zoomed={v}"));
+        }
+        if let Some(v) = self.nav_edit_mode {
+            parts.push(format!("nav_edit_mode={v}"));
+        }
+        if let Some(v) = self.nav_hud_enabled {
+            parts.push(format!("nav_hud_enabled={v}"));
+        }
+        if let Some(v) = self.radar_enabled {
+            parts.push(format!("radar_enabled={v}"));
+        }
+        if let Some(v) = self.radar_active {
+            parts.push(format!("radar_active={v}"));
+        }
+        if let Some(v) = self.radar_edit_mode {
+            parts.push(format!("radar_edit_mode={v}"));
+        }
+        format!("{{{}}}", parts.join(", "))
+    }
+
+    pub fn format_actual_for_fields(&self, snap: &UiFrameSnapshot) -> String {
+        let mut parts = Vec::new();
+        if self.guide_open.is_some() {
+            parts.push(format!("guide_open={}", snap.guide_open));
+        }
+        if self.guide_zoomed.is_some() {
+            parts.push(format!("guide_zoomed={}", snap.guide_zoomed));
+        }
+        if self.nav_edit_mode.is_some() {
+            parts.push(format!("nav_edit_mode={}", snap.nav_edit_mode));
+        }
+        if self.nav_hud_enabled.is_some() {
+            parts.push(format!("nav_hud_enabled={}", snap.nav_hud_enabled));
+        }
+        if self.radar_enabled.is_some() {
+            parts.push(format!("radar_enabled={}", snap.radar_enabled));
+        }
+        if self.radar_active.is_some() {
+            parts.push(format!("radar_active={}", snap.radar_active));
+        }
+        if self.radar_edit_mode.is_some() {
+            parts.push(format!("radar_edit_mode={}", snap.radar_edit_mode));
+        }
+        format!("{{{}}}", parts.join(", "))
+    }
+}
+
 /// One validated scripted input bound to a 1-based frame index (`meta.jsonl` `i`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ScenarioInput {
@@ -153,12 +278,51 @@ pub struct ScenarioInput {
     pub kind: TimelineInputKind,
 }
 
-/// One validated navigation expectation at `[frame, frame + within_frames]`.
+/// One validated navigation and/or UI expectation at `[frame, frame + within_frames]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ScenarioExpectation {
     pub frame: usize,
     pub within_frames: usize,
-    pub nav: NavExpectation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nav: Option<NavExpectation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<UiExpectation>,
+}
+
+impl ScenarioExpectation {
+    fn format_expected(&self) -> String {
+        match (&self.nav, &self.ui) {
+            (Some(n), None) => n.format_expected(),
+            (None, Some(u)) => u.format_expected(),
+            (Some(n), Some(u)) => format!("nav={}, ui={}", n.format_expected(), u.format_expected()),
+            (None, None) => "{}".to_owned(),
+        }
+    }
+
+    fn format_actual(
+        &self,
+        nav_snap: Option<&NavFrameSnapshot>,
+        ui_snap: Option<&UiFrameSnapshot>,
+    ) -> String {
+        match (&self.nav, &self.ui) {
+            (Some(n), None) => nav_snap
+                .map(|s| n.format_actual_for_fields(s))
+                .unwrap_or_else(|| "<missing nav snapshot>".to_owned()),
+            (None, Some(u)) => ui_snap
+                .map(|s| u.format_actual_for_fields(s))
+                .unwrap_or_else(|| "<missing ui snapshot>".to_owned()),
+            (Some(n), Some(u)) => {
+                let ns = nav_snap
+                    .map(|s| n.format_actual_for_fields(s))
+                    .unwrap_or_else(|| "<missing>".to_owned());
+                let us = ui_snap
+                    .map(|s| u.format_actual_for_fields(s))
+                    .unwrap_or_else(|| "<missing>".to_owned());
+                format!("nav={ns}, ui={us}")
+            }
+            (None, None) => "{}".to_owned(),
+        }
+    }
 }
 
 /// Validated scenario definition loaded from `tests/scenarios/*.json`.
@@ -216,11 +380,16 @@ pub struct ScenarioCheckResult {
     pub passed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_frame: Option<usize>,
-    pub expected: NavExpectation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<NavExpectation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_ui: Option<UiExpectation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual_frame: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual: Option<NavFrameSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_ui: Option<UiFrameSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_detail: Option<String>,
 }
@@ -313,6 +482,57 @@ fn parse_nav_expectation(
                 return Err(format!(
                     "{ctx}: unknown nav field '{other}' (valid fields: {})",
                     VALID_NAV_FIELDS.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn parse_bool_field(field: &str, val: &Value) -> Result<bool, String> {
+    match val {
+        Value::Bool(b) => Ok(*b),
+        _ => Err(format!("ui field '{field}' must be a boolean")),
+    }
+}
+
+fn parse_ui_expectation(
+    ui_map: &BTreeMap<String, Value>,
+    ctx: &str,
+) -> Result<UiExpectation, String> {
+    if ui_map.is_empty() {
+        return Err(format!("{ctx}: ui expectation must specify at least one field"));
+    }
+    let mut out = UiExpectation::default();
+    for (k, v) in ui_map {
+        match k.as_str() {
+            "guide_open" => {
+                out.guide_open = Some(parse_bool_field(k, v).map_err(|e| format!("{ctx}: {e}"))?);
+            }
+            "guide_zoomed" => {
+                out.guide_zoomed = Some(parse_bool_field(k, v).map_err(|e| format!("{ctx}: {e}"))?);
+            }
+            "nav_edit_mode" => {
+                out.nav_edit_mode = Some(parse_bool_field(k, v).map_err(|e| format!("{ctx}: {e}"))?);
+            }
+            "nav_hud_enabled" => {
+                out.nav_hud_enabled =
+                    Some(parse_bool_field(k, v).map_err(|e| format!("{ctx}: {e}"))?);
+            }
+            "radar_enabled" => {
+                out.radar_enabled = Some(parse_bool_field(k, v).map_err(|e| format!("{ctx}: {e}"))?);
+            }
+            "radar_active" => {
+                out.radar_active = Some(parse_bool_field(k, v).map_err(|e| format!("{ctx}: {e}"))?);
+            }
+            "radar_edit_mode" => {
+                out.radar_edit_mode =
+                    Some(parse_bool_field(k, v).map_err(|e| format!("{ctx}: {e}"))?);
+            }
+            other => {
+                return Err(format!(
+                    "{ctx}: unknown ui field '{other}' (valid fields: {})",
+                    VALID_UI_FIELDS.join(", ")
                 ));
             }
         }
@@ -418,11 +638,24 @@ pub fn parse_scenario_str(raw: &str, source_label: &str) -> Result<ScenarioFile,
             ));
         }
         let ctx = format!("scenario {source_label} expect[{idx}]");
-        let nav = parse_nav_expectation(&exp.nav, &ctx)?;
+        if exp.nav.is_none() && exp.ui.is_none() {
+            return Err(format!(
+                "{ctx}: expectation must specify at least one of 'nav' or 'ui'"
+            ));
+        }
+        let nav = match exp.nav {
+            Some(ref m) => Some(parse_nav_expectation(m, &ctx)?),
+            None => None,
+        };
+        let ui = match exp.ui {
+            Some(ref m) => Some(parse_ui_expectation(m, &ctx)?),
+            None => None,
+        };
         expect.push(ScenarioExpectation {
             frame: exp.frame,
             within_frames: exp.within_frames,
             nav,
+            ui,
         });
     }
 
@@ -490,10 +723,11 @@ pub fn load_scenarios_from_dir(
     Ok(out)
 }
 
-/// Evaluates all expectations of a scenario against per-frame post-tick nav snapshots.
+/// Evaluates all expectations of a scenario against per-frame post-tick nav and UI snapshots.
 pub fn evaluate_scenario(
     scenario: &ScenarioFile,
     nav_by_frame: &BTreeMap<usize, NavFrameSnapshot>,
+    ui_by_frame: &BTreeMap<usize, UiFrameSnapshot>,
     frames_replayed: usize,
     wall_elapsed_s: f64,
 ) -> ScenarioResult {
@@ -505,11 +739,25 @@ pub fn evaluate_scenario(
         let start = exp.frame;
         let end = exp.frame.saturating_add(exp.within_frames);
         let mut matched_frame = None;
-        let mut last_in_window: Option<(usize, &NavFrameSnapshot)> = None;
+        let mut last_in_window: Option<usize> = None;
 
-        for (&fidx, snap) in nav_by_frame.range(start..=end) {
-            last_in_window = Some((fidx, snap));
-            if exp.nav.matches(snap) {
+        let candidate_frames: BTreeSet<usize> = nav_by_frame
+            .range(start..=end)
+            .map(|(&k, _)| k)
+            .chain(ui_by_frame.range(start..=end).map(|(&k, _)| k))
+            .collect();
+
+        for fidx in candidate_frames {
+            last_in_window = Some(fidx);
+            let nav_ok = match exp.nav {
+                Some(ref ne) => nav_by_frame.get(&fidx).is_some_and(|s| ne.matches(s)),
+                None => true,
+            };
+            let ui_ok = match exp.ui {
+                Some(ref ue) => ui_by_frame.get(&fidx).is_some_and(|s| ue.matches(s)),
+                None => true,
+            };
+            if nav_ok && ui_ok {
                 matched_frame = Some(fidx);
                 break;
             }
@@ -524,8 +772,10 @@ pub fn evaluate_scenario(
                 passed: true,
                 matched_frame: Some(mf),
                 expected: exp.nav.clone(),
+                expected_ui: exp.ui.clone(),
                 actual_frame: Some(mf),
-                actual: nav_by_frame.get(&mf).cloned(),
+                actual: exp.nav.as_ref().and_then(|_| nav_by_frame.get(&mf).cloned()),
+                actual_ui: exp.ui.as_ref().and_then(|_| ui_by_frame.get(&mf).cloned()),
                 failure_detail: None,
             });
         } else {
@@ -534,22 +784,28 @@ pub fn evaluate_scenario(
             } else {
                 format!("frames {start}..={end}")
             };
-            let (actual_frame, actual, detail) = match last_in_window {
-                Some((af, snap)) => (
-                    Some(af),
-                    Some(snap.clone()),
-                    format!(
-                        "{window_label}: expected {}, got at f={af} {}",
-                        exp.nav.format_expected(),
-                        exp.nav.format_actual_for_fields(snap)
-                    ),
-                ),
+            let (actual_frame, actual, actual_ui, detail) = match last_in_window {
+                Some(af) => {
+                    let nav_snap = nav_by_frame.get(&af);
+                    let ui_snap = ui_by_frame.get(&af);
+                    (
+                        Some(af),
+                        exp.nav.as_ref().and_then(|_| nav_snap.cloned()),
+                        exp.ui.as_ref().and_then(|_| ui_snap.cloned()),
+                        format!(
+                            "{window_label}: expected {}, got at f={af} {}",
+                            exp.format_expected(),
+                            exp.format_actual(nav_snap, ui_snap)
+                        ),
+                    )
+                }
                 None => (
+                    None,
                     None,
                     None,
                     format!(
                         "{window_label}: expected {}, got <no frame replayed in window>",
-                        exp.nav.format_expected()
+                        exp.format_expected()
                     ),
                 ),
             };
@@ -563,8 +819,10 @@ pub fn evaluate_scenario(
                 passed: false,
                 matched_frame: None,
                 expected: exp.nav.clone(),
+                expected_ui: exp.ui.clone(),
                 actual_frame,
                 actual,
+                actual_ui,
                 failure_detail: Some(detail),
             });
         }
@@ -611,6 +869,7 @@ pub fn run_scenario(
             .collect(),
         stop_at_frame: Some(scenario.last_needed_frame()),
         capture_nav_snapshots: true,
+        capture_ui_snapshots: true,
     };
     let opts = ReplayOptions {
         source_dir: session_dir.to_path_buf(),
@@ -631,6 +890,7 @@ pub fn run_scenario(
     Ok(evaluate_scenario(
         scenario,
         &out.nav_snapshots,
+        &out.ui_snapshots,
         out.report.performance.frames_processed,
         elapsed,
     ))
@@ -870,6 +1130,7 @@ mod tests {
         navs.insert(11, snap(Some("demo:beta"), None, None, "tracking"));
         navs.insert(12, snap(Some("demo:alpha"), None, None, "arrived"));
         navs.insert(13, snap(Some("demo:alpha"), None, None, "arrived"));
+        let uis = BTreeMap::new();
 
         let sc = ScenarioFile {
             schema_version: 1,
@@ -883,22 +1144,23 @@ mod tests {
                 ScenarioExpectation {
                     frame: 10,
                     within_frames: 2,
-                    nav: NavExpectation {
+                    nav: Some(NavExpectation {
                         target_id: Some(Some("demo:alpha".to_owned())),
                         user_locked_id: Some(None),
                         ..Default::default()
-                    },
+                    }),
+                    ui: None,
                 },
             ],
         };
-        let res = evaluate_scenario(&sc, &navs, 13, 0.1);
+        let res = evaluate_scenario(&sc, &navs, &uis, 13, 0.1);
         assert_eq!(res.outcome, ScenarioOutcome::Pass);
         assert_eq!(res.checks[0].matched_frame, Some(12));
 
         // Narrow window [10, 11] misses frame 12 -> Fail with actual at f=11.
         let mut sc_tight = sc.clone();
         sc_tight.expect[0].within_frames = 1;
-        let res_fail = evaluate_scenario(&sc_tight, &navs, 13, 0.1);
+        let res_fail = evaluate_scenario(&sc_tight, &navs, &uis, 13, 0.1);
         assert_eq!(res_fail.outcome, ScenarioOutcome::Fail);
         assert_eq!(res_fail.checks[0].actual_frame, Some(11));
         let detail = res_fail.first_failure.as_deref().unwrap();
@@ -911,6 +1173,7 @@ mod tests {
     fn evaluate_all_four_outcome_kinds_and_summary_format() {
         let mut navs = BTreeMap::new();
         navs.insert(1, snap(Some("demo:alpha"), None, None, "tracking"));
+        let uis = BTreeMap::new();
 
         let mk = |name: &str, known_bug: Option<&str>, exp_target: &str| ScenarioFile {
             schema_version: 1,
@@ -922,17 +1185,20 @@ mod tests {
             expect: vec![ScenarioExpectation {
                 frame: 1,
                 within_frames: 0,
-                nav: NavExpectation {
+                nav: Some(NavExpectation {
                     target_id: Some(Some(exp_target.to_owned())),
                     ..Default::default()
-                },
+                }),
+                ui: None,
             }],
         };
 
-        let r_pass = evaluate_scenario(&mk("ok", None, "demo:alpha"), &navs, 1, 0.01);
-        let r_fail = evaluate_scenario(&mk("bad", None, "demo:beta"), &navs, 1, 0.01);
-        let r_kfail = evaluate_scenario(&mk("bug_open", Some("bug #1"), "demo:beta"), &navs, 1, 0.01);
-        let r_xpass = evaluate_scenario(&mk("bug_fixed", Some("bug #2"), "demo:alpha"), &navs, 1, 0.01);
+        let r_pass = evaluate_scenario(&mk("ok", None, "demo:alpha"), &navs, &uis, 1, 0.01);
+        let r_fail = evaluate_scenario(&mk("bad", None, "demo:beta"), &navs, &uis, 1, 0.01);
+        let r_kfail =
+            evaluate_scenario(&mk("bug_open", Some("bug #1"), "demo:beta"), &navs, &uis, 1, 0.01);
+        let r_xpass =
+            evaluate_scenario(&mk("bug_fixed", Some("bug #2"), "demo:alpha"), &navs, &uis, 1, 0.01);
 
         assert_eq!(r_pass.outcome, ScenarioOutcome::Pass);
         assert_eq!(r_fail.outcome, ScenarioOutcome::Fail);
@@ -951,6 +1217,187 @@ mod tests {
         assert_eq!(
             summary.format_line(),
             "Scenarios: pass 1 | fail 1 | known-fail 1 | xpass 1"
+        );
+    }
+
+    #[test]
+    fn parse_and_validate_ui_expectations() {
+        let valid_ui = serde_json::to_string(&json!({
+            "schema_version": 1,
+            "name": "ui_ok",
+            "session": "sess_demo",
+            "description": "ui and combined nav+ui expectations",
+            "inputs": [
+                { "frame": 4, "hotkey": "radar_toggle" }
+            ],
+            "expect": [
+                {
+                    "frame": 4,
+                    "ui": {
+                        "guide_open": false,
+                        "guide_zoomed": false,
+                        "nav_edit_mode": false,
+                        "nav_hud_enabled": true,
+                        "radar_enabled": true,
+                        "radar_active": true,
+                        "radar_edit_mode": false
+                    }
+                },
+                {
+                    "frame": 5,
+                    "nav": { "state": "idle" },
+                    "ui": { "radar_active": true }
+                }
+            ]
+        }))
+        .unwrap();
+        let sc = parse_scenario_str(&valid_ui, "ui_ok.json").unwrap();
+        assert_eq!(sc.expect.len(), 2);
+        assert!(sc.expect[0].nav.is_none());
+        let ui0 = sc.expect[0].ui.as_ref().unwrap();
+        assert_eq!(ui0.guide_open, Some(false));
+        assert_eq!(ui0.nav_hud_enabled, Some(true));
+        assert_eq!(ui0.radar_enabled, Some(true));
+        assert_eq!(ui0.radar_active, Some(true));
+        assert!(sc.expect[1].nav.is_some() && sc.expect[1].ui.is_some());
+
+        let missing_both = serde_json::to_string(&json!({
+            "schema_version": 1,
+            "name": "missing_both",
+            "session": "sess_demo",
+            "description": "neither nav nor ui",
+            "inputs": [],
+            "expect": [{ "frame": 2 }]
+        }))
+        .unwrap();
+        let err = parse_scenario_str(&missing_both, "missing_both.json").unwrap_err();
+        assert!(err.contains("at least one of 'nav' or 'ui'"), "got: {err}");
+
+        let empty_ui = serde_json::to_string(&json!({
+            "schema_version": 1,
+            "name": "empty_ui",
+            "session": "sess_demo",
+            "description": "empty ui object",
+            "inputs": [],
+            "expect": [{ "frame": 2, "ui": {} }]
+        }))
+        .unwrap();
+        let err = parse_scenario_str(&empty_ui, "empty_ui.json").unwrap_err();
+        assert!(err.contains("ui expectation must specify at least one field"), "got: {err}");
+
+        let unknown_ui = serde_json::to_string(&json!({
+            "schema_version": 1,
+            "name": "unknown_ui",
+            "session": "sess_demo",
+            "description": "unknown ui key",
+            "inputs": [],
+            "expect": [{ "frame": 2, "ui": { "radar_zoom": true } }]
+        }))
+        .unwrap();
+        let err = parse_scenario_str(&unknown_ui, "unknown_ui.json").unwrap_err();
+        assert!(err.contains("unknown ui field 'radar_zoom'"), "got: {err}");
+
+        let non_bool_ui = serde_json::to_string(&json!({
+            "schema_version": 1,
+            "name": "non_bool_ui",
+            "session": "sess_demo",
+            "description": "string value for bool ui field",
+            "inputs": [],
+            "expect": [{ "frame": 2, "ui": { "guide_open": "true" } }]
+        }))
+        .unwrap();
+        let err = parse_scenario_str(&non_bool_ui, "non_bool_ui.json").unwrap_err();
+        assert!(err.contains("ui field 'guide_open' must be a boolean"), "got: {err}");
+    }
+
+    #[test]
+    fn evaluate_ui_expectation_pass_and_fail_formatting() {
+        let navs = BTreeMap::new();
+        let mut uis = BTreeMap::new();
+        uis.insert(
+            4,
+            UiFrameSnapshot {
+                guide_open: false,
+                guide_zoomed: false,
+                nav_edit_mode: false,
+                nav_hud_enabled: true,
+                radar_enabled: false,
+                radar_active: false,
+                radar_edit_mode: false,
+            },
+        );
+        uis.insert(
+            6,
+            UiFrameSnapshot {
+                guide_open: true,
+                guide_zoomed: false,
+                nav_edit_mode: true,
+                nav_hud_enabled: true,
+                radar_enabled: true,
+                radar_active: true,
+                radar_edit_mode: true,
+            },
+        );
+
+        let sc_ok = ScenarioFile {
+            schema_version: 1,
+            name: "ui_eval_ok".to_owned(),
+            session: "sess_demo".to_owned(),
+            description: "ui pass".to_owned(),
+            known_bug: None,
+            inputs: vec![],
+            expect: vec![
+                ScenarioExpectation {
+                    frame: 4,
+                    within_frames: 0,
+                    nav: None,
+                    ui: Some(UiExpectation {
+                        radar_enabled: Some(false),
+                        radar_active: Some(false),
+                        ..Default::default()
+                    }),
+                },
+                ScenarioExpectation {
+                    frame: 6,
+                    within_frames: 0,
+                    nav: None,
+                    ui: Some(UiExpectation {
+                        guide_open: Some(true),
+                        nav_edit_mode: Some(true),
+                        radar_edit_mode: Some(true),
+                        ..Default::default()
+                    }),
+                },
+            ],
+        };
+        let res_ok = evaluate_scenario(&sc_ok, &navs, &uis, 6, 0.05);
+        assert_eq!(res_ok.outcome, ScenarioOutcome::Pass);
+        assert_eq!(res_ok.checks_passed, 2);
+        assert_eq!(res_ok.checks[1].actual_ui, uis.get(&6).cloned());
+
+        let sc_fail = ScenarioFile {
+            schema_version: 1,
+            name: "ui_eval_fail".to_owned(),
+            session: "sess_demo".to_owned(),
+            description: "ui fail".to_owned(),
+            known_bug: None,
+            inputs: vec![],
+            expect: vec![ScenarioExpectation {
+                frame: 4,
+                within_frames: 0,
+                nav: None,
+                ui: Some(UiExpectation {
+                    guide_open: Some(true),
+                    ..Default::default()
+                }),
+            }],
+        };
+        let res_fail = evaluate_scenario(&sc_fail, &navs, &uis, 6, 0.05);
+        assert_eq!(res_fail.outcome, ScenarioOutcome::Fail);
+        let detail = res_fail.first_failure.as_deref().unwrap();
+        assert!(
+            detail.contains("frame 4: expected {guide_open=true}, got at f=4 {guide_open=false}"),
+            "got: {detail}"
         );
     }
 
