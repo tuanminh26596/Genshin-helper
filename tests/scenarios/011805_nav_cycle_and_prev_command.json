@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "name": "nav_cycle_next_prev_and_unlock",
+  "session": "sess_20261127_011805",
+  "description": "Cycle forward twice with Alt+E (pin_near -> pin_mid -> pin_far), step backward with web on_nav_command prev (pin_far -> pin_mid), then unlock with Alt+F6 so proximity takeover returns to pin_near.",
+  "inputs": [
+    {
+      "frame": 355,
+      "web_input": {
+        "callback": "on_nearby_pins",
+        "payload": {
+          "map_id": 2,
+          "pins": [
+            {
+              "id": "scenario:pin_near",
+              "lng": -9433.5,
+              "lat": 4383.5,
+              "name": "Scenario Pin Near"
+            },
+            {
+              "id": "scenario:pin_mid",
+              "lng": -9484.0,
+              "lat": 4387.0,
+              "name": "Scenario Pin Mid"
+            },
+            {
+              "id": "scenario:pin_far",
+              "lng": -9530.0,
+              "lat": 4424.5,
+              "name": "Scenario Pin Far"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "frame": 357,
+      "hotkey": "nav_next"
+    },
+    {
+      "frame": 359,
+      "hotkey": "nav_next"
+    },
+    {
+      "frame": 361,
+      "web_input": {
+        "callback": "on_nav_command",
+        "payload": {
+          "action": "prev"
+        }
+      }
+    },
+    {
+      "frame": 363,
+      "hotkey": "nav_unlock"
+    }
+  ],
+  "expect": [
+    {
+      "frame": 357,
+      "nav": {
+        "target_id": "scenario:pin_mid",
+        "user_locked_id": "scenario:pin_mid"
+      }
+    },
+    {
+      "frame": 359,
+      "nav": {
+        "target_id": "scenario:pin_far",
+        "user_locked_id": "scenario:pin_far"
+      }
+    },
+    {
+      "frame": 361,
+      "nav": {
+        "target_id": "scenario:pin_mid",
+        "user_locked_id": "scenario:pin_mid"
+      }
+    },
+    {
+      "frame": 363,
+      "within_frames": 2,
+      "nav": {
+        "user_locked_id": null
+      }
+    },
+    {
+      "frame": 370,
+      "within_frames": 20,
+      "nav": {
+        "user_locked_id": null,
+        "target_id": "scenario:pin_near"
+      }
+    }
+  ]
+}

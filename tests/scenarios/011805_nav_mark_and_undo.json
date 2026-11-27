@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "name": "nav_mark_advances_and_undo_restores",
+  "session": "sess_20261127_011805",
+  "description": "Deliver 3 map-2 pins (nearest ~15m <= 25m single-press confirm distance), press Alt+F (nav_mark) to mark pin_near and advance to pin_mid, then press Alt+T (nav_undo) to restore pin_near.",
+  "inputs": [
+    {
+      "frame": 355,
+      "web_input": {
+        "callback": "on_nearby_pins",
+        "payload": {
+          "map_id": 2,
+          "pins": [
+            {
+              "id": "scenario:pin_near",
+              "lng": -9433.5,
+              "lat": 4383.5,
+              "name": "Scenario Pin Near"
+            },
+            {
+              "id": "scenario:pin_mid",
+              "lng": -9484.0,
+              "lat": 4387.0,
+              "name": "Scenario Pin Mid"
+            },
+            {
+              "id": "scenario:pin_far",
+              "lng": -9530.0,
+              "lat": 4424.5,
+              "name": "Scenario Pin Far"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "frame": 358,
+      "hotkey": "nav_mark"
+    },
+    {
+      "frame": 362,
+      "hotkey": "nav_undo"
+    }
+  ],
+  "expect": [
+    {
+      "frame": 356,
+      "nav": {
+        "target_id": "scenario:pin_near",
+        "locked_target_id": null,
+        "user_locked_id": null,
+        "state": "tracking"
+      }
+    },
+    {
+      "frame": 358,
+      "within_frames": 2,
+      "nav": {
+        "target_id": "scenario:pin_mid",
+        "locked_target_id": null,
+        "user_locked_id": null
+      }
+    },
+    {
+      "frame": 362,
+      "within_frames": 2,
+      "nav": {
+        "target_id": "scenario:pin_near"
+      }
+    }
+  ]
+}

@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "name": "nav_lock_target_and_unlock_restores_nearest",
+  "session": "sess_20261127_011805",
+  "description": "Deliver 3 map-2 pins, lock onto pin_far via web on_nav_command lock_target (with auto_switch suppressed in replay), then press Alt+F6 (nav_unlock) and verify locked_target_id clears and target returns to pin_near.",
+  "inputs": [
+    {
+      "frame": 355,
+      "web_input": {
+        "callback": "on_nearby_pins",
+        "payload": {
+          "map_id": 2,
+          "pins": [
+            {
+              "id": "scenario:pin_near",
+              "lng": -9433.5,
+              "lat": 4383.5,
+              "name": "Scenario Pin Near"
+            },
+            {
+              "id": "scenario:pin_mid",
+              "lng": -9484.0,
+              "lat": 4387.0,
+              "name": "Scenario Pin Mid"
+            },
+            {
+              "id": "scenario:pin_far",
+              "lng": -9530.0,
+              "lat": 4424.5,
+              "name": "Scenario Pin Far"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "frame": 357,
+      "web_input": {
+        "callback": "on_nav_command",
+        "payload": {
+          "action": "lock_target",
+          "pin": {
+            "id": "scenario:pin_far",
+            "lng": -9530.0,
+            "lat": 4424.5,
+            "map_id": 2,
+            "name": "Scenario Pin Far"
+          },
+          "auto_switch": true
+        }
+      }
+    },
+    {
+      "frame": 360,
+      "hotkey": "nav_unlock"
+    }
+  ],
+  "expect": [
+    {
+      "frame": 357,
+      "within_frames": 1,
+      "nav": {
+        "target_id": "scenario:pin_far",
+        "locked_target_id": "scenario:pin_far"
+      }
+    },
+    {
+      "frame": 360,
+      "within_frames": 2,
+      "nav": {
+        "locked_target_id": null,
+        "user_locked_id": null
+      }
+    },
+    {
+      "frame": 370,
+      "within_frames": 20,
+      "nav": {
+        "locked_target_id": null,
+        "user_locked_id": null,
+        "target_id": "scenario:pin_near"
+      }
+    }
+  ]
+}
