@@ -1,6 +1,6 @@
 # Hồ sơ workflow agent: Genshin-Helper
 
-Khung chung: `E:\Dev Soft\crew\Docs\review-workflow.md` (crew commit `20eb3a9`). File này chỉ ghi phần riêng của
+Khung chung: `Docs/review-workflow.md` trong repo crew (commit `20eb3a9`). File này chỉ ghi phần riêng của
 Genshin-Helper. **Chỉ người dùng được sửa** mục "Cấp tin cậy" và mục "Cửa một chiều".
 
 ## Mục tiêu
