@@ -352,6 +352,8 @@ pub struct PinGuideConfig {
     pub fetch_json: Option<JsonFetchHook>,
     pub fetch_bytes: Option<BytesFetchHook>,
     pub timeout: Duration,
+    /// When `true` (used by offline replay), skips all network requests and worker spawns.
+    pub offline: bool,
 }
 
 impl Default for PinGuideConfig {
@@ -362,6 +364,7 @@ impl Default for PinGuideConfig {
             fetch_json: None,
             fetch_bytes: None,
             timeout: Duration::from_secs(8),
+            offline: false,
         }
     }
 }
@@ -394,6 +397,7 @@ struct PinGuideInner {
     fetch_json: Option<JsonFetchHook>,
     fetch_bytes: Option<BytesFetchHook>,
     timeout: Duration,
+    offline: bool,
     state: Mutex<PinGuideState>,
     cv: Condvar,
 }
@@ -426,6 +430,20 @@ impl PinGuideFetcher {
         })
     }
 
+    /// Creates an offline-only `PinGuideFetcher` (for deterministic replay) that never spawns
+    /// background fetch workers or issues any HTTP requests.
+    pub fn new_offline(lang_getter: Arc<dyn Fn() -> String + Send + Sync>) -> Self {
+        Self::with_config(PinGuideConfig {
+            lang_getter,
+            offline: true,
+            ..Default::default()
+        })
+    }
+
+    pub fn is_offline(&self) -> bool {
+        self.inner.offline
+    }
+
     pub fn with_config(cfg: PinGuideConfig) -> Self {
         let trimmed = cfg.api_base.trim().trim_end_matches('/').to_owned();
         Self {
@@ -439,6 +457,7 @@ impl PinGuideFetcher {
                 fetch_json: cfg.fetch_json,
                 fetch_bytes: cfg.fetch_bytes,
                 timeout: cfg.timeout.max(Duration::from_millis(50)),
+                offline: cfg.offline,
                 state: Mutex::new(PinGuideState::default()),
                 cv: Condvar::new(),
             }),
@@ -494,6 +513,9 @@ impl PinGuideFetcher {
         on_done: GuideCallback,
         lang: Option<&str>,
     ) -> bool {
+        if self.inner.offline {
+            return false;
+        }
         let pid = pin_id.trim().to_owned();
         if !Self::is_fetchable_id(&pid) {
             return false;
@@ -586,6 +608,9 @@ impl PinGuideFetcher {
     where
         F: FnOnce(PinGuide) + Send + 'static,
     {
+        if self.inner.offline {
+            return false;
+        }
         let pid = pin_id.trim().to_owned();
         if pid.is_empty() {
             return false;
@@ -650,6 +675,16 @@ impl PinGuideFetcher {
 
     pub fn fetch_sync(&self, pin_id: &str, map_id: i32, lang: Option<&str>) -> PinGuide {
         let lang_tag = self.active_lang_tag(lang).to_owned();
+        if self.inner.offline {
+            return PinGuide {
+                pin_id: pin_id.to_owned(),
+                description: String::new(),
+                image_url: String::new(),
+                image_bytes: None,
+                ok: false,
+                lang: lang_tag,
+            };
+        }
         fetch_sync_inner(&self.inner, pin_id, map_id, &lang_tag)
     }
 }
@@ -1015,6 +1050,8 @@ pub struct LabelCatalogConfig {
     pub fetch_json: Option<JsonFetchHook>,
     pub on_loaded: Option<OnLabelsLoadedHook>,
     pub timeout: Duration,
+    /// When `true` (used by offline replay), disables all network fetches and background threads.
+    pub offline: bool,
 }
 
 impl Default for LabelCatalogConfig {
@@ -1024,6 +1061,7 @@ impl Default for LabelCatalogConfig {
             fetch_json: None,
             on_loaded: None,
             timeout: Duration::from_secs(8),
+            offline: false,
         }
     }
 }
@@ -1050,6 +1088,7 @@ struct LabelCatalogInner {
     fetch_json: Option<JsonFetchHook>,
     on_loaded: Option<OnLabelsLoadedHook>,
     timeout: Duration,
+    offline: bool,
     state: Mutex<LabelCatalogState>,
 }
 
@@ -1077,6 +1116,13 @@ impl HoYoLABLabelCatalog {
         Self::default()
     }
 
+    pub fn new_offline() -> Self {
+        Self::with_config(LabelCatalogConfig {
+            offline: true,
+            ..Default::default()
+        })
+    }
+
     pub fn with_config(cfg: LabelCatalogConfig) -> Self {
         let trimmed = cfg.api_base.trim().trim_end_matches('/').to_owned();
         Self {
@@ -1089,6 +1135,7 @@ impl HoYoLABLabelCatalog {
                 fetch_json: cfg.fetch_json,
                 on_loaded: cfg.on_loaded,
                 timeout: cfg.timeout.max(Duration::from_millis(50)),
+                offline: cfg.offline,
                 state: Mutex::new(LabelCatalogState::default()),
             }),
         }
@@ -1127,6 +1174,9 @@ impl HoYoLABLabelCatalog {
     }
 
     pub fn fetch_sync(&self, map_id: i32, lang: Option<&str>) -> CoreResult<BTreeMap<i32, String>> {
+        if self.inner.offline {
+            return Err(CoreError::Sync("label catalog is offline".to_owned()));
+        }
         let short = short_lang(lang).to_owned();
         let lang_tag = hoyolab_lang_tag(Some(&short));
         let url = format!(
@@ -1170,6 +1220,9 @@ impl HoYoLABLabelCatalog {
     }
 
     pub fn prefetch(&self, map_id: i32, lang: Option<&str>) {
+        if self.inner.offline {
+            return;
+        }
         let short = short_lang(lang).to_owned();
         let key = (map_id, short.clone());
         {
@@ -1445,6 +1498,7 @@ struct PinIconInner {
     disk_dir: PathBuf,
     catalog: Arc<HoYoLABLabelCatalog>,
     timeout: Duration,
+    offline: bool,
     generation: AtomicU64,
     state: Mutex<PinIconState>,
     worker_tx: Mutex<Option<mpsc::Sender<IconWorkerJob>>>,
@@ -1471,11 +1525,29 @@ impl std::fmt::Debug for PinIconCache {
 
 impl PinIconCache {
     pub fn new(disk_dir: PathBuf, catalog: Arc<HoYoLABLabelCatalog>, timeout: Duration) -> Self {
+        Self::new_with_offline(disk_dir, catalog, timeout, false)
+    }
+
+    pub fn new_offline(
+        disk_dir: PathBuf,
+        catalog: Arc<HoYoLABLabelCatalog>,
+        timeout: Duration,
+    ) -> Self {
+        Self::new_with_offline(disk_dir, catalog, timeout, true)
+    }
+
+    fn new_with_offline(
+        disk_dir: PathBuf,
+        catalog: Arc<HoYoLABLabelCatalog>,
+        timeout: Duration,
+        offline: bool,
+    ) -> Self {
         Self {
             inner: Arc::new(PinIconInner {
                 disk_dir,
                 catalog,
                 timeout: timeout.max(Duration::from_millis(50)),
+                offline,
                 generation: AtomicU64::new(0),
                 state: Mutex::new(PinIconState::default()),
                 worker_tx: Mutex::new(None),
@@ -1538,6 +1610,9 @@ impl PinIconCache {
         if let Some(cached) = self.get_cached_bytes(map_id, label_id) {
             return Some(cached);
         }
+        if self.inner.offline {
+            return None;
+        }
         self.inner.fetch_and_save_one_sync(map_id, label_id)
     }
 
@@ -1546,6 +1621,9 @@ impl PinIconCache {
     pub fn get_or_fetch_ui_asset_bytes_sync(&self, asset: MarkerUiAsset) -> Option<Vec<u8>> {
         if let Some(cached) = self.get_ui_asset_bytes(asset) {
             return Some(cached);
+        }
+        if self.inner.offline {
+            return None;
         }
         self.inner.fetch_and_save_ui_asset_sync(asset)
     }
@@ -1596,7 +1674,7 @@ impl PinIconCache {
 
     /// Enqueues an async background download for `(map_id, label_id)` if not cached/inflight/missing.
     pub fn request_icon_async(&self, map_id: i32, label_id: i32) {
-        if label_id <= 0 {
+        if self.inner.offline || label_id <= 0 {
             return;
         }
         if self.icon_path(map_id, label_id).is_file() {
@@ -1619,7 +1697,7 @@ impl PinIconCache {
 
     /// Enqueues an async background download for an official HoYoLAB marker UI sprite.
     pub fn request_ui_asset_async(&self, asset: MarkerUiAsset) {
-        if self.ui_asset_path(asset).is_file() {
+        if self.inner.offline || self.ui_asset_path(asset).is_file() {
             return;
         }
         {
@@ -2809,6 +2887,78 @@ mod tests {
 
         cache.stop();
         assert!(!cache.has_active_worker());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offline_pin_guide_label_catalog_and_icon_cache_make_zero_requests() {
+        use std::sync::atomic::AtomicUsize;
+
+        let json_calls = Arc::new(AtomicUsize::new(0));
+        let bytes_calls = Arc::new(AtomicUsize::new(0));
+        let jc1 = Arc::clone(&json_calls);
+        let bc1 = Arc::clone(&bytes_calls);
+
+        let fetcher = PinGuideFetcher::with_config(PinGuideConfig {
+            offline: true,
+            fetch_json: Some(Arc::new(move |_url| {
+                jc1.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(json!({"retcode": 0, "data": {"info": {"content": "x", "img": ""}}}))
+            })),
+            fetch_bytes: Some(Arc::new(move |_url| {
+                bc1.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(vec![1, 2, 3, 4])
+            })),
+            ..Default::default()
+        });
+        assert!(fetcher.is_offline());
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        assert!(!fetcher.request("12345", 2, move |g| { let _ = tx.send(g); }, Some("en")));
+        assert!(!fetcher.is_loading("12345", Some("en")));
+        assert!(!fetcher.request_inline_guide(
+            "appsample:9",
+            "desc",
+            "https://game-cdn.appsample.com/x.png",
+            |_| {},
+            Some("en"),
+        ));
+        let sync_res = fetcher.fetch_sync("12345", 2, Some("en"));
+        assert!(!sync_res.ok);
+
+        // Text-only inline registration still works offline with zero HTTP calls.
+        fetcher.register_inline_guide("appsample:9", "<b>Local</b> tip", "", Some("en"));
+        let cached = fetcher.get_cached("appsample:9", Some("en")).expect("inline cached");
+        assert_eq!(cached.description, "Local tip");
+
+        let jc2 = Arc::clone(&json_calls);
+        let catalog = Arc::new(HoYoLABLabelCatalog::with_config(LabelCatalogConfig {
+            offline: true,
+            fetch_json: Some(Arc::new(move |_url| {
+                jc2.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(json!({"retcode": 0, "data": {"tree": []}}))
+            })),
+            ..Default::default()
+        }));
+        assert!(catalog.fetch_sync(2, Some("en")).is_err());
+        catalog.prefetch(2, Some("en"));
+        assert!(catalog.get_label(2, Some(44), Some("en")).is_none());
+        assert!(catalog.get_icon_url(2, 44).is_none());
+
+        let dir = std::env::temp_dir().join(format!(
+            "gh_pin_icon_offline_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let icon_cache = PinIconCache::new_offline(dir.clone(), catalog, Duration::from_secs(1));
+        icon_cache.request_icon_async(2, 44);
+        icon_cache.request_ui_asset_async(MarkerUiAsset::BgNormal);
+        assert!(icon_cache.get_or_fetch_icon_bytes_sync(2, 44).is_none());
+        assert!(icon_cache.get_or_fetch_ui_asset_bytes_sync(MarkerUiAsset::BgNormal).is_none());
+        assert!(!icon_cache.has_active_worker());
+
+        assert_eq!(json_calls.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(bytes_calls.load(AtomicOrdering::SeqCst), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

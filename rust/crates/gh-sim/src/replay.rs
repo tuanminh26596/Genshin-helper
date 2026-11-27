@@ -6,12 +6,18 @@ use crate::capturer::{CaptureCoverageStats, ReplayCapturer};
 use crate::compositor::{
     OfflineRadarAssets, composite_radar_onto_frame, save_bgra_png,
 };
+use crate::timeline::{
+    InputReplayReport, InputTimeline, dispatch_timeline_input, load_web_inputs_jsonl,
+    record_nav_comparison,
+};
 use crate::verified_gt::{SessionCheckpointGt, VerifiedGtFile};
 use gh_app::BUILD_GIT_COMMIT;
+use gh_app::callbacks::AppServerCallbacks;
 use gh_app::capture_backend::FrameCapturer;
 use gh_app::diagnostics::{DiagnosticManager, MinimapPreLostRingBuffer};
 use gh_app::log_buffer::LogRingBuffer;
 use gh_app::mmap_view::{LocatorRegistrar, MMapViewEngine};
+use gh_app::session_recorder::{NavFrameSnapshot, WEB_INPUTS_FILENAME};
 use gh_app::state::{AppState, GameState, NavMarkConfirm, RouteState};
 use gh_app::tracking_loop::{
     LoopRuntimeState, PostTickContext, TickMode, TickParams, apply_tick_output,
@@ -234,6 +240,8 @@ pub struct ReplayReport {
     pub provenance: ReplayProvenance,
     #[serde(default)]
     pub recording_fidelity: Option<RecordingFidelityReport>,
+    #[serde(default)]
+    pub input_replay: InputReplayReport,
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +260,8 @@ struct MetaRecord {
     base_heading: Option<f64>,
     tick_seq: Option<u64>,
     unrecorded_ticks: Option<BTreeMap<String, u64>>,
+    hotkeys: Vec<(f64, String)>,
+    live_nav: Option<NavFrameSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -408,6 +418,23 @@ fn load_meta_jsonl(path: &Path) -> Result<Vec<MetaRecord>, String> {
             }
             counts
         });
+        let hotkeys: Vec<(f64, String)> = v
+            .get("hotkeys")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let hk_ts = item.get("ts").and_then(Value::as_f64).filter(|t| t.is_finite())?;
+                        let act = item.get("action").and_then(Value::as_str)?;
+                        Some((hk_ts, act.to_owned()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let live_nav = v
+            .get("nav")
+            .filter(|nv| !nv.is_null())
+            .and_then(|nv| serde_json::from_value::<NavFrameSnapshot>(nv.clone()).ok());
         out.push(MetaRecord {
             idx,
             ts,
@@ -423,6 +450,8 @@ fn load_meta_jsonl(path: &Path) -> Result<Vec<MetaRecord>, String> {
             base_heading,
             tick_seq,
             unrecorded_ticks,
+            hotkeys,
+            live_nav,
         });
     }
     Ok(out)
@@ -659,6 +688,7 @@ fn build_offline_replay_state(
     );
 
     let (stop_tx, _stop_rx) = watch::channel(false);
+    let offline_catalog = HoYoLABLabelCatalog::new_offline();
     let state = Arc::new(AppState {
         paths: paths.clone(),
         config_path: paths.config_path.clone(),
@@ -698,9 +728,10 @@ fn build_offline_replay_state(
         radar_map: Mutex::new(None),
         radar_active: AtomicBool::new(false),
         radar_pins: Mutex::new(None),
-        pin_icon_cache: PinIconCache::new(
+        radar_screen_offset: gh_hud::layered::OFFSCREEN_TEST_OFFSET,
+        pin_icon_cache: PinIconCache::new_offline(
             paths.cache_dir.join("lan_icons"),
-            Arc::new(HoYoLABLabelCatalog::new()),
+            Arc::new(offline_catalog.clone()),
             Duration::from_secs(1),
         ),
         hud_toast: Arc::new(HudToastOverlay::with_screen_offset(
@@ -710,8 +741,8 @@ fn build_offline_replay_state(
         tray: Mutex::new(None),
         hotkey_mgr: Arc::new(UnifiedHotkeyManager::new(false, None)),
         conflict_advisor: Arc::new(HotkeyConflictAdvisor::new()),
-        guide_fetcher: PinGuideFetcher::new(Arc::new(get_language)),
-        label_catalog: HoYoLABLabelCatalog::new(),
+        guide_fetcher: PinGuideFetcher::new_offline(Arc::new(get_language)),
+        label_catalog: offline_catalog,
         maps_db: stack.maps_db,
         affine_registry: PerMapAffineRegistry::new(),
         hd_provider: stack.hd_provider,
@@ -1109,7 +1140,7 @@ pub fn run_replay_full(
 
     let enable_mmap_view = opts.verify_mmap_view || opts.render_out.is_some();
     let capturer = Arc::new(ReplayCapturer::new());
-    let (state, tile_cache, cfg_snap, relocator_ready) = build_offline_replay_state(
+    let (state, tile_cache, _cfg_init, relocator_ready) = build_offline_replay_state(
         &sandbox.0,
         &effective_data_dir,
         tiles_dir.clone(),
@@ -1180,6 +1211,8 @@ pub fn run_replay_full(
                 base_heading: None,
                 tick_seq: None,
                 unrecorded_ticks: None,
+                hotkeys: Vec::new(),
+                live_nav: None,
             }];
         }
     }
@@ -1187,6 +1220,19 @@ pub fn run_replay_full(
     if let Some(limit) = opts.max_frames {
         records.truncate(limit);
     }
+
+    let mut web_inputs = load_web_inputs_jsonl(&opts.source_dir.join(WEB_INPUTS_FILENAME))?;
+    if opts.max_frames.is_some() {
+        let cutoff_ts = records.last().map_or(f64::NEG_INFINITY, |r| r.ts);
+        web_inputs.retain(|w| w.ts <= cutoff_ts);
+    }
+    let hotkeys: Vec<(f64, String)> = records
+        .iter()
+        .flat_map(|r| r.hotkeys.iter().cloned())
+        .collect();
+    let mut timeline = InputTimeline::from_inputs(web_inputs, hotkeys);
+    let callbacks = AppServerCallbacks::new_offline_replay(Arc::clone(&state));
+    let mut input_replay = InputReplayReport::default();
 
     let base_ts = records.first().map_or(0.0, |r| r.ts);
     let mut rt = LoopRuntimeState::new();
@@ -1225,6 +1271,11 @@ pub fn run_replay_full(
         let Some(frame) = frame_opt else {
             break;
         };
+
+        for ev in timeline.drain_before_frame(rec.ts) {
+            dispatch_timeline_input(&state, &callbacks, &ev, &mut input_replay);
+        }
+        let cfg_snap = state.config.read().expect("config lock poisoned").clone();
 
         let render_clone = if opts.render_out.is_some()
             && post_tick.rendered_previews < 8
@@ -1457,8 +1508,17 @@ pub fn run_replay_full(
             *match_methods.entry(obs.match_method.clone()).or_insert(0) += 1;
         }
 
+        if let Some(ref live_nav) = rec.live_nav {
+            let replay_nav = state.snapshot_nav_state();
+            record_nav_comparison(rec.idx, live_nav, &replay_nav, &mut input_replay);
+        }
+
         tick_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
         observed.push(obs);
+    }
+
+    for ev in timeline.drain_remaining() {
+        dispatch_timeline_input(&state, &callbacks, &ev, &mut input_replay);
     }
 
     let wall_elapsed_s = wall_t0.elapsed().as_secs_f64();
@@ -1512,8 +1572,13 @@ pub fn run_replay_full(
         accuracy,
         provenance,
         recording_fidelity,
+        input_replay,
     };
 
+    state.shutdown_radar();
+    state.nav_hud.close();
+    state.hud_toast.close();
+    state.mmap_overlay.close();
     state.capturer.close();
     state.hd_provider.close();
     state.ug_provider.close();
@@ -1745,6 +1810,8 @@ mod tests {
             base_heading: Some(90.0),
             tick_seq: None,
             unrecorded_ticks: None,
+            hotkeys: Vec::new(),
+            live_nav: None,
         };
         let mk_obs = |i: usize, wx: f64| ObservedFrame {
             idx: i,
@@ -1917,6 +1984,13 @@ mod tests {
         assert_eq!(fid.first_tick_seq, Some(1));
         assert_eq!(fid.last_tick_seq, Some(4));
         assert_eq!(fid.total_unrecorded_ticks, 0);
+        assert_eq!(rep.input_replay.hotkeys_recorded, 4);
+        assert_eq!(rep.input_replay.hotkeys_dispatched, 4);
+        assert_eq!(rep.input_replay.hotkeys_skipped, 0);
+        assert_eq!(
+            rep.input_replay.hotkeys_dispatched_by_action.get("nav_next"),
+            Some(&4)
+        );
     }
 
     #[test]
@@ -1960,5 +2034,316 @@ mod tests {
         assert_eq!(summary.unrecorded_by_mode.get("map_m_settling"), Some(&0));
         assert_eq!(summary.unrecorded_by_mode.get("map_m_paused"), Some(&0));
         assert_eq!(summary.unrecorded_by_mode.get("idle_closed"), Some(&0));
+    }
+
+    #[test]
+    fn e2e_replay_dispatches_hotkeys_and_web_inputs_with_nav_parity_and_seeded_fault() {
+        use gh_app::session_recorder::{
+            SessionCodec, SessionRecorder, SessionRecorderConfig, write_web_inputs_jsonl,
+        };
+        use gh_core::traits::ServerCallbacks;
+
+        let sandbox = TempSandboxDir::new("gh_sim_e2e_input_replay").unwrap();
+        let data_dir = sandbox.0.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        write_json_atomic(
+            &data_dir.join("multimap_v4.json"),
+            &json!({"version": "4.0.0", "maps": {}}),
+        )
+        .unwrap();
+
+        let session_dir = sandbox.0.join("sess_synth_nav");
+        std::fs::create_dir_all(session_dir.join("frames")).unwrap();
+        let img = image::RgbaImage::from_pixel(434, 348, image::Rgba([20, 40, 60, 255]));
+        for i in 1..=4usize {
+            img.save(session_dir.join("frames").join(format!("{i:06}.png")))
+                .unwrap();
+        }
+
+        // Build a live-equivalent recording state to generate ground-truth `meta.jsonl` (`nav` +
+        // `hotkeys`) and sanitized `web_inputs.jsonl` through the real production callbacks,
+        // shared `dispatch_hotkey_action`, `run_tick_worker`, and `apply_tick_output`.
+        let rec_sandbox = sandbox.0.join("rec_state");
+        std::fs::create_dir_all(&rec_sandbox).unwrap();
+        let rec_capturer = Arc::new(ReplayCapturer::new());
+        let (rec_state, _, _, _) = build_offline_replay_state(
+            &rec_sandbox,
+            &data_dir,
+            rec_sandbox.join("tiles"),
+            rec_sandbox.join("ug"),
+            rec_sandbox.join("paimon.npz"),
+            Arc::clone(&rec_capturer),
+            false,
+        )
+        .unwrap();
+        let srec = SessionRecorder::new(
+            SessionRecorderConfig {
+                seconds: 0.0,
+                fps: 20.0,
+                codec: SessionCodec::Libx264Rgb,
+                ffmpeg_path: std::env::current_exe().unwrap(),
+                out_root: rec_sandbox.join("out"),
+                tiles_dir: rec_sandbox.join("tiles"),
+                ug_overlays_dir: rec_sandbox.join("ug"),
+                paimon_cache_path: rec_sandbox.join("paimon.npz"),
+                data_dir: data_dir.clone(),
+                data_source: "dev".to_owned(),
+                maps_db: Arc::clone(&rec_state.maps_db),
+                max_queue: 16,
+            },
+            None,
+        )
+        .unwrap();
+        *rec_state.session_recorder.lock().unwrap() = Some(Arc::clone(&srec));
+
+        let rec_cb = AppServerCallbacks::new_offline_replay(Arc::clone(&rec_state));
+        let mut rec_rt = LoopRuntimeState::new();
+        let mut meta_rows: Vec<Value> = Vec::new();
+        let mut web_records = Vec::new();
+
+        let step_live_frame = |idx: usize,
+                               ts: f64,
+                               hotkeys: Vec<Value>,
+                               rec_rt: &mut LoopRuntimeState|
+         -> Value {
+            let png = load_png_as_bgra(&session_dir.join("frames").join(format!("{idx:06}.png")))
+                .unwrap();
+            rec_capturer.set_frame(Some(png), 0, 0, 2560, 1440, false);
+            let cfg_snap = rec_state.config.read().unwrap().clone();
+            let out = run_tick_worker(
+                &rec_state,
+                TickParams {
+                    game_hwnd: 0,
+                    cl: 0,
+                    ct: 0,
+                    cw: 2560,
+                    ch: 1440,
+                    is_closed: true,
+                    do_auto_sync: true,
+                    do_minimap: true,
+                    fast_ok: false,
+                    guide_view: false,
+                    guide_map: 2,
+                    want_window_capture: false,
+                    now_s: Some((ts - 10.05).max(0.0)),
+                    cursor_client: None,
+                    capture_session_frame: false,
+                    session_rec_active: false,
+                },
+            );
+            let post_ctx = PostTickContext {
+                game_rect: RectI32 {
+                    x: 0,
+                    y: 0,
+                    width: 2560,
+                    height: 1440,
+                },
+                route_needs_mmap: false,
+                overlay_mode: MMapOverlayMode::Off,
+                session_rec_active: false,
+                enable_ui_side_effects: false,
+            };
+            let mut noop = || {};
+            let _ = apply_tick_output(
+                &rec_state,
+                rec_rt,
+                &cfg_snap,
+                &post_ctx,
+                out,
+                None,
+                &mut noop,
+            );
+            let nav_snap = rec_state.snapshot_nav_state();
+            let mut row = json!({
+                "i": idx,
+                "ts": ts,
+                "frame_w": 2560,
+                "frame_h": 1440,
+                "state": "UNLOCALIZED",
+                "nav": nav_snap,
+            });
+            if !hotkeys.is_empty() {
+                row["hotkeys"] = Value::Array(hotkeys);
+            }
+            row
+        };
+
+        // Before frame 1: deliver pins (with sensitive key stripped) + press nav_next (101 -> 102)
+        assert_eq!(
+            rec_cb
+                .on_nearby_pins(&json!({
+                    "map_id": 2,
+                    "cookie": "drop_me",
+                    "pins": [
+                        {"id": "101", "lat": 100.0, "lng": 200.0, "name": "Chest A"},
+                        {"id": "102", "lat": 120.0, "lng": 220.0, "name": "Chest B"}
+                    ]
+                }))
+                .unwrap(),
+            2
+        );
+        for mut w in srec.drain_pending_web_inputs() {
+            assert!(w.payload.get("cookie").is_none());
+            w.ts = 10.01;
+            web_records.push(w);
+        }
+        gh_app::dispatch_hotkey_action(&rec_state, "nav_next");
+        let r1 = step_live_frame(
+            1,
+            10.05,
+            vec![json!({"ts": 10.02, "action": "nav_next"})],
+            &mut rec_rt,
+        );
+        assert_eq!(r1["nav"]["target_id"], json!("102"));
+        assert_eq!(r1["nav"]["user_locked_id"], json!("102"));
+        assert_eq!(r1["nav"]["locked_target_id"], Value::Null);
+        meta_rows.push(r1);
+
+        // Before frame 2: lock single pin 103 via on_nav_command (auto_switch suppressed)
+        let _ = rec_cb
+            .on_nav_command(&json!({
+                "action": "lock_target",
+                "pin": {"id": "103", "lat": 50.0, "lng": 60.0, "map_id": 2, "name": "Oculus C"},
+                "auto_switch": true,
+                "token": "drop_token"
+            }))
+            .unwrap();
+        for mut w in srec.drain_pending_web_inputs() {
+            assert!(w.payload.get("token").is_none());
+            w.ts = 10.07;
+            web_records.push(w);
+        }
+        let r2 = step_live_frame(2, 10.10, vec![], &mut rec_rt);
+        assert_eq!(r2["nav"]["target_id"], json!("103"));
+        assert_eq!(r2["nav"]["locked_target_id"], json!("103"));
+        meta_rows.push(r2);
+
+        // Before frame 3: nav_unlock clears pin 103 lock (returns to 102); also include skipped `debug`
+        gh_app::dispatch_hotkey_action(&rec_state, "nav_unlock");
+        let r3 = step_live_frame(
+            3,
+            10.15,
+            vec![
+                json!({"ts": 10.12, "action": "nav_unlock"}),
+                json!({"ts": 10.13, "action": "debug"}),
+            ],
+            &mut rec_rt,
+        );
+        assert_eq!(r3["nav"]["target_id"], json!("102"));
+        assert_eq!(r3["nav"]["locked_target_id"], Value::Null);
+        meta_rows.push(r3);
+
+        // Before frame 4: nav_guide exercises offline PinGuideFetcher without making requests
+        gh_app::dispatch_hotkey_action(&rec_state, "nav_guide");
+        let r4 = step_live_frame(
+            4,
+            10.20,
+            vec![json!({"ts": 10.17, "action": "nav_guide"})],
+            &mut rec_rt,
+        );
+        assert_eq!(r4["nav"]["target_id"], json!("102"));
+        meta_rows.push(r4);
+
+        rec_state.shutdown_radar();
+        rec_state.nav_hud.close();
+        rec_state.hud_toast.close();
+        rec_state.mmap_overlay.close();
+        rec_state.capturer.close();
+        rec_state.hd_provider.close();
+        rec_state.ug_provider.close();
+        rec_state.audio.close();
+        rec_state.guide_fetcher.stop();
+
+        let write_meta = |rows: &[Value]| {
+            let mut s = String::new();
+            for r in rows {
+                s.push_str(&serde_json::to_string(r).unwrap());
+                s.push('\n');
+            }
+            std::fs::write(session_dir.join("meta.jsonl"), s).unwrap();
+        };
+        write_meta(&meta_rows);
+        write_web_inputs_jsonl(&session_dir.join(WEB_INPUTS_FILENAME), &web_records).unwrap();
+
+        let run_case = || {
+            run_replay(&ReplayOptions {
+                source_dir: session_dir.clone(),
+                data_dir: data_dir.clone(),
+                gt_file: sandbox.0.join("verified_gt.json"),
+                tiles_dir: None,
+                ug_dir: None,
+                paimon_cache_path: None,
+                ffmpeg_path: None,
+                max_frames: None,
+                drift_threshold_w: DEFAULT_DRIFT_THRESHOLD_W,
+                verify_mmap_view: false,
+                render_out: None,
+                out_report: None,
+            })
+            .unwrap()
+        };
+
+        // 1. Happy path: all replayable hotkeys dispatched, debug skipped, web inputs delivered, 0 nav mismatches
+        let rep_ok = run_case();
+        assert_eq!(rep_ok.offline_assets.hd_downloads, 0);
+        assert_eq!(rep_ok.input_replay.hotkeys_recorded, 4);
+        assert_eq!(rep_ok.input_replay.hotkeys_dispatched, 3);
+        assert_eq!(rep_ok.input_replay.hotkeys_skipped, 1);
+        assert_eq!(
+            rep_ok.input_replay.hotkeys_dispatched_by_action.get("nav_next"),
+            Some(&1)
+        );
+        assert_eq!(
+            rep_ok.input_replay.hotkeys_dispatched_by_action.get("nav_unlock"),
+            Some(&1)
+        );
+        assert_eq!(
+            rep_ok.input_replay.hotkeys_dispatched_by_action.get("nav_guide"),
+            Some(&1)
+        );
+        assert_eq!(
+            rep_ok.input_replay.hotkeys_skipped_by_action.get("debug"),
+            Some(&1)
+        );
+        assert_eq!(rep_ok.input_replay.web_inputs_delivered, 2);
+        assert_eq!(
+            rep_ok.input_replay.web_inputs_by_callback.get("on_nearby_pins"),
+            Some(&1)
+        );
+        assert_eq!(
+            rep_ok.input_replay.web_inputs_by_callback.get("on_nav_command"),
+            Some(&1)
+        );
+        assert_eq!(rep_ok.input_replay.nav_frames_compared, 4);
+        assert_eq!(rep_ok.input_replay.nav_mismatches, 0);
+
+        // 2. Seeded fault A: remove web_inputs.jsonl -> replay has no pins/lock -> nav_mismatches > 0
+        std::fs::remove_file(session_dir.join(WEB_INPUTS_FILENAME)).unwrap();
+        let rep_no_web = run_case();
+        assert_eq!(rep_no_web.input_replay.web_inputs_delivered, 0);
+        assert_eq!(rep_no_web.input_replay.nav_frames_compared, 4);
+        assert_eq!(rep_no_web.input_replay.nav_mismatches, 4);
+
+        // 3. Seeded fault B: restore web_inputs.jsonl, drop `nav_unlock` hotkey -> frames 3 & 4 stay locked on 103
+        write_web_inputs_jsonl(&session_dir.join(WEB_INPUTS_FILENAME), &web_records).unwrap();
+        let mut rows_no_unlock = meta_rows.clone();
+        rows_no_unlock[2]["hotkeys"] = json!([{"ts": 10.13, "action": "debug"}]);
+        write_meta(&rows_no_unlock);
+        let rep_no_unlock = run_case();
+        assert_eq!(rep_no_unlock.input_replay.nav_frames_compared, 4);
+        assert_eq!(rep_no_unlock.input_replay.nav_mismatches, 2);
+        assert_eq!(rep_no_unlock.input_replay.first_nav_mismatch_idx, Some(3));
+
+        // 4. Seeded fault C: restore `nav_unlock`, drop `nav_next` hotkey -> frame 1 targets 101 instead of 102
+        let mut rows_no_next = meta_rows;
+        rows_no_next[0].as_object_mut().unwrap().remove("hotkeys");
+        write_meta(&rows_no_next);
+        let rep_no_next = run_case();
+        assert_eq!(rep_no_next.input_replay.nav_frames_compared, 4);
+        assert!(
+            rep_no_next.input_replay.nav_mismatches > 0,
+            "dropping nav_next must produce nav mismatches"
+        );
+        assert_eq!(rep_no_next.input_replay.first_nav_mismatch_idx, Some(1));
     }
 }

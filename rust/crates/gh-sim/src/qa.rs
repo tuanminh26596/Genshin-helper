@@ -9,6 +9,7 @@ use crate::replay::{
     DEFAULT_DRIFT_THRESHOLD_W, ObservedFrame, RecordingFidelityReport, ReplayOptions, ReplayReport,
     angle_diff_deg, percentile, round3, run_replay_with_poses,
 };
+use crate::timeline::InputReplayReport;
 use gh_app::BUILD_GIT_COMMIT;
 use gh_core::atomic_io::{write_bytes_atomic, write_json_atomic};
 use gh_core::provenance::ReplayProvenance;
@@ -362,6 +363,8 @@ pub struct QaSessionResult {
     pub provenance: Option<ReplayProvenance>,
     #[serde(default)]
     pub recording_fidelity: Option<RecordingFidelityReport>,
+    #[serde(default)]
+    pub input_replay: Option<InputReplayReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1155,7 +1158,7 @@ fn fmt_opt_w(v: Option<f64>) -> String {
 
 pub fn format_qa_header() -> String {
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:<20} {:>6}  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:<20} {:<24} {:>6}  {}",
         "Session",
         "Status",
         "Frames",
@@ -1168,9 +1171,33 @@ pub fn format_qa_header() -> String {
         "InGame",
         "Prov",
         "Unrec",
+        "Nav",
         "Time",
         "Reason"
     )
+}
+
+/// Informational navigation input replay column:
+/// `hk <dispatched>/<recorded>`, appending ` web <n>` when web inputs exist and
+/// ` nav <mismatch>/<compared>` when live `nav` exists; `n/a` when no hotkeys and no web inputs.
+pub fn format_nav_col(input: Option<&InputReplayReport>) -> String {
+    let Some(ir) = input else {
+        return "n/a".to_owned();
+    };
+    if ir.hotkeys_recorded == 0 && ir.web_inputs_delivered == 0 {
+        return "n/a".to_owned();
+    }
+    let mut out = format!("hk {}/{}", ir.hotkeys_dispatched, ir.hotkeys_recorded);
+    if ir.web_inputs_delivered > 0 {
+        out.push_str(&format!(" web {}", ir.web_inputs_delivered));
+    }
+    if ir.nav_frames_compared > 0 {
+        out.push_str(&format!(
+            " nav {}/{}",
+            ir.nav_mismatches, ir.nav_frames_compared
+        ));
+    }
+    out
 }
 
 /// Informational unrecorded-ticks column (`mm <minimap+fast> map <map_m+paused> set <settling>`,
@@ -1307,8 +1334,9 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
     let in_game_col = format_in_game_col(&r.live_mmap_latency);
     let prov_col = format_prov_col(r.provenance.as_ref());
     let unrec_col = format_unrec_col(r.recording_fidelity.as_ref());
+    let nav_col = format_nav_col(r.input_replay.as_ref());
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:<20} {:>5.1}s  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:<20} {:<24} {:>5.1}s  {}",
         r.session_name,
         r.status,
         r.frames,
@@ -1321,6 +1349,7 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
         in_game_col,
         prov_col,
         unrec_col,
+        nav_col,
         r.wall_elapsed_s,
         r.reason
     )
@@ -1392,6 +1421,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
         let live_mmap_latency = load_live_mmap_latency(&meta_path);
         let session_prov = report.provenance.clone();
         let session_fidelity = report.recording_fidelity.clone();
+        let session_input_replay = Some(report.input_replay.clone());
         let prov_notes = provenance_notes(Some(&session_prov), BUILD_GIT_COMMIT);
         let blessed_path = sdir.join(BLESSED_POSES_FILENAME);
 
@@ -1471,6 +1501,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                 live_mmap_latency,
                 provenance: Some(session_prov),
                 recording_fidelity: session_fidelity,
+                input_replay: session_input_replay,
             }
         } else {
             match baseline.sessions.get(&session_name) {
@@ -1504,6 +1535,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                     live_mmap_latency,
                     provenance: Some(session_prov),
                     recording_fidelity: session_fidelity,
+                    input_replay: session_input_replay,
                 },
                 Some(base_sess) => {
                     let mut reasons = Vec::new();
@@ -1605,6 +1637,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                         live_mmap_latency,
                         provenance: Some(session_prov),
                         recording_fidelity: session_fidelity,
+                        input_replay: session_input_replay,
                     }
                 }
             }
@@ -2594,6 +2627,7 @@ mod tests {
             live_mmap_latency: LiveMMapLatency::default(),
             provenance: None,
             recording_fidelity: None,
+            input_replay: None,
         };
         let formatted = format_qa_row(&row_with_live);
         assert!(
@@ -3031,6 +3065,7 @@ mod tests {
             live_mmap_latency: LiveMMapLatency::default(),
             provenance: None,
             recording_fidelity: fidelity,
+            input_replay: None,
         };
 
         let row_legacy = format_qa_row(&mk_row(None));
@@ -3047,5 +3082,50 @@ mod tests {
             row_idl.contains("mm 812 map 3 set 1 idl 4"),
             "row missing idle Unrec column: {row_idl}"
         );
+    }
+
+    #[test]
+    fn qa_nav_column_formats_hotkeys_web_nav_and_na_without_affecting_pass_fail() {
+        let hdr = format_qa_header();
+        assert!(hdr.contains("Nav"), "header missing Nav: {hdr}");
+
+        // None or empty -> n/a
+        assert_eq!(format_nav_col(None), "n/a");
+        assert_eq!(format_nav_col(Some(&InputReplayReport::default())), "n/a");
+
+        // Hotkeys only (e.g. 011306: 3/3 nav_guide; 011544: 0/1 debug)
+        let hk_3_3 = InputReplayReport {
+            hotkeys_recorded: 3,
+            hotkeys_dispatched: 3,
+            ..Default::default()
+        };
+        assert_eq!(format_nav_col(Some(&hk_3_3)), "hk 3/3");
+
+        let hk_0_1 = InputReplayReport {
+            hotkeys_recorded: 1,
+            hotkeys_dispatched: 0,
+            hotkeys_skipped: 1,
+            ..Default::default()
+        };
+        assert_eq!(format_nav_col(Some(&hk_0_1)), "hk 0/1");
+
+        // Hotkeys + web inputs + live nav comparison
+        let full = InputReplayReport {
+            hotkeys_recorded: 4,
+            hotkeys_dispatched: 3,
+            hotkeys_skipped: 1,
+            web_inputs_delivered: 5,
+            nav_frames_compared: 120,
+            nav_mismatches: 2,
+            ..Default::default()
+        };
+        assert_eq!(format_nav_col(Some(&full)), "hk 3/4 web 5 nav 2/120");
+
+        // Web inputs only (no hotkeys), no live nav
+        let web_only = InputReplayReport {
+            web_inputs_delivered: 2,
+            ..Default::default()
+        };
+        assert_eq!(format_nav_col(Some(&web_only)), "hk 0/0 web 2");
     }
 }

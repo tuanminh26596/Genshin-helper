@@ -24,11 +24,23 @@ use std::sync::atomic::Ordering;
 
 pub struct AppServerCallbacks {
     pub state: Arc<AppState>,
+    /// When `true` (offline replay), suppresses real desktop window focus changes (`auto_switch`).
+    suppress_window_switch: bool,
 }
 
 impl AppServerCallbacks {
     pub fn new(state: Arc<AppState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            suppress_window_switch: false,
+        }
+    }
+
+    pub fn new_offline_replay(state: Arc<AppState>) -> Self {
+        Self {
+            state,
+            suppress_window_switch: true,
+        }
     }
 
     fn record_in_game_feedback(&self, event_type: &str, status: &str, seq: u64, fb: &InGameFeedback<'_>) {
@@ -361,6 +373,7 @@ impl ServerCallbacks for AppServerCallbacks {
     }
 
     fn on_set_nav_hud(&self, payload: &Value) -> CoreResult<Value> {
+        self.state.record_web_input("on_set_nav_hud", payload);
         self.state.set_nav_hud(payload)
     }
 
@@ -403,6 +416,7 @@ impl ServerCallbacks for AppServerCallbacks {
     }
 
     fn on_nearby_pins(&self, payload: &Value) -> CoreResult<usize> {
+        self.state.record_web_input("on_nearby_pins", payload);
         let req = payload.as_object().cloned().unwrap_or_default();
         let map_id = json_i64(req.get("map_id")).unwrap_or(2) as i32;
         let raw_pins = req
@@ -470,6 +484,7 @@ impl ServerCallbacks for AppServerCallbacks {
     }
 
     fn on_nav_command(&self, payload: &Value) -> CoreResult<Value> {
+        self.state.record_web_input("on_nav_command", payload);
         let req = payload.as_object().cloned().unwrap_or_default();
         let act_str = json_str_trimmed(req.get("action")).to_ascii_lowercase();
         let pin_id = req
@@ -519,7 +534,7 @@ impl ServerCallbacks for AppServerCallbacks {
             self.state.broadcast_target_lock_state();
             self.state.push_lan_snapshot(true);
             let mut switched_to: Option<String> = None;
-            if json_truthy(req.get("auto_switch"), false) {
+            if !self.suppress_window_switch && json_truthy(req.get("auto_switch"), false) {
                 switched_to = self.on_quick_switch().ok();
             }
             return Ok(json!({
@@ -703,6 +718,7 @@ impl ServerCallbacks for AppServerCallbacks {
     }
 
     fn on_plan_tsp_route(&self, payload: &Value) -> CoreResult<Value> {
+        self.state.record_web_input("on_plan_tsp_route", payload);
         let req = payload.as_object().cloned().unwrap_or_default();
         let map_id = json_i64(req.get("map_id")).unwrap_or(2) as i32;
         let teleport_penalty = json_f64(req.get("teleport_penalty"))
@@ -802,6 +818,7 @@ impl ServerCallbacks for AppServerCallbacks {
     }
 
     fn on_route_command(&self, payload: &Value) -> CoreResult<Value> {
+        self.state.record_web_input("on_route_command", payload);
         self.state.handle_route_command(payload)
     }
 
@@ -1489,6 +1506,103 @@ mod tests {
             }))
             .unwrap();
         assert!(rec.take_pending_events_for_test().is_empty());
+
+        state.nav_hud.close();
+        state.hud_toast.close();
+        state.guide_fetcher.stop();
+        state.audio.close();
+        state.capturer.close();
+        let _ = std::fs::remove_dir_all(&tmp_root);
+    }
+
+    #[test]
+    fn web_input_callbacks_record_sanitized_deduplicated_payloads_when_active() {
+        let seq_id = CB_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp_root = std::env::temp_dir().join(format!(
+            "gh_app_cb_web_rec_{}_{seq_id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_root);
+        std::fs::create_dir_all(&tmp_root).unwrap();
+
+        let state = make_test_state(&tmp_root);
+        let cb = AppServerCallbacks::new_offline_replay(Arc::clone(&state));
+        let rec = crate::session_recorder::SessionRecorder::new(
+            crate::session_recorder::SessionRecorderConfig {
+                seconds: 0.0,
+                fps: crate::session_recorder::DEFAULT_SESSION_FPS,
+                codec: crate::session_recorder::SessionCodec::Libx264Rgb,
+                ffmpeg_path: std::env::current_exe().unwrap(),
+                out_root: tmp_root.join("out"),
+                tiles_dir: tmp_root.join("tiles"),
+                ug_overlays_dir: tmp_root.join("ug"),
+                paimon_cache_path: tmp_root.join("paimon.npz"),
+                data_dir: tmp_root.join("data"),
+                data_source: "dev".to_owned(),
+                maps_db: Arc::clone(&state.maps_db),
+                max_queue: 16,
+            },
+            None,
+        )
+        .unwrap();
+        *state.session_recorder.lock().unwrap() = Some(Arc::clone(&rec));
+
+        // 1. on_nearby_pins (with sensitive key + duplicate)
+        let pins_payload = json!({
+            "map_id": 2,
+            "cookie": "ltoken_v2=secret",
+            "pins": [{"id": "101", "lat": 10.0, "lng": 20.0, "name": "Chest A"}]
+        });
+        assert_eq!(cb.on_nearby_pins(&pins_payload).unwrap(), 1);
+        assert_eq!(cb.on_nearby_pins(&pins_payload).unwrap(), 1);
+
+        // 2. on_nav_command (lock_target with auto_switch suppressed in offline replay)
+        let _ = cb
+            .on_nav_command(&json!({
+                "action": "lock_target",
+                "pin": {"id": "101", "lat": 10.0, "lng": 20.0, "name": "Chest A"},
+                "auto_switch": true,
+                "authorization": "Bearer secret"
+            }))
+            .unwrap();
+
+        // 3. on_route_command
+        let _ = cb.on_route_command(&json!({"action": "status"})).unwrap();
+
+        // 4. on_plan_tsp_route
+        let _ = cb
+            .on_plan_tsp_route(&json!({
+                "map_id": 2,
+                "pins": [{"id": 101, "lat": 10.0, "lng": 20.0}],
+                "start_pos": {"lat": 0.0, "lng": 0.0}
+            }))
+            .unwrap();
+
+        // 5. on_set_nav_hud
+        let _ = cb
+            .on_set_nav_hud(&json!({"enabled": true, "position": "under_minimap"}))
+            .unwrap();
+
+        let (recorded, skipped, by_cb) = rec.web_input_stats();
+        assert_eq!(recorded, 5);
+        assert_eq!(skipped, 1);
+        assert_eq!(by_cb.get("on_nearby_pins"), Some(&1));
+
+        let items = rec.drain_pending_web_inputs();
+        assert_eq!(items.len(), 5);
+        let cbs: Vec<&str> = items.iter().map(|i| i.callback.as_str()).collect();
+        assert_eq!(
+            cbs,
+            vec![
+                "on_nearby_pins",
+                "on_nav_command",
+                "on_route_command",
+                "on_plan_tsp_route",
+                "on_set_nav_hud",
+            ]
+        );
+        assert!(items[0].payload.get("cookie").is_none());
+        assert!(items[1].payload.get("authorization").is_none());
 
         state.nav_hud.close();
         state.hud_toast.close();
