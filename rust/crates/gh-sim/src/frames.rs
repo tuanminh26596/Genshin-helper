@@ -11,6 +11,7 @@
 
 use gh_core::frame::{FrameBuf, PixelFormat, RectI32};
 use gh_core::traits::OcrProvider;
+pub use gh_core::ui_layout::compute_tracker_hud_crop;
 use gh_core::ui_layout::compute_ui_layout;
 use gh_cv::locator::{LocateResult, LocatorPaths, MapLocator};
 use gh_win32::win_ocr::WindowsOcrService;
@@ -315,24 +316,6 @@ impl Default for FramesOptions {
             data_dir: PathBuf::from(DEFAULT_DATA_DIR),
         }
     }
-}
-
-/// Computes the tracker HUD capture crop `(hud_w, hud_h)` matching
-/// `gh-app/src/tracking_loop.rs` (`run_tick_worker`).
-pub fn compute_tracker_hud_crop(
-    frame_w: u32,
-    frame_h: u32,
-    minimap_rect: RectI32,
-    paimon_maybe_rect: RectI32,
-    scale_ui: f64,
-) -> (i32, i32) {
-    let cw = frame_w as i32;
-    let ch = frame_h as i32;
-    let cal_pad_x = (48.0 * scale_ui).round() as i32;
-    let cal_pad_y = (28.0 * scale_ui).round() as i32;
-    let hud_w = cw.min((minimap_rect.x + minimap_rect.width + cal_pad_x).max(paimon_maybe_rect.x + paimon_maybe_rect.width));
-    let hud_h = ch.min((minimap_rect.y + minimap_rect.height + cal_pad_y).max(paimon_maybe_rect.y + paimon_maybe_rect.height));
-    (hud_w, hud_h)
 }
 
 #[inline]
@@ -707,13 +690,7 @@ pub fn evaluate_fixture(
                         &mut failures,
                     );
 
-                    let (hud_w, hud_h) = compute_tracker_hud_crop(
-                        fixture.width,
-                        fixture.height,
-                        layout.minimap_rect,
-                        layout.paimon_maybe_rect,
-                        layout.scale_ui,
-                    );
+                    let (hud_w, hud_h) = compute_tracker_hud_crop(&layout);
                     check_circle_inside_box(
                         "tracker hud_crop",
                         true_circle,
@@ -1171,19 +1148,13 @@ mod tests {
     #[test]
     fn outcome_known_fail_when_failing_fixture_has_known_bug() {
         let tmp = TempDirGuard::new("known_fail");
-        let img_rel = "scratch/test_21x9.png";
-        write_solid_png(&tmp.path.join(img_rel), 2560, 1080);
+        let img_rel = "scratch/test_known_fail.png";
+        write_solid_png(&tmp.path.join(img_rel), 1920, 1080);
         let fixtures_dir = tmp.path.join("tests/frame_fixtures");
         let mut f = base_1080p_fixture("known_fail_case", img_rel);
-        f.width = 2560;
-        f.known_bug = Some("21:9 HUD inward shift".to_owned());
-        f.expected_minimap_rect.as_mut().unwrap().x = 131;
-        f.expected_paimon_rect.as_mut().unwrap().x = 97;
-        f.true_minimap_circle = Some(FixtureCircle {
-            cx: 241.0,
-            cy: 124.0,
-            radius: 106.5,
-        });
+        f.known_bug = Some("synthetic mismatch for known-fail classification".to_owned());
+        f.expected_minimap_rect.as_mut().unwrap().x = 200;
+        f.expected_paimon_rect.as_mut().unwrap().x = 166;
         write_fixture_json(&fixtures_dir, "01_known_fail.json", &f);
 
         let report = run_frames(&FramesOptions {
