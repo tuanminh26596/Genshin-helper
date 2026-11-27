@@ -1426,6 +1426,8 @@ mod tests {
                 tiles_dir: tmp_root.join("tiles"),
                 ug_overlays_dir: tmp_root.join("ug"),
                 paimon_cache_path: tmp_root.join("paimon.npz"),
+                data_dir: tmp_root.join("data"),
+                data_source: "dev".to_owned(),
                 maps_db: Arc::clone(&state.maps_db),
                 max_queue: 16,
             },

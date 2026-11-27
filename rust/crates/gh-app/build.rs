@@ -1,13 +1,17 @@
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    emit_build_stamp(&manifest_dir);
+
     if std::env::var_os("CARGO_CFG_TARGET_OS").as_deref() == Some(OsStr::new("windows")) {
         let mut res = winresource::WindowsResource::new();
 
-        let icon_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let icon_path = manifest_dir
             .join("..")
             .join("..")
             .join("..")
@@ -30,5 +34,121 @@ fn main() {
         if let Err(err) = res.compile() {
             panic!("failed to compile Windows resource: {err}");
         }
+    }
+}
+
+fn emit_build_stamp(manifest_dir: &Path) {
+    let crate_version =
+        std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_owned());
+    println!("cargo:rustc-env=GH_APP_VERSION={crate_version}");
+
+    let repo_root = find_git_repo_root(manifest_dir);
+    if let Some(ref root) = repo_root {
+        watch_git_head_and_ref(root);
+    }
+
+    let git_commit = repo_root
+        .as_deref()
+        .and_then(query_git_head_commit)
+        .unwrap_or_else(|| "unknown".to_owned());
+    println!("cargo:rustc-env=GH_GIT_COMMIT={git_commit}");
+}
+
+fn find_git_repo_root(start: &Path) -> Option<PathBuf> {
+    for ancestor in start.ancestors() {
+        let dot_git = ancestor.join(".git");
+        if dot_git.is_dir() || dot_git.is_file() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Emits `cargo:rerun-if-changed` ONLY for existing git HEAD/ref files (supports both standard
+/// `.git/` directories and git worktree `.git` pointer files) so incremental builds never rerun
+/// unnecessarily when HEAD is unchanged.
+fn watch_git_head_and_ref(repo_root: &Path) {
+    let dot_git = repo_root.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else if dot_git.is_file() {
+        println!("cargo:rerun-if-changed={}", dot_git.display());
+        let Ok(raw) = std::fs::read_to_string(&dot_git) else {
+            return;
+        };
+        let Some(rest) = raw.trim().strip_prefix("gitdir:") else {
+            return;
+        };
+        let target = PathBuf::from(rest.trim());
+        if target.is_absolute() {
+            target
+        } else {
+            repo_root.join(target)
+        }
+    } else {
+        return;
+    };
+
+    let common_dir = {
+        let commondir_file = git_dir.join("commondir");
+        if commondir_file.is_file() {
+            println!("cargo:rerun-if-changed={}", commondir_file.display());
+            match std::fs::read_to_string(&commondir_file) {
+                Ok(raw) => {
+                    let rel = PathBuf::from(raw.trim());
+                    if rel.is_absolute() {
+                        rel
+                    } else {
+                        git_dir.join(rel)
+                    }
+                }
+                Err(_) => git_dir.clone(),
+            }
+        } else {
+            git_dir.clone()
+        }
+    };
+
+    let head_path = git_dir.join("HEAD");
+    if !head_path.is_file() {
+        return;
+    }
+    println!("cargo:rerun-if-changed={}", head_path.display());
+
+    let Ok(head_raw) = std::fs::read_to_string(&head_path) else {
+        return;
+    };
+    if let Some(ref_name) = head_raw.trim().strip_prefix("ref:") {
+        let ref_rel = ref_name.trim();
+        let ref_in_git = git_dir.join(ref_rel);
+        let ref_in_common = common_dir.join(ref_rel);
+        if ref_in_git.is_file() {
+            println!("cargo:rerun-if-changed={}", ref_in_git.display());
+        } else if ref_in_common.is_file() {
+            println!("cargo:rerun-if-changed={}", ref_in_common.display());
+        } else {
+            let packed = common_dir.join("packed-refs");
+            if packed.is_file() {
+                println!("cargo:rerun-if-changed={}", packed.display());
+            }
+        }
+    }
+}
+
+fn query_git_head_commit(repo_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8(output.stdout).ok()?;
+    let trimmed = sha.trim();
+    if trimmed.len() == 40 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(trimmed.to_ascii_lowercase())
+    } else {
+        None
     }
 }

@@ -18,7 +18,7 @@ use gh_net::hd_assets::{
     HdTileConfig, HoyolabHdTileProvider, TILE_BASE, UndergroundOverlayConfig,
     UndergroundOverlayProvider,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -68,9 +68,50 @@ pub struct TrackingStack {
     pub minimap_tracker: HybridMinimapTracker,
     pub state_machine: MapScreenStateMachine,
     pub relocator_ready: bool,
+    /// Dataset directory actually loaded by this tracking stack.
+    pub data_dir: PathBuf,
+    /// Non-path label identifying the dataset source (`"installed"`, `"dev"`, `"bundle"`, `"env_override"`, `"custom"`).
+    pub data_source: String,
+}
+
+fn classify_data_source(paths: &AppPaths, dir: &Path) -> String {
+    if paths.dev_data_dir.as_deref() == Some(dir) {
+        return "dev".to_owned();
+    }
+    if std::env::var_os("GENSHIN_HELPER_DATA_DIR")
+        .is_some_and(|v| !v.to_string_lossy().trim().is_empty())
+        && dir == paths.data_dir
+    {
+        return "env_override".to_owned();
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+        && exe_dir.join("data") == dir
+    {
+        return "bundle".to_owned();
+    }
+    "installed".to_owned()
+}
+
+fn resolve_live_data_dir_and_source() -> (PathBuf, String) {
+    let paths = AppPaths::resolve();
+    let mm = gh_core::assets::resolve_data_asset(gh_core::assets::REQUIRED_ASSETS[0]);
+    let dir = if mm.is_file() {
+        mm.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| paths.data_dir.clone())
+    } else {
+        gh_core::assets::resolve_data_dir()
+    };
+    let source = classify_data_source(&paths, &dir);
+    (dir, source)
 }
 
 pub fn build_tracking_stack(opts: TrackingStackOptions) -> CoreResult<TrackingStack> {
+    let (data_dir, data_source) = match opts.explicit_data_dir {
+        Some(ref dir) => (dir.clone(), "custom".to_owned()),
+        None => resolve_live_data_dir_and_source(),
+    };
     let (locator, state_machine, npz_path, use_default_npz) = match opts.explicit_data_dir {
         Some(ref dir) => {
             let loc = Arc::new(MapLocator::with_paths(
@@ -180,5 +221,7 @@ pub fn build_tracking_stack(opts: TrackingStackOptions) -> CoreResult<TrackingSt
         minimap_tracker,
         state_machine,
         relocator_ready,
+        data_dir,
+        data_source,
     })
 }

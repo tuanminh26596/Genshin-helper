@@ -333,19 +333,18 @@ pub fn run_compact(opts: &CompactOptions) -> Result<CompactReport, String> {
         0.0
     };
 
-    if let Some(obj) = info_val.as_object_mut() {
-        obj.insert("frames".to_owned(), json!(kept_frames));
-        obj.insert("video_size_bytes".to_owned(), json!(output_bytes));
-        obj.insert("codec".to_owned(), json!(codec_name));
-        obj.insert("compact_profile".to_owned(), json!(opts.profile.as_str()));
-        obj.insert("crf".to_owned(), json!(eff_crf));
-        obj.insert("preset".to_owned(), json!(preset));
-        obj.insert(
-            "compacted_from".to_owned(),
-            json!(opts.source_dir.file_name().and_then(|n| n.to_str()).unwrap_or("")),
-        );
-        obj.insert("trimmed_range".to_owned(), json!([start_frame, end_frame]));
-    }
+    update_compacted_info(
+        &mut info_val,
+        kept_frames,
+        output_bytes,
+        codec_name,
+        opts.profile,
+        eff_crf,
+        preset,
+        &opts.source_dir,
+        start_frame,
+        end_frame,
+    );
     let out_info = out_dir.join("info.json");
     let info_bytes = serde_json::to_vec_pretty(&info_val)
         .map_err(|e| format!("failed to serialize info.json: {e}"))?;
@@ -371,6 +370,34 @@ pub fn run_compact(opts: &CompactOptions) -> Result<CompactReport, String> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn update_compacted_info(
+    info_val: &mut Value,
+    kept_frames: usize,
+    output_bytes: u64,
+    codec_name: &str,
+    profile: CompactProfile,
+    eff_crf: Option<u8>,
+    preset: &str,
+    source_dir: &Path,
+    start_frame: usize,
+    end_frame: usize,
+) {
+    if let Some(obj) = info_val.as_object_mut() {
+        obj.insert("frames".to_owned(), json!(kept_frames));
+        obj.insert("video_size_bytes".to_owned(), json!(output_bytes));
+        obj.insert("codec".to_owned(), json!(codec_name));
+        obj.insert("compact_profile".to_owned(), json!(profile.as_str()));
+        obj.insert("crf".to_owned(), json!(eff_crf));
+        obj.insert("preset".to_owned(), json!(preset));
+        obj.insert(
+            "compacted_from".to_owned(),
+            json!(source_dir.file_name().and_then(|n| n.to_str()).unwrap_or("")),
+        );
+        obj.insert("trimmed_range".to_owned(), json!([start_frame, end_frame]));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,5 +416,89 @@ mod tests {
             default_compact_out_dir(p),
             PathBuf::from("C:\\sessions\\sess_20261127_005004_compact")
         );
+    }
+
+    #[test]
+    fn compact_preserves_assets_cache_data_and_info_provenance() {
+        use gh_core::provenance::{DATASET_FILENAMES, DatasetFingerprint};
+
+        let root = std::env::temp_dir().join(format!(
+            "gh_sim_compact_prov_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("sess_src");
+        let dst = root.join("sess_src_compact");
+        fs::create_dir_all(src.join("assets_cache").join("data")).unwrap();
+        fs::create_dir_all(src.join("assets_cache").join("tiles").join("2").join("0")).unwrap();
+        fs::write(
+            src.join("assets_cache").join("data").join(DATASET_FILENAMES[0]),
+            b"{\"version\":\"4.0.0\",\"maps\":{}}",
+        )
+        .unwrap();
+        fs::write(
+            src.join("assets_cache").join("data").join(DATASET_FILENAMES[1]),
+            b"TERRAIN",
+        )
+        .unwrap();
+        fs::write(
+            src.join("assets_cache").join("tiles").join("2").join("0").join("1_2.webp"),
+            b"WEBP",
+        )
+        .unwrap();
+
+        let copied = copy_dir_recursive(&src.join("assets_cache"), &dst.join("assets_cache"))
+            .expect("copy assets_cache");
+        assert_eq!(copied, 3);
+        assert_eq!(
+            fs::read(dst.join("assets_cache").join("data").join(DATASET_FILENAMES[0])).unwrap(),
+            b"{\"version\":\"4.0.0\",\"maps\":{}}"
+        );
+        assert_eq!(
+            fs::read(dst.join("assets_cache").join("data").join(DATASET_FILENAMES[1])).unwrap(),
+            b"TERRAIN"
+        );
+        assert!(
+            dst.join("assets_cache")
+                .join("tiles")
+                .join("2")
+                .join("0")
+                .join("1_2.webp")
+                .is_file()
+        );
+
+        let mut fp = DatasetFingerprint::default();
+        fp.0.insert(DATASET_FILENAMES[0].to_owned(), Some("aaaa".to_owned()));
+        fp.0.insert(DATASET_FILENAMES[1].to_owned(), Some("bbbb".to_owned()));
+        let provenance = json!({
+            "app_version": "5.7.0",
+            "git_commit": "0123456789abcdef0123456789abcdef01234567",
+            "data_source": "installed",
+            "datasets": fp,
+        });
+        let mut info = json!({
+            "schema_version": 1,
+            "frames": 100,
+            "codec": "libx264rgb",
+            "provenance": provenance.clone(),
+        });
+        update_compacted_info(
+            &mut info,
+            50,
+            4096,
+            "libx265",
+            CompactProfile::Archive,
+            Some(22),
+            "fast",
+            &src,
+            10,
+            59,
+        );
+        assert_eq!(info["frames"], json!(50));
+        assert_eq!(info["codec"], json!("libx265"));
+        assert_eq!(info["trimmed_range"], json!([10, 59]));
+        assert_eq!(info["provenance"], provenance);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

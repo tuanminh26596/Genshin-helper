@@ -9,8 +9,10 @@ use crate::replay::{
     DEFAULT_DRIFT_THRESHOLD_W, ObservedFrame, ReplayOptions, ReplayReport, angle_diff_deg,
     percentile, round3, run_replay_with_poses,
 };
+use gh_app::BUILD_GIT_COMMIT;
 use gh_core::atomic_io::{write_bytes_atomic, write_json_atomic};
-use gh_net::update_check::sha256_file;
+use gh_core::provenance::ReplayProvenance;
+use gh_core::sha256::sha256_file;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -356,6 +358,8 @@ pub struct QaSessionResult {
     pub heading_stability: SessionHeadingStability,
     #[serde(default)]
     pub live_mmap_latency: LiveMMapLatency,
+    #[serde(default)]
+    pub provenance: Option<ReplayProvenance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1149,7 +1153,7 @@ fn fmt_opt_w(v: Option<f64>) -> String {
 
 pub fn format_qa_header() -> String {
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:>6}  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:>6}  {}",
         "Session",
         "Status",
         "Frames",
@@ -1160,9 +1164,68 @@ pub fn format_qa_header() -> String {
         "Arrow (b/c flips)",
         "HUD(p50/max)",
         "InGame",
+        "Prov",
         "Time",
         "Reason"
     )
+}
+
+/// Informational provenance column marker (`ok`, `data!`, `code!`, `data!code!`, `code?`,
+/// `data!code?`, or `n/a` when the session has no provenance stamp).
+pub fn format_prov_col(prov: Option<&ReplayProvenance>) -> String {
+    let Some(p) = prov else {
+        return "n/a".to_owned();
+    };
+    if p.recorded.is_none() {
+        return "n/a".to_owned();
+    }
+    let data_diff = p.datasets_match == Some(false);
+    let code_diff = p.same_commit == Some(false);
+    let code_unknown = p.same_commit.is_none();
+    match (data_diff, code_diff, code_unknown) {
+        (true, true, _) => "data!code!".to_owned(),
+        (true, false, true) => "data!code?".to_owned(),
+        (true, false, false) => "data!".to_owned(),
+        (false, true, _) => "code!".to_owned(),
+        (false, false, true) => "code?".to_owned(),
+        (false, false, false) => "ok".to_owned(),
+    }
+}
+
+fn short_commit(sha: &str) -> &str {
+    let t = sha.trim();
+    if t.len() >= 8 { &t[..8] } else { t }
+}
+
+/// Informational provenance notes (never affect pass/fail or thresholds).
+pub fn provenance_notes(prov: Option<&ReplayProvenance>, current_commit: &str) -> Vec<String> {
+    let Some(p) = prov else {
+        return vec!["provenance unknown".to_owned()];
+    };
+    let Some(ref rec) = p.recorded else {
+        return vec!["provenance unknown".to_owned()];
+    };
+    let mut notes = Vec::new();
+    if p.datasets_match == Some(false) {
+        notes.push(format!(
+            "datasets differ (rec={}, replay={})",
+            rec.data_source, p.replay_data_source
+        ));
+    }
+    match p.same_commit {
+        Some(false) => {
+            notes.push(format!(
+                "commit differs (rec={}, cur={})",
+                short_commit(&rec.git_commit),
+                short_commit(current_commit)
+            ));
+        }
+        None => {
+            notes.push("commit unknown".to_owned());
+        }
+        Some(true) => {}
+    }
+    notes
 }
 
 /// `ok/total` web-confirmed M-opens that got an in-game toast, `MISS` when any did not, `-` when
@@ -1221,8 +1284,9 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
         _ => "n/a".to_owned(),
     };
     let in_game_col = format_in_game_col(&r.live_mmap_latency);
+    let prov_col = format_prov_col(r.provenance.as_ref());
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:>5.1}s  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:>5.1}s  {}",
         r.session_name,
         r.status,
         r.frames,
@@ -1233,6 +1297,7 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
         arrow_col,
         hud_col,
         in_game_col,
+        prov_col,
         r.wall_elapsed_s,
         r.reason
     )
@@ -1266,7 +1331,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
     let total_t0 = Instant::now();
 
     let header = format_qa_header();
-    let sep = "-".repeat(header.len().min(186));
+    let sep = "-".repeat(header.len().min(200));
     println!("{header}");
     println!("{sep}");
     let _ = std::io::stdout().flush();
@@ -1302,6 +1367,8 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
         let meta_path = sdir.join("meta.jsonl");
         let live_meta_heading_stability = load_live_meta_heading_stability(&meta_path);
         let live_mmap_latency = load_live_mmap_latency(&meta_path);
+        let session_prov = report.provenance.clone();
+        let prov_notes = provenance_notes(Some(&session_prov), BUILD_GIT_COMMIT);
         let blessed_path = sdir.join(BLESSED_POSES_FILENAME);
 
         let result = if opts.bless {
@@ -1337,6 +1404,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                 ));
             }
             let passed = reasons.is_empty();
+            let notes = prov_notes;
             QaSessionResult {
                 session_name,
                 passed,
@@ -1346,12 +1414,16 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                     "KHÔNG ĐẠT".to_owned()
                 },
                 reason: if passed {
-                    "blessed ok".to_owned()
+                    if notes.is_empty() {
+                        "blessed ok".to_owned()
+                    } else {
+                        format!("blessed ok ({})", notes.join("; "))
+                    }
                 } else {
                     reasons.join("; ")
                 },
                 reasons,
-                notes: Vec::new(),
+                notes,
                 frames: report.performance.frames_processed,
                 codec,
                 color_safe,
@@ -1373,6 +1445,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                     live_meta: live_meta_heading_stability,
                 },
                 live_mmap_latency,
+                provenance: Some(session_prov),
             }
         } else {
             match baseline.sessions.get(&session_name) {
@@ -1382,7 +1455,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                     status: "KHÔNG ĐẠT".to_owned(),
                     reason: "thiếu phiên trong tests/qa_baseline.json".to_owned(),
                     reasons: vec!["thiếu phiên trong tests/qa_baseline.json".to_owned()],
-                    notes: Vec::new(),
+                    notes: prov_notes,
                     frames: report.performance.frames_processed,
                     codec,
                     color_safe,
@@ -1404,6 +1477,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                         live_meta: live_meta_heading_stability,
                     },
                     live_mmap_latency,
+                    provenance: Some(session_prov),
                 },
                 Some(base_sess) => {
                     let mut reasons = Vec::new();
@@ -1461,6 +1535,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                         }
                     }
 
+                    notes.extend(prov_notes);
                     let passed = reasons.is_empty();
                     QaSessionResult {
                         session_name,
@@ -1502,6 +1577,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                             live_meta: live_meta_heading_stability,
                         },
                         live_mmap_latency,
+                        provenance: Some(session_prov),
                     }
                 }
             }
@@ -2484,6 +2560,7 @@ mod tests {
                 }),
             },
             live_mmap_latency: LiveMMapLatency::default(),
+            provenance: None,
         };
         let formatted = format_qa_row(&row_with_live);
         assert!(
@@ -2511,6 +2588,7 @@ mod tests {
             "unexpected HUD column in row: {formatted_hud}"
         );
         assert!(hdr.contains("InGame"), "header missing InGame: {hdr}");
+        assert!(hdr.contains("Prov"), "header missing Prov: {hdr}");
 
         let mut row_missing = row_with_hud;
         row_missing.live_mmap_latency.summary.in_game_audited = true;
@@ -2696,5 +2774,162 @@ mod tests {
         assert_eq!(legacy.summary.median_hud_s, None);
         assert_eq!(legacy.summary.max_hud_s, None);
         assert_eq!(legacy.summary.no_hud_count, 0);
+    }
+
+    #[test]
+    fn qa_prov_column_and_notes_cover_all_states_without_affecting_pass_fail() {
+        use gh_core::provenance::{DatasetFingerprint, SessionProvenance};
+
+        let mk_prov = |datasets_match: Option<bool>, same_commit: Option<bool>| ReplayProvenance {
+            recorded: Some(SessionProvenance {
+                app_version: "5.7.0".to_owned(),
+                git_commit: "1111111122222222333333334444444455555555".to_owned(),
+                data_source: "installed".to_owned(),
+                datasets: DatasetFingerprint::default(),
+            }),
+            replay_data_source: "data_dir".to_owned(),
+            replay_datasets: DatasetFingerprint::default(),
+            datasets_match,
+            same_commit,
+        };
+
+        // None / unrecorded -> n/a
+        assert_eq!(format_prov_col(None), "n/a");
+        assert_eq!(provenance_notes(None, "aaaa"), vec!["provenance unknown"]);
+        let legacy_prov = ReplayProvenance {
+            recorded: None,
+            replay_data_source: "data_dir".to_owned(),
+            replay_datasets: DatasetFingerprint::default(),
+            datasets_match: None,
+            same_commit: None,
+        };
+        assert_eq!(format_prov_col(Some(&legacy_prov)), "n/a");
+        assert_eq!(
+            provenance_notes(Some(&legacy_prov), "aaaa"),
+            vec!["provenance unknown"]
+        );
+
+        // Exact match -> ok, no notes
+        let p_ok = mk_prov(Some(true), Some(true));
+        assert_eq!(format_prov_col(Some(&p_ok)), "ok");
+        assert!(provenance_notes(Some(&p_ok), "1111111122222222333333334444444455555555").is_empty());
+
+        // Data differs only -> data!
+        let p_data = mk_prov(Some(false), Some(true));
+        assert_eq!(format_prov_col(Some(&p_data)), "data!");
+        let n_data = provenance_notes(Some(&p_data), "1111111122222222333333334444444455555555");
+        assert_eq!(n_data.len(), 1);
+        assert!(n_data[0].contains("datasets differ"));
+
+        // Commit differs only -> code!
+        let p_code = mk_prov(Some(true), Some(false));
+        assert_eq!(format_prov_col(Some(&p_code)), "code!");
+        let n_code = provenance_notes(Some(&p_code), "abcdef1234567890");
+        assert_eq!(n_code.len(), 1);
+        assert!(n_code[0].contains("commit differs"));
+        assert!(n_code[0].contains("11111111"));
+        assert!(n_code[0].contains("abcdef12"));
+
+        // Both differ -> data!code!
+        let p_both = mk_prov(Some(false), Some(false));
+        assert_eq!(format_prov_col(Some(&p_both)), "data!code!");
+        let n_both = provenance_notes(Some(&p_both), "abcdef1234567890");
+        assert_eq!(n_both.len(), 2);
+        assert!(n_both[0].contains("datasets differ"));
+        assert!(n_both[1].contains("commit differs"));
+
+        // Commit unknown -> code? / data!code?
+        let p_code_unk = mk_prov(Some(true), None);
+        assert_eq!(format_prov_col(Some(&p_code_unk)), "code?");
+        assert_eq!(
+            provenance_notes(Some(&p_code_unk), "unknown"),
+            vec!["commit unknown"]
+        );
+        let p_data_code_unk = mk_prov(Some(false), None);
+        assert_eq!(format_prov_col(Some(&p_data_code_unk)), "data!code?");
+
+        // Informational-only end-to-end check: a blessed session with mismatched provenance STILL PASSES QA
+        use gh_core::provenance::DATASET_FILENAMES;
+
+        let tmp = TempDir::new("gh_sim_qa_prov_e2e");
+        let data_dir = tmp.0.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        write_json_atomic(
+            &data_dir.join(DATASET_FILENAMES[0]),
+            &json!({"version": "4.0.0", "maps": {}}),
+        )
+        .unwrap();
+
+        let sessions_dir = tmp.0.join("qa_sessions");
+        let sdir = sessions_dir.join("sess_prov_diff");
+        std::fs::create_dir_all(sdir.join("frames")).unwrap();
+        let img = image::RgbaImage::from_pixel(434, 348, image::Rgba([20, 40, 60, 255]));
+        for i in 1..=1usize {
+            img.save(sdir.join("frames").join(format!("{i:06}.png")))
+                .unwrap();
+        }
+        std::fs::write(
+            sdir.join("meta.jsonl"),
+            "{\"i\":1,\"ts\":10.0,\"frame_w\":2560,\"frame_h\":1440,\"state\":\"UNLOCALIZED\"}\n",
+        )
+        .unwrap();
+        let mut bad_fp = DatasetFingerprint::default();
+        bad_fp
+            .0
+            .insert(DATASET_FILENAMES[0].to_owned(), Some("f".repeat(64)));
+        write_json_atomic(
+            &sdir.join("info.json"),
+            &json!({
+                "codec": "png_frames",
+                "frames": 1,
+                "provenance": {
+                    "app_version": "5.7.0",
+                    "git_commit": "0".repeat(40),
+                    "data_source": "installed",
+                    "datasets": bad_fp
+                }
+            }),
+        )
+        .unwrap();
+
+        let baseline_path = tmp.0.join("qa_baseline.json");
+        let gt_file = tmp.0.join("verified_gt.json");
+        let _ = run_qa(&QaOptions {
+            sessions_dir: sessions_dir.clone(),
+            data_dir: data_dir.clone(),
+            ffmpeg_path: None,
+            baseline_path: baseline_path.clone(),
+            gt_file: gt_file.clone(),
+            only: vec![],
+            out_dir: None,
+            bless: true,
+            overrides: QaThresholdOverrides::default(),
+        })
+        .unwrap();
+
+        let qa_rep = run_qa(&QaOptions {
+            sessions_dir,
+            data_dir,
+            ffmpeg_path: None,
+            baseline_path,
+            gt_file,
+            only: vec![],
+            out_dir: None,
+            bless: false,
+            overrides: QaThresholdOverrides::default(),
+        })
+        .unwrap();
+        assert!(qa_rep.passed, "provenance mismatch must NEVER fail QA");
+        let res = &qa_rep.sessions[0];
+        assert_eq!(res.status, "ĐẠT");
+        let prov_col = format_prov_col(res.provenance.as_ref());
+        if !BUILD_GIT_COMMIT.eq_ignore_ascii_case("unknown") {
+            assert_eq!(prov_col, "data!code!");
+        } else {
+            assert_eq!(prov_col, "data!code?");
+        }
+        assert!(res.notes.iter().any(|n| n.contains("datasets differ")));
+        let row = format_qa_row(res);
+        assert!(row.contains(&prov_col), "row missing Prov marker: {row}");
     }
 }
