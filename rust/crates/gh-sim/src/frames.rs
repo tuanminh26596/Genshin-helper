@@ -1,18 +1,29 @@
-//! Data-driven still-frame layout/crop regression fixtures (`gh-sim frames`).
+//! Data-driven still-frame regression fixtures (`gh-sim frames`).
 //!
-//! Validates production [`gh_core::ui_layout::compute_ui_layout`] and the tracker
-//! HUD crop formula against real user-reported screenshots stored outside git
-//! (`scratch/`). Missing images are reported as `skipped` (never `pass`).
+//! Validates:
+//! - Production [`gh_core::ui_layout::compute_ui_layout`] and the tracker HUD crop formula
+//!   against real user-reported screenshots.
+//! - Production [`gh_cv::locator::MapLocator::locate_player_frame`] (original + deterministic
+//!   +/-2 LSB perturbed variants) against recorded M-Map screenshots.
+//!
+//! Screenshots live outside git (`scratch/`). Missing images or missing map datasets are
+//! reported as `skipped` (never `pass`).
 
-use gh_core::frame::RectI32;
+use gh_core::frame::{FrameBuf, PixelFormat, RectI32};
+use gh_core::traits::OcrProvider;
 use gh_core::ui_layout::compute_ui_layout;
+use gh_cv::locator::{LocateResult, LocatorPaths, MapLocator};
+use gh_win32::win_ocr::WindowsOcrService;
+use image::ImageReader;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 pub const FRAME_FIXTURE_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_FRAME_FIXTURES_DIR: &str = "tests/frame_fixtures";
+pub const DEFAULT_DATA_DIR: &str = "data";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +59,30 @@ pub struct FixtureCircle {
     pub radius: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrevWorldHint {
+    pub map_id: i32,
+    pub world_x: f64,
+    pub world_y: f64,
+    /// Repo-relative anchor frame used to prime `MapLocator`'s internal
+    /// `last_known_pos`/`last_map_id` state via public `locate_player_frame`.
+    pub prime_image: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MMapLocateExpectation {
+    pub expected_map_id: i32,
+    pub expected_world_x: f64,
+    pub expected_world_y: f64,
+    pub pos_tolerance_w: f64,
+    #[serde(default)]
+    pub prev_hint: Option<PrevWorldHint>,
+    #[serde(default)]
+    pub perturb_seeds: Vec<u64>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -66,15 +101,28 @@ pub struct FrameFixture {
     pub is_gamepad: bool,
     #[serde(default)]
     pub known_bug: Option<String>,
-    pub expected_minimap_rect: FixtureRect,
-    pub expected_paimon_rect: FixtureRect,
-    pub tolerance_px: i32,
-    pub true_minimap_circle: FixtureCircle,
+    #[serde(default)]
+    pub expected_minimap_rect: Option<FixtureRect>,
+    #[serde(default)]
+    pub expected_paimon_rect: Option<FixtureRect>,
+    #[serde(default)]
+    pub tolerance_px: Option<i32>,
+    #[serde(default)]
+    pub true_minimap_circle: Option<FixtureCircle>,
     #[serde(default = "default_true")]
     pub expect_circle_in_crop: bool,
+    #[serde(default)]
+    pub mmap_locate: Option<MMapLocateExpectation>,
 }
 
 impl FrameFixture {
+    pub fn has_layout_check(&self) -> bool {
+        self.expected_minimap_rect.is_some()
+            && self.expected_paimon_rect.is_some()
+            && self.tolerance_px.is_some()
+            && self.true_minimap_circle.is_some()
+    }
+
     pub fn validate(&self, source_label: &str) -> Result<(), String> {
         if self.schema_version != FRAME_FIXTURE_SCHEMA_VERSION {
             return Err(format!(
@@ -105,31 +153,90 @@ impl FrameFixture {
                 self.width, self.height
             ));
         }
-        if self.tolerance_px < 0 {
+
+        let layout_field_count = usize::from(self.expected_minimap_rect.is_some())
+            + usize::from(self.expected_paimon_rect.is_some())
+            + usize::from(self.tolerance_px.is_some())
+            + usize::from(self.true_minimap_circle.is_some());
+        if layout_field_count != 0 && layout_field_count != 4 {
             return Err(format!(
-                "{source_label}: tolerance_px must be >= 0, got {}",
-                self.tolerance_px
+                "{source_label}: layout fields (expected_minimap_rect, expected_paimon_rect, tolerance_px, true_minimap_circle) must all be present or all omitted"
             ));
         }
-        if self.expected_minimap_rect.width <= 0 || self.expected_minimap_rect.height <= 0 {
+        let has_layout = layout_field_count == 4;
+        if !has_layout && self.mmap_locate.is_none() {
             return Err(format!(
-                "{source_label}: expected_minimap_rect must have positive size, got {}",
-                self.expected_minimap_rect
+                "{source_label}: fixture must specify at least one check mode (layout fields or mmap_locate)"
             ));
         }
-        if self.expected_paimon_rect.width <= 0 || self.expected_paimon_rect.height <= 0 {
-            return Err(format!(
-                "{source_label}: expected_paimon_rect must have positive size, got {}",
-                self.expected_paimon_rect
-            ));
+
+        if has_layout {
+            let tol = self.tolerance_px.unwrap();
+            let mm = self.expected_minimap_rect.unwrap();
+            let pm = self.expected_paimon_rect.unwrap();
+            let c = self.true_minimap_circle.unwrap();
+            if tol < 0 {
+                return Err(format!(
+                    "{source_label}: tolerance_px must be >= 0, got {tol}"
+                ));
+            }
+            if mm.width <= 0 || mm.height <= 0 {
+                return Err(format!(
+                    "{source_label}: expected_minimap_rect must have positive size, got {mm}"
+                ));
+            }
+            if pm.width <= 0 || pm.height <= 0 {
+                return Err(format!(
+                    "{source_label}: expected_paimon_rect must have positive size, got {pm}"
+                ));
+            }
+            if !c.cx.is_finite() || !c.cy.is_finite() || !c.radius.is_finite() || c.radius <= 0.0 {
+                return Err(format!(
+                    "{source_label}: true_minimap_circle must be finite with radius > 0, got ({}, {}, r={})",
+                    c.cx, c.cy, c.radius
+                ));
+            }
         }
-        let c = self.true_minimap_circle;
-        if !c.cx.is_finite() || !c.cy.is_finite() || !c.radius.is_finite() || c.radius <= 0.0 {
-            return Err(format!(
-                "{source_label}: true_minimap_circle must be finite with radius > 0, got ({}, {}, r={})",
-                c.cx, c.cy, c.radius
-            ));
+
+        if let Some(m) = &self.mmap_locate {
+            if !m.expected_world_x.is_finite() || !m.expected_world_y.is_finite() {
+                return Err(format!(
+                    "{source_label}: mmap_locate expected_world_x/y must be finite, got ({}, {})",
+                    m.expected_world_x, m.expected_world_y
+                ));
+            }
+            if !m.pos_tolerance_w.is_finite() || m.pos_tolerance_w <= 0.0 {
+                return Err(format!(
+                    "{source_label}: mmap_locate pos_tolerance_w must be finite and > 0, got {}",
+                    m.pos_tolerance_w
+                ));
+            }
+            if let Some(hint) = &m.prev_hint {
+                if !hint.world_x.is_finite() || !hint.world_y.is_finite() {
+                    return Err(format!(
+                        "{source_label}: mmap_locate.prev_hint world_x/y must be finite, got ({}, {})",
+                        hint.world_x, hint.world_y
+                    ));
+                }
+                if hint.prime_image.trim().is_empty() {
+                    return Err(format!(
+                        "{source_label}: mmap_locate.prev_hint.prime_image must be non-empty"
+                    ));
+                }
+                let p_path = Path::new(&hint.prime_image);
+                if p_path.is_absolute()
+                    || p_path
+                        .components()
+                        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+                {
+                    return Err(format!(
+                        "{source_label}: mmap_locate.prev_hint.prime_image must be a safe repo-relative path, got '{}'",
+                        hint.prime_image
+                    ));
+                }
+            }
         }
+
         if let Some(bug) = &self.known_bug
             && bug.trim().is_empty()
         {
@@ -197,6 +304,7 @@ impl FramesReport {
 pub struct FramesOptions {
     pub dir: PathBuf,
     pub repo_root: Option<PathBuf>,
+    pub data_dir: PathBuf,
 }
 
 impl Default for FramesOptions {
@@ -204,6 +312,7 @@ impl Default for FramesOptions {
         Self {
             dir: PathBuf::from(DEFAULT_FRAME_FIXTURES_DIR),
             repo_root: None,
+            data_dir: PathBuf::from(DEFAULT_DATA_DIR),
         }
     }
 }
@@ -224,6 +333,64 @@ pub fn compute_tracker_hud_crop(
     let hud_w = cw.min((minimap_rect.x + minimap_rect.width + cal_pad_x).max(paimon_maybe_rect.x + paimon_maybe_rect.width));
     let hud_h = ch.min((minimap_rect.y + minimap_rect.height + cal_pad_y).max(paimon_maybe_rect.y + paimon_maybe_rect.height));
     (hud_w, hud_h)
+}
+
+#[inline]
+fn splitmix64_next(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Generates a deterministic perturbed copy of a BGRA8 frame by adding independent
+/// pseudo-random `[-2, +2]` LSB noise to each B, G, R channel (saturating) and
+/// preserving `alpha = 255`.
+pub fn perturb_bgra_frame(src: &FrameBuf, seed: u64) -> FrameBuf {
+    debug_assert_eq!(src.format, PixelFormat::Bgra8);
+    let mut out = FrameBuf::new_zeroed(src.width, src.height, PixelFormat::Bgra8);
+    let mut state = seed;
+    for (sp, dp) in src
+        .data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(out.data.as_chunks_mut::<4>().0.iter_mut())
+    {
+        let r = splitmix64_next(&mut state);
+        let db = ((r & 0xFFFF) % 5) as i8 - 2;
+        let dg = (((r >> 16) & 0xFFFF) % 5) as i8 - 2;
+        let dr = (((r >> 32) & 0xFFFF) % 5) as i8 - 2;
+        dp[0] = sp[0].saturating_add_signed(db);
+        dp[1] = sp[1].saturating_add_signed(dg);
+        dp[2] = sp[2].saturating_add_signed(dr);
+        dp[3] = 255;
+    }
+    out
+}
+
+fn load_png_as_bgra(path: &Path) -> Result<FrameBuf, String> {
+    let dyn_img = ImageReader::open(path)
+        .map_err(|e| format!("failed to open {}: {e}", path.display()))?
+        .decode()
+        .map_err(|e| format!("failed to decode {}: {e}", path.display()))?;
+    let rgba = dyn_img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let mut out = FrameBuf::new_zeroed(w, h, PixelFormat::Bgra8);
+    for (src, dst) in rgba
+        .as_raw()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(out.data.as_chunks_mut::<4>().0.iter_mut())
+    {
+        dst[0] = src[2];
+        dst[1] = src[1];
+        dst[2] = src[0];
+        dst[3] = 255;
+    }
+    Ok(out)
 }
 
 fn resolve_main_checkout(repo_root: &Path) -> Option<PathBuf> {
@@ -264,6 +431,58 @@ fn resolve_fixture_image(
         }
     }
     None
+}
+
+fn has_required_locator_datasets(dir: &Path) -> bool {
+    dir.join("multimap_v4.json").is_file()
+        && dir.join("terrain_n2_v4.npz").is_file()
+        && dir.join("cave_masks_v4.npz").is_file()
+}
+
+fn resolve_data_dir(
+    repo_root: &Path,
+    main_checkout: Option<&Path>,
+    data_dir: &Path,
+) -> Option<PathBuf> {
+    if data_dir.is_absolute() {
+        return has_required_locator_datasets(data_dir).then(|| data_dir.to_path_buf());
+    }
+    let local = repo_root.join(data_dir);
+    if has_required_locator_datasets(&local) {
+        return Some(local);
+    }
+    if let Some(main_root) = main_checkout {
+        let candidate = main_root.join(data_dir);
+        if has_required_locator_datasets(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn build_frame_locator(data_dir: &Path) -> MapLocator {
+    let ocr = WindowsOcrService::try_new()
+        .ok()
+        .map(|s| Arc::new(s) as Arc<dyn OcrProvider>);
+    MapLocator::with_paths(
+        LocatorPaths {
+            db_path: Some(data_dir.join("multimap_v4.json")),
+            terrain_npz_path: Some(data_dir.join("terrain_n2_v4.npz")),
+            cave_masks_npz_path: Some(data_dir.join("cave_masks_v4.npz")),
+            ui_anchors_npz_path: Some(data_dir.join("ui_anchors_v4.npz")),
+            legacy_underground_db_path: Some(data_dir.join("underground_db.json")),
+        },
+        ocr,
+    )
+}
+
+fn classify_outcome(all_passed: bool, has_known_bug: bool) -> FrameOutcome {
+    match (all_passed, has_known_bug) {
+        (true, false) => FrameOutcome::Pass,
+        (false, false) => FrameOutcome::Fail,
+        (false, true) => FrameOutcome::KnownFail,
+        (true, true) => FrameOutcome::Xpass,
+    }
 }
 
 fn check_rect_within_tol(
@@ -321,11 +540,63 @@ fn check_circle_inside_box(
     }
 }
 
+fn check_locate_result(
+    variant_label: &str,
+    res: Option<&LocateResult>,
+    exp: &MMapLocateExpectation,
+    failures: &mut Vec<String>,
+) {
+    let Some(r) = res else {
+        failures.push(format!(
+            "mmap_locate[{variant_label}]: locate_player_frame returned None (arrow not detected); exp map_id={} ({:.1}, {:.1}) tol={:.1}w",
+            exp.expected_map_id, exp.expected_world_x, exp.expected_world_y, exp.pos_tolerance_w
+        ));
+        return;
+    };
+    let inliers_str = r
+        .inliers_count
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "none".to_owned());
+    if !r.has_world_coords {
+        failures.push(format!(
+            "mmap_locate[{variant_label}]: map_id={:?}, pos=none, inliers={inliers_str}, has_world_coords=false (detected={}); exp map_id={} ({:.1}, {:.1}) tol={:.1}w",
+            r.map_id, r.detected, exp.expected_map_id, exp.expected_world_x, exp.expected_world_y, exp.pos_tolerance_w
+        ));
+        return;
+    }
+    let (actual_x, actual_y) = match (r.world_x, r.world_y) {
+        (Some(x), Some(y)) if x.is_finite() && y.is_finite() => (x, y),
+        _ => {
+            failures.push(format!(
+                "mmap_locate[{variant_label}]: map_id={:?}, non-finite world coords ({:?}, {:?}), inliers={inliers_str}, has_world_coords={}",
+                r.map_id, r.world_x, r.world_y, r.has_world_coords
+            ));
+            return;
+        }
+    };
+    let dist_w = (actual_x - exp.expected_world_x).hypot(actual_y - exp.expected_world_y);
+    let map_ok = r.map_id == Some(exp.expected_map_id);
+    let pos_ok = dist_w <= exp.pos_tolerance_w;
+    if !map_ok || !pos_ok {
+        failures.push(format!(
+            "mmap_locate[{variant_label}]: map_id={:?} (exp {}), pos=({actual_x:.1}, {actual_y:.1}) vs ({:.1}, {:.1}), dist_w={dist_w:.1} (tol {:.1}), inliers={inliers_str}, has_world_coords={}",
+            r.map_id,
+            exp.expected_map_id,
+            exp.expected_world_x,
+            exp.expected_world_y,
+            exp.pos_tolerance_w,
+            r.has_world_coords
+        ));
+    }
+}
+
 pub fn evaluate_fixture(
     fixture: &FrameFixture,
     fixture_path: &Path,
     repo_root: &Path,
     main_checkout: Option<&Path>,
+    locator: Option<&MapLocator>,
+    missing_data_reason: Option<&str>,
 ) -> FrameCheckResult {
     let fixture_path_str = fixture_path.display().to_string();
     let Some(resolved_image) = resolve_fixture_image(repo_root, main_checkout, &fixture.image)
@@ -339,6 +610,45 @@ pub fn evaluate_fixture(
             failures: Vec::new(),
             skip_reason: Some(format!("image not found: {}", fixture.image)),
         };
+    };
+
+    if fixture.mmap_locate.is_some() && locator.is_none() {
+        return FrameCheckResult {
+            name: fixture.name.clone(),
+            fixture_path: fixture_path_str,
+            resolved_image: Some(resolved_image.display().to_string()),
+            outcome: FrameOutcome::Skipped,
+            known_bug: fixture.known_bug.clone(),
+            failures: Vec::new(),
+            skip_reason: Some(
+                missing_data_reason
+                    .unwrap_or("required map datasets missing in data_dir")
+                    .to_owned(),
+            ),
+        };
+    }
+
+    let resolved_prime_image = if let Some(hint) = fixture
+        .mmap_locate
+        .as_ref()
+        .and_then(|m| m.prev_hint.as_ref())
+    {
+        match resolve_fixture_image(repo_root, main_checkout, &hint.prime_image) {
+            Some(p) => Some(p),
+            None => {
+                return FrameCheckResult {
+                    name: fixture.name.clone(),
+                    fixture_path: fixture_path_str,
+                    resolved_image: Some(resolved_image.display().to_string()),
+                    outcome: FrameOutcome::Skipped,
+                    known_bug: fixture.known_bug.clone(),
+                    failures: Vec::new(),
+                    skip_reason: Some(format!("prime_image not found: {}", hint.prime_image)),
+                };
+            }
+        }
+    } else {
+        None
     };
 
     let mut failures = Vec::new();
@@ -361,70 +671,132 @@ pub fn evaluate_fixture(
         }
     }
 
-    // (b) Call production compute_ui_layout
-    match compute_ui_layout(fixture.width, fixture.height, fixture.is_gamepad) {
-        Ok(layout) => {
-            // (c) minimap_rect vs expected_minimap_rect
-            check_rect_within_tol(
-                "minimap_rect",
-                FixtureRect::from_rect_i32(layout.minimap_rect),
-                fixture.expected_minimap_rect,
-                fixture.tolerance_px,
-                &mut failures,
-            );
-
-            // (d) paimon_rect vs expected_paimon_rect
-            check_rect_within_tol(
-                "paimon_rect",
-                FixtureRect::from_rect_i32(layout.paimon_rect),
-                fixture.expected_paimon_rect,
-                fixture.tolerance_px,
-                &mut failures,
-            );
-
-            // (e) true_minimap_circle inside layout.minimap_rect AND tracker hud_crop
-            if fixture.expect_circle_in_crop {
-                let mm = layout.minimap_rect;
-                check_circle_inside_box(
-                    "layout.minimap_rect",
-                    fixture.true_minimap_circle,
-                    mm.x as f64,
-                    mm.y as f64,
-                    (mm.x + mm.width) as f64,
-                    (mm.y + mm.height) as f64,
+    // (b) Optional layout / HUD crop checks
+    if fixture.has_layout_check() {
+        let exp_mm = fixture.expected_minimap_rect.unwrap();
+        let exp_pm = fixture.expected_paimon_rect.unwrap();
+        let tol = fixture.tolerance_px.unwrap();
+        let true_circle = fixture.true_minimap_circle.unwrap();
+        match compute_ui_layout(fixture.width, fixture.height, fixture.is_gamepad) {
+            Ok(layout) => {
+                check_rect_within_tol(
+                    "minimap_rect",
+                    FixtureRect::from_rect_i32(layout.minimap_rect),
+                    exp_mm,
+                    tol,
                     &mut failures,
                 );
-
-                let (hud_w, hud_h) = compute_tracker_hud_crop(
-                    fixture.width,
-                    fixture.height,
-                    layout.minimap_rect,
-                    layout.paimon_maybe_rect,
-                    layout.scale_ui,
-                );
-                check_circle_inside_box(
-                    "tracker hud_crop",
-                    fixture.true_minimap_circle,
-                    0.0,
-                    0.0,
-                    hud_w as f64,
-                    hud_h as f64,
+                check_rect_within_tol(
+                    "paimon_rect",
+                    FixtureRect::from_rect_i32(layout.paimon_rect),
+                    exp_pm,
+                    tol,
                     &mut failures,
                 );
+                if fixture.expect_circle_in_crop {
+                    let mm = layout.minimap_rect;
+                    check_circle_inside_box(
+                        "layout.minimap_rect",
+                        true_circle,
+                        mm.x as f64,
+                        mm.y as f64,
+                        (mm.x + mm.width) as f64,
+                        (mm.y + mm.height) as f64,
+                        &mut failures,
+                    );
+
+                    let (hud_w, hud_h) = compute_tracker_hud_crop(
+                        fixture.width,
+                        fixture.height,
+                        layout.minimap_rect,
+                        layout.paimon_maybe_rect,
+                        layout.scale_ui,
+                    );
+                    check_circle_inside_box(
+                        "tracker hud_crop",
+                        true_circle,
+                        0.0,
+                        0.0,
+                        hud_w as f64,
+                        hud_h as f64,
+                        &mut failures,
+                    );
+                }
             }
-        }
-        Err(err) => {
-            failures.push(format!("compute_ui_layout failed: {err}"));
+            Err(err) => {
+                failures.push(format!("compute_ui_layout failed: {err}"));
+            }
         }
     }
 
-    let all_passed = failures.is_empty();
-    let outcome = match (all_passed, fixture.known_bug.is_some()) {
-        (true, false) => FrameOutcome::Pass,
-        (false, false) => FrameOutcome::Fail,
-        (false, true) => FrameOutcome::KnownFail,
-        (true, true) => FrameOutcome::Xpass,
-    };
+    // (c) Optional M-Map locate checks (original + deterministic +/-2 LSB perturbations)
+    if let (Some(exp), Some(loc)) = (&fixture.mmap_locate, locator) {
+        let mut prime_decode_ok = true;
+        let prime_frame = match (&exp.prev_hint, &resolved_prime_image) {
+            (Some(_), Some(prime_path)) => match load_png_as_bgra(prime_path) {
+                Ok(buf) => Some(buf),
+                Err(err) => {
+                    failures.push(format!("failed to decode prime_image for prev_hint: {err}"));
+                    prime_decode_ok = false;
+                    None
+                }
+            },
+            _ => None,
+        };
+
+        let prepare_locator_state = |loc: &MapLocator, failures: &mut Vec<String>| -> bool {
+            loc.reset_tracking_state();
+            if let (Some(hint), Some(p_buf)) = (&exp.prev_hint, &prime_frame) {
+                let _ = loc.locate_player_frame(p_buf.as_view(), false, None);
+                let got_map = loc.last_map_id();
+                let got_pos = loc.last_known_pos();
+                let ok = match (got_map, got_pos) {
+                    (Some(mid), Some((wx, wy))) => {
+                        mid == hint.map_id && (wx - hint.world_x).hypot(wy - hint.world_y) <= 50.0
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    failures.push(format!(
+                        "mmap_locate[prev_hint]: failed to prime state via '{}' (got map_id={got_map:?}, pos={got_pos:?}; exp map_id={} ({:.1}, {:.1}))",
+                        hint.prime_image, hint.map_id, hint.world_x, hint.world_y
+                    ));
+                    return false;
+                }
+            }
+            true
+        };
+
+        if prime_decode_ok {
+            match load_png_as_bgra(&resolved_image) {
+                Ok(orig_frame) => {
+                    if prepare_locator_state(loc, &mut failures) {
+                        let orig_res = loc.locate_player_frame(orig_frame.as_view(), false, None);
+                        check_locate_result("orig", orig_res.as_ref(), exp, &mut failures);
+                    }
+
+                    for &seed in &exp.perturb_seeds {
+                        let perturbed = perturb_bgra_frame(&orig_frame, seed);
+                        if prepare_locator_state(loc, &mut failures) {
+                            let pert_res =
+                                loc.locate_player_frame(perturbed.as_view(), false, None);
+                            check_locate_result(
+                                &format!("perturb(seed={seed})"),
+                                pert_res.as_ref(),
+                                exp,
+                                &mut failures,
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    failures.push(format!("failed to decode PNG for mmap_locate: {err}"));
+                }
+            }
+        }
+    }
+
+    let outcome = classify_outcome(failures.is_empty(), fixture.known_bug.is_some());
 
     FrameCheckResult {
         name: fixture.name.clone(),
@@ -488,6 +860,22 @@ pub fn run_frames(opts: &FramesOptions) -> Result<FramesReport, String> {
     let fixtures = load_fixtures_from_dir(&fixtures_dir)?;
     let main_checkout = resolve_main_checkout(&repo_root);
 
+    let needs_locator = fixtures.iter().any(|(_, f)| f.mmap_locate.is_some());
+    let (locator, missing_data_reason): (Option<MapLocator>, Option<String>) = if needs_locator {
+        match resolve_data_dir(&repo_root, main_checkout.as_deref(), &opts.data_dir) {
+            Some(resolved_data) => (Some(build_frame_locator(&resolved_data)), None),
+            None => (
+                None,
+                Some(format!(
+                    "required map datasets missing in data_dir '{}' (need multimap_v4.json, terrain_n2_v4.npz, cave_masks_v4.npz)",
+                    opts.data_dir.display()
+                )),
+            ),
+        }
+    } else {
+        (None, None)
+    };
+
     let mut report = FramesReport {
         pass: 0,
         fail: 0,
@@ -498,7 +886,14 @@ pub fn run_frames(opts: &FramesOptions) -> Result<FramesReport, String> {
     };
 
     for (path, fixture) in &fixtures {
-        let res = evaluate_fixture(fixture, path, &repo_root, main_checkout.as_deref());
+        let res = evaluate_fixture(
+            fixture,
+            path,
+            &repo_root,
+            main_checkout.as_deref(),
+            locator.as_ref(),
+            missing_data_reason.as_deref(),
+        );
         match res.outcome {
             FrameOutcome::Pass => {
                 report.pass += 1;
@@ -618,25 +1013,103 @@ mod tests {
             height: 1080,
             is_gamepad: false,
             known_bug: None,
-            expected_minimap_rect: FixtureRect {
+            expected_minimap_rect: Some(FixtureRect {
                 x: 59,
                 y: 15,
                 width: 218,
                 height: 218,
-            },
-            expected_paimon_rect: FixtureRect {
+            }),
+            expected_paimon_rect: Some(FixtureRect {
                 x: 25,
                 y: 12,
                 width: 68,
                 height: 77,
-            },
-            tolerance_px: 2,
-            true_minimap_circle: FixtureCircle {
+            }),
+            tolerance_px: Some(2),
+            true_minimap_circle: Some(FixtureCircle {
                 cx: 168.0,
                 cy: 124.0,
                 radius: 107.0,
-            },
+            }),
             expect_circle_in_crop: true,
+            mmap_locate: None,
+        }
+    }
+
+    fn base_mmap_fixture(name: &str, image_rel: &str) -> FrameFixture {
+        FrameFixture {
+            schema_version: FRAME_FIXTURE_SCHEMA_VERSION,
+            name: name.to_owned(),
+            description: "mmap locate unit test".to_owned(),
+            notes: "synthetic mmap fixture".to_owned(),
+            image: image_rel.to_owned(),
+            width: 2560,
+            height: 1440,
+            is_gamepad: false,
+            known_bug: None,
+            expected_minimap_rect: None,
+            expected_paimon_rect: None,
+            tolerance_px: None,
+            true_minimap_circle: None,
+            expect_circle_in_crop: true,
+            mmap_locate: Some(MMapLocateExpectation {
+                expected_map_id: 40,
+                expected_world_x: 5072.0,
+                expected_world_y: -174.0,
+                pos_tolerance_w: 50.0,
+                prev_hint: None,
+                perturb_seeds: vec![101, 202],
+            }),
+        }
+    }
+
+    fn mock_locate_result(
+        has_world_coords: bool,
+        map_id: Option<i32>,
+        world_x: Option<f64>,
+        world_y: Option<f64>,
+        inliers_count: Option<usize>,
+    ) -> LocateResult {
+        LocateResult {
+            detected: true,
+            has_world_coords,
+            map_id,
+            map_name: None,
+            area_id: None,
+            area_name: None,
+            world_x,
+            world_y,
+            lat: world_y,
+            lng: world_x,
+            pixel_x: 1280.0,
+            pixel_y: 720.0,
+            heading: 0.0,
+            scale: Some(1.0),
+            inliers_count,
+            rmse: Some(1.0),
+            is_underground: false,
+            in_game_is_underground: Some(false),
+            floor_idx: 0,
+            total_floors: 1,
+            active_floor_idx: 0,
+            surface_idx: 0,
+            floor_name: "G".to_owned(),
+            floor_short: "G".to_owned(),
+            hoyolab_floor_name: None,
+            group_id: None,
+            group_name: None,
+            floor_id: None,
+            has_layers: false,
+            zoom_ratio_t: Some(0.5),
+            candidates: None,
+            inliers: None,
+            slider_res: None,
+            region_text: None,
+            target_map_id: None,
+            target_area_id: None,
+            slot_types: None,
+            reason: None,
+            debug_included: false,
         }
     }
 
@@ -652,6 +1125,7 @@ mod tests {
         let report = run_frames(&FramesOptions {
             dir: fixtures_dir,
             repo_root: Some(tmp.path.clone()),
+            data_dir: PathBuf::from(DEFAULT_DATA_DIR),
         })
         .expect("run_frames");
         assert_eq!(report.pass, 1);
@@ -672,12 +1146,13 @@ mod tests {
         write_solid_png(&tmp.path.join(img_rel), 1920, 1080);
         let fixtures_dir = tmp.path.join("tests/frame_fixtures");
         let mut f = base_1080p_fixture("fail_case", img_rel);
-        f.expected_paimon_rect.x = 97;
+        f.expected_paimon_rect.as_mut().unwrap().x = 97;
         write_fixture_json(&fixtures_dir, "01_fail.json", &f);
 
         let report = run_frames(&FramesOptions {
             dir: fixtures_dir,
             repo_root: Some(tmp.path.clone()),
+            data_dir: PathBuf::from(DEFAULT_DATA_DIR),
         })
         .expect("run_frames");
         assert_eq!(report.fail, 1);
@@ -699,18 +1174,19 @@ mod tests {
         let mut f = base_1080p_fixture("known_fail_case", img_rel);
         f.width = 2560;
         f.known_bug = Some("21:9 HUD inward shift".to_owned());
-        f.expected_minimap_rect.x = 131;
-        f.expected_paimon_rect.x = 97;
-        f.true_minimap_circle = FixtureCircle {
+        f.expected_minimap_rect.as_mut().unwrap().x = 131;
+        f.expected_paimon_rect.as_mut().unwrap().x = 97;
+        f.true_minimap_circle = Some(FixtureCircle {
             cx: 241.0,
             cy: 124.0,
             radius: 106.5,
-        };
+        });
         write_fixture_json(&fixtures_dir, "01_known_fail.json", &f);
 
         let report = run_frames(&FramesOptions {
             dir: fixtures_dir,
             repo_root: Some(tmp.path.clone()),
+            data_dir: PathBuf::from(DEFAULT_DATA_DIR),
         })
         .expect("run_frames");
         assert_eq!(report.fail, 0);
@@ -731,6 +1207,7 @@ mod tests {
         let report = run_frames(&FramesOptions {
             dir: fixtures_dir,
             repo_root: Some(tmp.path.clone()),
+            data_dir: PathBuf::from(DEFAULT_DATA_DIR),
         })
         .expect("run_frames");
         assert_eq!(report.xpass, 1);
@@ -748,6 +1225,7 @@ mod tests {
         let report = run_frames(&FramesOptions {
             dir: fixtures_dir,
             repo_root: Some(tmp.path.clone()),
+            data_dir: PathBuf::from(DEFAULT_DATA_DIR),
         })
         .expect("run_frames");
         assert_eq!(report.skipped, 1);
@@ -765,16 +1243,17 @@ mod tests {
         let fixtures_dir = tmp.path.join("tests/frame_fixtures");
         let mut f = base_1080p_fixture("circle_clip_case", img_rel);
         // Rects still match 1080p layout, but circle extends past minimap_rect (277) and hud_crop (325)
-        f.true_minimap_circle = FixtureCircle {
+        f.true_minimap_circle = Some(FixtureCircle {
             cx: 241.0,
             cy: 124.0,
             radius: 106.5,
-        };
+        });
         write_fixture_json(&fixtures_dir, "01_circle_clip.json", &f);
 
         let report = run_frames(&FramesOptions {
             dir: fixtures_dir,
             repo_root: Some(tmp.path.clone()),
+            data_dir: PathBuf::from(DEFAULT_DATA_DIR),
         })
         .expect("run_frames");
         assert_eq!(report.fail, 1);
@@ -809,5 +1288,177 @@ mod tests {
 
         let err = load_fixtures_from_dir(&fixtures_dir).expect_err("unknown field must fail");
         assert!(err.contains("unknown field"));
+    }
+
+    #[test]
+    fn schema_validates_mmap_locate_and_check_modes() {
+        // Missing both layout and mmap_locate
+        let mut neither = base_mmap_fixture("neither", "scratch/a.png");
+        neither.mmap_locate = None;
+        let err = neither.validate("neither.json").expect_err("must reject empty check mode");
+        assert!(err.contains("at least one check mode"), "unexpected error: {err}");
+
+        // Partial layout fields
+        let mut partial = base_mmap_fixture("partial", "scratch/a.png");
+        partial.tolerance_px = Some(4);
+        let err = partial.validate("partial.json").expect_err("must reject partial layout fields");
+        assert!(err.contains("must all be present or all omitted"), "unexpected error: {err}");
+
+        // Non-positive pos_tolerance_w
+        let mut bad_tol = base_mmap_fixture("bad_tol", "scratch/a.png");
+        bad_tol.mmap_locate.as_mut().unwrap().pos_tolerance_w = 0.0;
+        let err = bad_tol.validate("bad_tol.json").expect_err("must reject zero tolerance");
+        assert!(err.contains("pos_tolerance_w"), "unexpected error: {err}");
+
+        // Non-finite pos_tolerance_w
+        let mut nan_tol = base_mmap_fixture("nan_tol", "scratch/a.png");
+        nan_tol.mmap_locate.as_mut().unwrap().pos_tolerance_w = f64::NAN;
+        let err = nan_tol.validate("nan_tol.json").expect_err("must reject NaN tolerance");
+        assert!(err.contains("pos_tolerance_w"), "unexpected error: {err}");
+
+        // Bad prev_hint (empty prime_image, traversal path, non-finite coords)
+        let mut bad_prime = base_mmap_fixture("bad_prime", "scratch/a.png");
+        bad_prime.mmap_locate.as_mut().unwrap().prev_hint = Some(PrevWorldHint {
+            map_id: 40,
+            world_x: 5072.0,
+            world_y: -174.0,
+            prime_image: "../outside.png".to_owned(),
+        });
+        let err = bad_prime
+            .validate("bad_prime.json")
+            .expect_err("must reject traversal prime_image");
+        assert!(err.contains("prev_hint.prime_image"), "unexpected error: {err}");
+
+        let mut bad_hint_xy = base_mmap_fixture("bad_hint_xy", "scratch/a.png");
+        bad_hint_xy.mmap_locate.as_mut().unwrap().prev_hint = Some(PrevWorldHint {
+            map_id: 40,
+            world_x: f64::INFINITY,
+            world_y: -174.0,
+            prime_image: "scratch/prime.png".to_owned(),
+        });
+        let err = bad_hint_xy
+            .validate("bad_hint_xy.json")
+            .expect_err("must reject non-finite prev_hint coords");
+        assert!(err.contains("prev_hint world_x/y"), "unexpected error: {err}");
+
+        // Valid mmap-only fixture
+        let valid = base_mmap_fixture("valid_mmap", "scratch/a.png");
+        valid.validate("valid.json").expect("valid mmap fixture should pass");
+    }
+
+    #[test]
+    fn perturb_bgra_frame_is_deterministic_and_bounded_within_2_lsb() {
+        let mut src = FrameBuf::new_zeroed(16, 16, PixelFormat::Bgra8);
+        for (i, px) in src.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            // Include boundary values 0, 1, 254, 255 to exercise saturation
+            px[0] = (i % 256) as u8;
+            px[1] = if i % 4 == 0 { 0 } else if i % 4 == 1 { 255 } else { 128 };
+            px[2] = ((i * 7) % 256) as u8;
+            px[3] = 200; // non-255 input alpha must become 255
+        }
+
+        let p1 = perturb_bgra_frame(&src, 101);
+        let p2 = perturb_bgra_frame(&src, 101);
+        let p3 = perturb_bgra_frame(&src, 202);
+
+        assert_eq!(p1.data, p2.data, "same seed must produce bit-exact output");
+        assert_ne!(p1.data, p3.data, "different seeds must produce distinct output");
+
+        let mut any_nonzero_delta = false;
+        for (sp, dp) in src
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(p1.data.as_chunks::<4>().0.iter())
+        {
+            for ch in 0..3 {
+                let delta = dp[ch] as i16 - sp[ch] as i16;
+                assert!(
+                    (-2..=2).contains(&delta),
+                    "channel {ch} delta {delta} outside [-2, 2] (src={}, dst={})",
+                    sp[ch],
+                    dp[ch]
+                );
+                if delta != 0 {
+                    any_nonzero_delta = true;
+                }
+            }
+            assert_eq!(dp[3], 255, "alpha must be preserved at 255");
+        }
+        assert!(any_nonzero_delta, "perturbation must modify pixel values");
+    }
+
+    #[test]
+    fn mmap_locate_outcome_classification_handles_pass_fail_known_fail_xpass() {
+        let exp = MMapLocateExpectation {
+            expected_map_id: 40,
+            expected_world_x: 5072.0,
+            expected_world_y: -174.0,
+            pos_tolerance_w: 50.0,
+            prev_hint: None,
+            perturb_seeds: vec![101, 202],
+        };
+
+        // Pass (within tolerance & matching map_id)
+        let mut f = Vec::new();
+        let good = mock_locate_result(true, Some(40), Some(5080.0), Some(-170.0), Some(11));
+        check_locate_result("orig", Some(&good), &exp, &mut f);
+        assert!(f.is_empty(), "expected pass, got {f:?}");
+        assert_eq!(classify_outcome(f.is_empty(), false), FrameOutcome::Pass);
+        assert_eq!(classify_outcome(f.is_empty(), true), FrameOutcome::Xpass);
+
+        // Fail on position drift -> KnownFail when known_bug is set
+        let mut f = Vec::new();
+        let bad_pos = mock_locate_result(true, Some(40), Some(4889.0), Some(-186.0), Some(3));
+        check_locate_result("orig", Some(&bad_pos), &exp, &mut f);
+        assert_eq!(f.len(), 1);
+        assert!(f[0].contains("dist_w=") && f[0].contains("inliers=3"));
+        assert_eq!(classify_outcome(f.is_empty(), false), FrameOutcome::Fail);
+        assert_eq!(classify_outcome(f.is_empty(), true), FrameOutcome::KnownFail);
+
+        // Fail on wrong map_id even if coords match
+        let mut f = Vec::new();
+        let bad_map = mock_locate_result(true, Some(2), Some(5072.0), Some(-174.0), Some(5));
+        check_locate_result("perturb(seed=101)", Some(&bad_map), &exp, &mut f);
+        assert_eq!(f.len(), 1);
+        assert!(f[0].contains("perturb(seed=101)") && f[0].contains("map_id=Some(2)"));
+
+        // Fail on has_world_coords = false and None
+        let mut f = Vec::new();
+        let no_world = mock_locate_result(false, None, None, None, None);
+        check_locate_result("orig", Some(&no_world), &exp, &mut f);
+        check_locate_result("perturb(seed=202)", None, &exp, &mut f);
+        assert_eq!(f.len(), 2);
+        assert!(f[0].contains("has_world_coords=false"));
+        assert!(f[1].contains("returned None"));
+    }
+
+    #[test]
+    fn outcome_skipped_when_mmap_data_dir_is_missing() {
+        let tmp = TempDirGuard::new("missing_data");
+        let img_rel = "scratch/test_mmap.png";
+        write_solid_png(&tmp.path.join(img_rel), 2560, 1440);
+        let fixtures_dir = tmp.path.join("tests/frame_fixtures");
+        let f = base_mmap_fixture("mmap_missing_data", img_rel);
+        write_fixture_json(&fixtures_dir, "01_mmap.json", &f);
+
+        let report = run_frames(&FramesOptions {
+            dir: fixtures_dir,
+            repo_root: Some(tmp.path.clone()),
+            data_dir: tmp.path.join("nonexistent_data"),
+        })
+        .expect("run_frames");
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.pass, 0);
+        assert_eq!(report.fail, 0);
+        assert_eq!(report.results[0].outcome, FrameOutcome::Skipped);
+        assert!(
+            report.results[0]
+                .skip_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("datasets missing")
+        );
     }
 }

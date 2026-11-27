@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "210311_f146_mmap_control",
+  "description": "Nod-Krai moon surface (Map 40) zoomed-in M-Map control capture with dense visible waypoints.",
+  "notes": "Exported from sess_20261127_210311 frame i=146 (0-based n=145, 2560x1440). Trustworthy anchor where AutoSync locked on Map 40 with 11 inliers at (5072, -174), adjacent to WP 99320 (5076.5, -167.0). Verifies original and +/-2 LSB perturbed variants all lock accurately.",
+  "image": "scratch/frame_fixtures/sess_20261127_210311_f146.png",
+  "width": 2560,
+  "height": 1440,
+  "is_gamepad": false,
+  "known_bug": null,
+  "mmap_locate": {
+    "expected_map_id": 40,
+    "expected_world_x": 5072.0,
+    "expected_world_y": -174.0,
+    "pos_tolerance_w": 50.0,
+    "perturb_seeds": [707, 808]
+  }
+}
