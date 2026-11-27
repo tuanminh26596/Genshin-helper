@@ -1,0 +1,211 @@
+{
+  "captured_at": "2026-11-28T02:07:50+07:00",
+  "source_url": "https://genshin-impact-map.appsample.com/",
+  "method": "headless Chromium CDP guest inspection (.leaflet-container React fiber memoizedProps.value after markersComplete=true)",
+  "sanitized": true,
+  "live_schema_notes": {
+    "catalog_all_equals_allMarkers": true,
+    "marker_keys": ["id", "type", "mapId", "level", "position", "icon", "layer"],
+    "has_sid_on_markers": false,
+    "surface_markers_have_positive_level": true,
+    "underground_field": "layer.{groupId,floorId,entrances}"
+  },
+  "map": {
+    "center": { "lat": 0, "lng": 0.4 },
+    "zoom": 11,
+    "minZoom": 10,
+    "maxZoom": 16,
+    "hasWindowL": true
+  },
+  "storeState": {
+    "mapKey": "teyvat",
+    "types": ["o3", "o5", "o6", "o357", "o791", "o833"],
+    "sid": 0,
+    "user": null,
+    "found": [],
+    "overlay": { "mode": "none" },
+    "markersComplete": true
+  },
+  "messages": {
+    "markers": {
+      "o2": "Statue of Seven",
+      "o3": "Teleport Waypoint",
+      "o5": "Anemoculus",
+      "o6": "Geoculus",
+      "o111": "Book",
+      "o357": "Lumenspar",
+      "o791": "Mnemonic Cluster",
+      "o833": "Cryoculus"
+    }
+  },
+  "iconUrlTemplate": "https://game-cdn.appsample.com/gim/markers/{type}.png?v=3",
+  "markers": [
+    {
+      "id": "2608",
+      "type": "o2",
+      "mapId": 2,
+      "level": 4,
+      "position": { "x": 0.56704, "y": 0.16477 },
+      "icon": "o2"
+    },
+    {
+      "id": "2609",
+      "type": "o2",
+      "mapId": 2,
+      "level": 4,
+      "position": { "x": 0.50779, "y": 0.15863 },
+      "icon": "o2"
+    },
+    {
+      "id": "2610",
+      "type": "o2",
+      "mapId": 2,
+      "level": 4,
+      "position": { "x": 0.57223, "y": 0.21946 },
+      "icon": "o2"
+    },
+    {
+      "id": "2611",
+      "type": "o2",
+      "mapId": 2,
+      "level": 4,
+      "position": { "x": 0.44327, "y": 0.22573 },
+      "icon": "o2"
+    },
+    {
+      "id": "2587",
+      "type": "o3",
+      "mapId": 2,
+      "level": 4,
+      "position": { "x": 0.43571, "y": 0.24999 },
+      "icon": "o3"
+    },
+    {
+      "id": "2588",
+      "type": "o3",
+      "mapId": 2,
+      "level": 4,
+      "position": { "x": 0.4291, "y": 0.22071 },
+      "icon": "o3"
+    },
+    {
+      "id": "2589",
+      "type": "o3",
+      "mapId": 2,
+      "level": 4,
+      "position": { "x": 0.4479, "y": 0.22681 },
+      "icon": "o3"
+    },
+    {
+      "id": "2590",
+      "type": "o3",
+      "mapId": 2,
+      "level": 4,
+      "position": { "x": 0.46611, "y": 0.23848 },
+      "icon": "o3"
+    },
+    {
+      "id": "301",
+      "type": "o5",
+      "mapId": 2,
+      "level": 6,
+      "position": { "x": 0.43245, "y": 0.24676 },
+      "icon": "o5"
+    },
+    {
+      "id": "302",
+      "type": "o5",
+      "mapId": 2,
+      "level": 6,
+      "position": { "x": 0.42545, "y": 0.21918 },
+      "icon": "o5"
+    },
+    {
+      "id": "303",
+      "type": "o5",
+      "mapId": 2,
+      "level": 6,
+      "position": { "x": 0.43086, "y": 0.222 },
+      "icon": "o5"
+    },
+    {
+      "id": "304",
+      "type": "o5",
+      "mapId": 2,
+      "level": 6,
+      "position": { "x": 0.46104, "y": 0.25128 },
+      "icon": "o5"
+    },
+    {
+      "id": "2651",
+      "type": "o6",
+      "mapId": 2,
+      "level": 6,
+      "position": { "x": 0.3951, "y": 0.18563 },
+      "icon": "o6"
+    },
+    {
+      "id": "2652",
+      "type": "o6",
+      "mapId": 2,
+      "level": 6,
+      "position": { "x": 0.383, "y": 0.16735 },
+      "icon": "o6"
+    },
+    {
+      "id": "16514",
+      "type": "o111",
+      "mapId": 2,
+      "level": 5,
+      "position": { "x": 0.59061, "y": -0.22243 },
+      "icon": "o111-pin"
+    },
+    {
+      "id": "16737",
+      "type": "o111",
+      "mapId": 2,
+      "level": 5,
+      "position": { "x": 0.53434, "y": -0.32585 },
+      "icon": "o111-pin"
+    },
+    {
+      "id": "18596",
+      "type": "o111",
+      "mapId": 2,
+      "level": 5,
+      "position": { "x": 0.61993, "y": -0.24196 },
+      "layer": {
+        "groupId": 82,
+        "floorId": 5,
+        "entrances": ["50594", "48559"]
+      },
+      "icon": "o111-layer"
+    },
+    {
+      "id": "20413",
+      "type": "o111",
+      "mapId": 2,
+      "level": 5,
+      "position": { "x": 0.59018, "y": -0.38041 },
+      "layer": {
+        "groupId": 84,
+        "floorId": 10,
+        "entrances": ["50589"]
+      },
+      "icon": "o111-layer"
+    },
+    {
+      "id": "87284",
+      "type": "o111",
+      "mapId": 2,
+      "level": 5,
+      "position": { "x": -0.63953, "y": 0.054 },
+      "layer": {
+        "groupId": 170,
+        "floorId": 232,
+        "entrances": ["86513"]
+      },
+      "icon": "o111-layer"
+    }
+  ]
+}

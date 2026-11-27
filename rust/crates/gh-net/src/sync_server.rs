@@ -6746,4 +6746,332 @@ mod tests {
 
         srv.stop().await;
     }
+
+    #[test]
+    fn pin_owner_ttl_22s_boundary_closing_and_hidden_takeover() {
+        let srv = SyncServer::new(SyncServerConfig::default());
+        let inner = &srv.inner;
+        let t0 = Instant::now();
+
+        // Tab A claims ownership at t0.
+        assert!(inner.claim_or_check_pin_owner(
+            Some("tab_a"),
+            Some("hoyolab"),
+            Some(true),
+            Some(true),
+            true,
+            t0,
+        ));
+        assert_eq!(
+            inner.current_owner_snapshot(t0),
+            Some(("tab_a".to_owned(), Some("hoyolab".to_owned())))
+        );
+
+        // At t0 + 21s (fresh) and exact t0 + 22s boundary: Tab A remains owner, passive Tab B blocked.
+        for delta in [Duration::from_secs(21), Duration::from_secs(22)] {
+            let t = t0 + delta;
+            assert_eq!(
+                inner.current_owner_snapshot(t),
+                Some(("tab_a".to_owned(), Some("hoyolab".to_owned())))
+            );
+            assert!(!inner.claim_or_check_pin_owner(
+                Some("tab_b"),
+                Some("appsample"),
+                Some(true),
+                Some(false),
+                false,
+                t,
+            ));
+            assert!(!inner.update_pin_owner_from_visibility(VisibilityOwnerUpdate {
+                tab_id: "tab_b",
+                provider: Some("appsample"),
+                visible: true,
+                focused: Some(false),
+                interacted: false,
+                closing: false,
+                now: t,
+            }));
+        }
+
+        // At t0 + 22.1s (expired > 22s): snapshot is None and passive Tab B takes over cleanly.
+        let t_exp1 = t0 + Duration::from_millis(22_100);
+        assert!(inner.current_owner_snapshot(t_exp1).is_none());
+        assert!(inner.claim_or_check_pin_owner(
+            Some("tab_b"),
+            Some("appsample"),
+            Some(true),
+            Some(false),
+            false,
+            t_exp1,
+        ));
+        assert_eq!(
+            inner.current_owner_snapshot(t_exp1),
+            Some(("tab_b".to_owned(), Some("appsample".to_owned())))
+        );
+
+        // After another 22.1s expiry, passive visible Tab C takes over via update_pin_owner_from_visibility.
+        let t_exp2 = t_exp1 + Duration::from_millis(22_100);
+        assert!(inner.current_owner_snapshot(t_exp2).is_none());
+        assert!(inner.update_pin_owner_from_visibility(VisibilityOwnerUpdate {
+            tab_id: "tab_c",
+            provider: Some("kongying"),
+            visible: true,
+            focused: Some(false),
+            interacted: false,
+            closing: false,
+            now: t_exp2,
+        }));
+        assert_eq!(
+            inner.current_owner_snapshot(t_exp2),
+            Some(("tab_c".to_owned(), Some("kongying".to_owned())))
+        );
+
+        // closing=true from a non-owner must NOT release Tab C's ownership.
+        assert!(!inner.update_pin_owner_from_visibility(VisibilityOwnerUpdate {
+            tab_id: "tab_other",
+            provider: Some("hoyolab"),
+            visible: false,
+            focused: Some(false),
+            interacted: false,
+            closing: true,
+            now: t_exp2 + Duration::from_secs(1),
+        }));
+        assert_eq!(
+            inner.current_owner_snapshot(t_exp2 + Duration::from_secs(1)),
+            Some(("tab_c".to_owned(), Some("kongying".to_owned())))
+        );
+
+        // closing=true from owner Tab C releases ownership immediately.
+        let t_close = t_exp2 + Duration::from_secs(2);
+        assert!(!inner.update_pin_owner_from_visibility(VisibilityOwnerUpdate {
+            tab_id: "tab_c",
+            provider: Some("kongying"),
+            visible: false,
+            focused: Some(false),
+            interacted: false,
+            closing: true,
+            now: t_close,
+        }));
+        assert!(inner.current_owner_snapshot(t_close).is_none());
+
+        // Hidden-owner takeover: owner goes hidden (still owner), then visible peer takes over.
+        let t_vis = t_close + Duration::from_secs(1);
+        assert!(inner.update_pin_owner_from_visibility(VisibilityOwnerUpdate {
+            tab_id: "tab_a",
+            provider: Some("hoyolab"),
+            visible: true,
+            focused: Some(true),
+            interacted: true,
+            closing: false,
+            now: t_vis,
+        }));
+        assert!(inner.update_pin_owner_from_visibility(VisibilityOwnerUpdate {
+            tab_id: "tab_a",
+            provider: Some("hoyolab"),
+            visible: false,
+            focused: Some(false),
+            interacted: false,
+            closing: false,
+            now: t_vis + Duration::from_secs(1),
+        }));
+        assert_eq!(
+            inner.current_owner_snapshot(t_vis + Duration::from_secs(1)),
+            Some(("tab_a".to_owned(), Some("hoyolab".to_owned())))
+        );
+        // Visible Tab B takes over from hidden Tab A via claim_or_check_pin_owner.
+        let t_take1 = t_vis + Duration::from_secs(2);
+        assert!(inner.claim_or_check_pin_owner(
+            Some("tab_b"),
+            Some("appsample"),
+            Some(true),
+            Some(false),
+            false,
+            t_take1,
+        ));
+        assert_eq!(
+            inner.current_owner_snapshot(t_take1),
+            Some(("tab_b".to_owned(), Some("appsample".to_owned())))
+        );
+        // Tab B goes hidden -> visible Tab A takes over via update_pin_owner_from_visibility.
+        let t_hide_b = t_take1 + Duration::from_secs(1);
+        assert!(inner.update_pin_owner_from_visibility(VisibilityOwnerUpdate {
+            tab_id: "tab_b",
+            provider: Some("appsample"),
+            visible: false,
+            focused: Some(false),
+            interacted: false,
+            closing: false,
+            now: t_hide_b,
+        }));
+        let t_take2 = t_hide_b + Duration::from_secs(1);
+        assert!(inner.update_pin_owner_from_visibility(VisibilityOwnerUpdate {
+            tab_id: "tab_a",
+            provider: Some("hoyolab"),
+            visible: true,
+            focused: Some(false),
+            interacted: false,
+            closing: false,
+            now: t_take2,
+        }));
+        assert_eq!(
+            inner.current_owner_snapshot(t_take2),
+            Some(("tab_a".to_owned(), Some("hoyolab".to_owned())))
+        );
+    }
+
+    #[test]
+    fn broadcast_inner_stamps_routed_events_respects_ttl_and_never_routes_non_routed_events() {
+        let srv = SyncServer::new(SyncServerConfig::default());
+        let inner = &srv.inner;
+        inner.is_running.store(true, Ordering::Release);
+
+        let pop_event = |seq: u64| -> Value {
+            let st = inner.poll_state.lock().expect("poll_state");
+            st.event_log
+                .iter()
+                .find(|(s, _)| *s == seq)
+                .map(|(_, v)| v.clone())
+                .expect("event in log")
+        };
+
+        // Set active provider = appsample and fresh owner tab = tab_as.
+        let _ = inner.update_active_provider(Some("appsample"));
+        assert!(inner.claim_or_check_pin_owner(
+            Some("tab_as"),
+            Some("appsample"),
+            Some(true),
+            Some(true),
+            true,
+            Instant::now(),
+        ));
+
+        // 1. All 7 routed event types receive target_provider + owner_tab_id.
+        let routed_cases = vec![
+            json!({"type": "NAV_MARK_PIN", "action": "mark", "pin_id": "appsample:7301"}),
+            json!({"type": "SYNC_AND_MARK", "map_id": 2, "lat": 1.0, "lng": 2.0}),
+            json!({"type": "TARGET_LOCK_UPDATED", "locked_target": {"id": "appsample:7301"}}),
+            json!({"type": "TSP_ROUTE_UPDATED", "map_id": 2}),
+            json!({"type": "FOCUS_MAP_TAB"}),
+            json!({"type": "LAN_FOCUS_PIN", "pin_id": "appsample:7301"}),
+            json!({"type": "LAN_SET_FLOOR", "floor_id": "10"}),
+        ];
+        for msg in routed_cases {
+            let seq = broadcast_inner(inner, msg, false, false);
+            let ev = pop_event(seq);
+            assert_eq!(ev["target_provider"], "appsample", "event={ev}");
+            assert_eq!(ev["owner_tab_id"], "tab_as", "event={ev}");
+        }
+
+        // 2. Non-routed events (including GH_CMD_EXPORT_PINS) are NEVER stamped with owner_tab_id
+        //    or non-HoYoLAB target_provider even when active provider is appsample or kongying.
+        for active_prov in ["appsample", "kongying"] {
+            let _ = inner.update_active_provider(Some(active_prov));
+            let owner_tid = format!("tab_{active_prov}");
+            assert!(inner.claim_or_check_pin_owner(
+                Some(&owner_tid),
+                Some(active_prov),
+                Some(true),
+                Some(true),
+                true,
+                Instant::now(),
+            ));
+            for non_routed in [
+                json!({"type": "MINIMAP_POSITION", "lat": 10.0, "lng": 20.0}),
+                json!({"type": "ENGINE_STATE_UPDATED", "engine_active": true}),
+                json!({"type": "GH_CMD_EXPORT_PINS", "map_id": 2}),
+            ] {
+                let seq = broadcast_inner(inner, non_routed, false, false);
+                let ev = pop_event(seq);
+                assert!(
+                    ev.get("owner_tab_id").is_none(),
+                    "non-routed event must not carry owner_tab_id: {ev}"
+                );
+                assert!(
+                    ev.get("target_provider").is_none(),
+                    "non-routed event must not carry target_provider: {ev}"
+                );
+            }
+        }
+
+        // 3. NAV_MARK_PIN only stamps owner_tab_id when the owner's provider matches the pin's inferred provider.
+        let _ = inner.update_active_provider(Some("appsample"));
+        assert!(inner.claim_or_check_pin_owner(
+            Some("tab_as"),
+            Some("appsample"),
+            Some(true),
+            Some(true),
+            true,
+            Instant::now(),
+        ));
+        let seq_hl_mismatch = broadcast_inner(
+            inner,
+            json!({"type": "NAV_MARK_PIN", "action": "mark", "pin_id": "12345"}),
+            false,
+            false,
+        );
+        let ev_hl_mismatch = pop_event(seq_hl_mismatch);
+        assert_eq!(ev_hl_mismatch["target_provider"], "hoyolab");
+        assert!(ev_hl_mismatch.get("owner_tab_id").is_none());
+
+        let seq_ky_mismatch = broadcast_inner(
+            inner,
+            json!({"type": "NAV_MARK_PIN", "action": "mark", "pin_id": "kongying:777"}),
+            false,
+            false,
+        );
+        let ev_ky_mismatch = pop_event(seq_ky_mismatch);
+        assert_eq!(ev_ky_mismatch["target_provider"], "kongying");
+        assert!(ev_ky_mismatch.get("owner_tab_id").is_none());
+
+        // Switching owner to HoYoLAB matches pure-digit pin and excludes appsample pin.
+        let _ = inner.update_active_provider(Some("hoyolab"));
+        assert!(inner.claim_or_check_pin_owner(
+            Some("tab_hl"),
+            Some("hoyolab"),
+            Some(true),
+            Some(true),
+            true,
+            Instant::now(),
+        ));
+        let seq_hl_match = broadcast_inner(
+            inner,
+            json!({"type": "NAV_MARK_PIN", "action": "mark", "pin_id": "12345"}),
+            false,
+            false,
+        );
+        let ev_hl_match = pop_event(seq_hl_match);
+        assert_eq!(ev_hl_match["target_provider"], "hoyolab");
+        assert_eq!(ev_hl_match["owner_tab_id"], "tab_hl");
+
+        let seq_as_mismatch = broadcast_inner(
+            inner,
+            json!({"type": "NAV_MARK_PIN", "action": "mark", "pin_id": "appsample:7301"}),
+            false,
+            false,
+        );
+        let ev_as_mismatch = pop_event(seq_as_mismatch);
+        assert_eq!(ev_as_mismatch["target_provider"], "appsample");
+        assert!(ev_as_mismatch.get("owner_tab_id").is_none());
+
+        // 4. Stale owner (> 22s old) must NOT stamp owner_tab_id on routed events.
+        let stale_ts = Instant::now()
+            .checked_sub(Duration::from_secs(23))
+            .expect("system uptime > 23s");
+        {
+            let mut guard = inner.pin_owner.lock().expect("pin_owner");
+            guard.as_mut().expect("active owner").last_seen = stale_ts;
+        }
+        let seq_stale = broadcast_inner(
+            inner,
+            json!({"type": "NAV_MARK_PIN", "action": "mark", "pin_id": "12345"}),
+            false,
+            false,
+        );
+        let ev_stale = pop_event(seq_stale);
+        assert_eq!(ev_stale["target_provider"], "hoyolab");
+        assert!(
+            ev_stale.get("owner_tab_id").is_none(),
+            "expired owner (>22s) must not be stamped: {ev_stale}"
+        );
+    }
 }

@@ -1,0 +1,891 @@
+{
+  "generated_from": "rust/crates/gh-core/src/map_bridge.rs::provider_default_transform",
+  "schema_version": 1,
+  "tolerances": {
+    "forward_abs": 1e-9,
+    "leaflet_abs": 1e-9,
+    "roundtrip_canonical_abs": 0.0001
+  },
+  "vectors": [
+    {
+      "canonical": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "expected_leaflet": {
+        "lat": 0.0,
+        "lng": 0.0
+      },
+      "expected_provider": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "expected_zone": "base",
+      "id": "hoyolab_m2_origin",
+      "map_id": 2,
+      "provider": "hoyolab",
+      "region": "teyvat_origin",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 1234.5,
+        "y": 2345.25
+      },
+      "expected_leaflet": {
+        "lat": 2345.25,
+        "lng": 1234.5
+      },
+      "expected_provider": {
+        "x": 1234.5,
+        "y": 2345.25
+      },
+      "expected_zone": "base",
+      "id": "hoyolab_m2_q1",
+      "map_id": 2,
+      "provider": "hoyolab",
+      "region": "teyvat_q1",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -4567.75,
+        "y": -890.5
+      },
+      "expected_leaflet": {
+        "lat": -890.5,
+        "lng": -4567.75
+      },
+      "expected_provider": {
+        "x": -4567.75,
+        "y": -890.5
+      },
+      "expected_zone": "base",
+      "id": "hoyolab_m2_q3",
+      "map_id": 2,
+      "provider": "hoyolab",
+      "region": "teyvat_q3",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "expected_leaflet": {
+        "lat": 1527.748294,
+        "lng": -3931.249166
+      },
+      "expected_provider": {
+        "x": 1527.748294,
+        "y": -3931.249166
+      },
+      "expected_zone": "base",
+      "id": "kongying_m2_origin",
+      "map_id": 2,
+      "provider": "kongying",
+      "region": "teyvat_origin",
+      "swap_lat_lng": true
+    },
+    {
+      "canonical": {
+        "x": 1000.0,
+        "y": -500.0
+      },
+      "expected_leaflet": {
+        "lat": 2863.049838,
+        "lng": -4598.8319915
+      },
+      "expected_provider": {
+        "x": 2863.049838,
+        "y": -4598.8319915
+      },
+      "expected_zone": "base",
+      "id": "kongying_m2_q4",
+      "map_id": 2,
+      "provider": "kongying",
+      "region": "teyvat_q4",
+      "swap_lat_lng": true
+    },
+    {
+      "canonical": {
+        "x": -3500.0,
+        "y": 2200.0
+      },
+      "expected_leaflet": {
+        "lat": -3145.8071099999997,
+        "lng": -993.8847338
+      },
+      "expected_provider": {
+        "x": -3145.8071099999997,
+        "y": -993.8847338
+      },
+      "expected_zone": "base",
+      "id": "kongying_m2_q2",
+      "map_id": 2,
+      "provider": "kongying",
+      "region": "teyvat_q2",
+      "swap_lat_lng": true
+    },
+    {
+      "canonical": {
+        "x": 2500.0,
+        "y": 4800.0
+      },
+      "expected_leaflet": {
+        "lat": 4866.002154,
+        "lng": 2477.5459588
+      },
+      "expected_provider": {
+        "x": 4866.002154,
+        "y": 2477.5459588
+      },
+      "expected_zone": "base",
+      "id": "kongying_m2_q1",
+      "map_id": 2,
+      "provider": "kongying",
+      "region": "teyvat_q1",
+      "swap_lat_lng": true
+    },
+    {
+      "canonical": {
+        "x": -4200.0,
+        "y": -1800.0
+      },
+      "expected_leaflet": {
+        "lat": -4080.5181908000004,
+        "lng": -6334.547337800001
+      },
+      "expected_provider": {
+        "x": -4080.5181908000004,
+        "y": -6334.547337800001
+      },
+      "expected_zone": "base",
+      "id": "kongying_m2_q3",
+      "map_id": 2,
+      "provider": "kongying",
+      "region": "teyvat_q3",
+      "swap_lat_lng": true
+    },
+    {
+      "canonical": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "expected_leaflet": {
+        "lat": 0.199458672905,
+        "lng": 0.522689857989
+      },
+      "expected_provider": {
+        "x": 0.522689857989,
+        "y": 0.199458672905
+      },
+      "expected_zone": "base",
+      "id": "appsample_m2_mainland_origin",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "mainland_origin",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 1500.0,
+        "y": -2000.0
+      },
+      "expected_leaflet": {
+        "lat": 0.37118371619519996,
+        "lng": 0.65148360039195
+      },
+      "expected_provider": {
+        "x": 0.65148360039195,
+        "y": 0.37118371619519996
+      },
+      "expected_zone": "base",
+      "id": "appsample_m2_mainland_mondstadt",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "mainland_mondstadt",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -3500.0,
+        "y": 1200.0
+      },
+      "expected_leaflet": {
+        "lat": 0.09642364693088,
+        "lng": 0.22217112571545
+      },
+      "expected_provider": {
+        "x": 0.22217112571545,
+        "y": 0.09642364693088
+      },
+      "expected_zone": "base",
+      "id": "appsample_m2_mainland_sumeru",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "mainland_sumeru",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -8000.0,
+        "y": -1500.0
+      },
+      "expected_leaflet": {
+        "lat": 0.32825245537265,
+        "lng": -0.16421010149339998
+      },
+      "expected_provider": {
+        "x": -0.16421010149339998,
+        "y": 0.32825245537265
+      },
+      "expected_zone": "base",
+      "id": "appsample_m2_mainland_natlan",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "mainland_natlan",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 1800.0,
+        "y": 6500.0
+      },
+      "expected_leaflet": {
+        "lat": -0.3586441095931501,
+        "lng": 0.48803819668354
+      },
+      "expected_provider": {
+        "x": 0.48803819668354,
+        "y": -0.3586441095931501
+      },
+      "expected_zone": "area_3",
+      "id": "appsample_m2_inazuma_interior",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "inazuma_interior",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -169.0,
+        "y": 4087.0
+      },
+      "expected_leaflet": {
+        "lat": -0.15145784486352368,
+        "lng": 0.3189749441559343
+      },
+      "expected_provider": {
+        "x": 0.3189749441559343,
+        "y": -0.15145784486352368
+      },
+      "expected_zone": "area_3",
+      "id": "appsample_m2_inazuma_corner_min",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "inazuma_corner_min",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 3840.0,
+        "y": 9019.2
+      },
+      "expected_leaflet": {
+        "lat": -0.574948974121486,
+        "lng": 0.6631976863515521
+      },
+      "expected_provider": {
+        "x": 0.6631976863515521,
+        "y": -0.574948974121486
+      },
+      "expected_zone": "area_3",
+      "id": "appsample_m2_inazuma_corner_max",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "inazuma_corner_max",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -469.0,
+        "y": 6000.0
+      },
+      "expected_leaflet": {
+        "lat": -0.3157128487706,
+        "lng": 0.2932161956753443
+      },
+      "expected_provider": {
+        "x": 0.2932161956753443,
+        "y": -0.3157128487706
+      },
+      "expected_zone": "area_3",
+      "id": "appsample_m2_inazuma_pad_west",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "inazuma_pad_west",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 3840.0,
+        "y": 9300.0
+      },
+      "expected_leaflet": {
+        "lat": -0.59905917019943,
+        "lng": 0.6631976863515521
+      },
+      "expected_provider": {
+        "x": 0.6631976863515521,
+        "y": -0.59905917019943
+      },
+      "expected_zone": "area_3",
+      "id": "appsample_m2_inazuma_pad_south",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "inazuma_pad_south",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 4240.0,
+        "y": 6000.0
+      },
+      "expected_leaflet": {
+        "lat": -0.3157164569656,
+        "lng": 0.886746836514672
+      },
+      "expected_provider": {
+        "x": 0.886746836514672,
+        "y": -0.3157164569656
+      },
+      "expected_zone": "base",
+      "id": "appsample_m2_inazuma_outside_pad_east",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "inazuma_outside_pad_east",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 2000.0,
+        "y": 9419.2
+      },
+      "expected_leaflet": {
+        "lat": -0.609297590974526,
+        "lng": 0.6944148478596001
+      },
+      "expected_provider": {
+        "x": 0.6944148478596001,
+        "y": -0.609297590974526
+      },
+      "expected_zone": "base",
+      "id": "appsample_m2_inazuma_outside_pad_south",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "inazuma_outside_pad_south",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -15000.0,
+        "y": 1500.0
+      },
+      "expected_leaflet": {
+        "lat": 0.07066430293235001,
+        "lng": -0.5935475545295
+      },
+      "expected_provider": {
+        "x": -0.5935475545295,
+        "y": 0.07066430293235001
+      },
+      "expected_zone": "area_11_west",
+      "id": "appsample_m2_easybreeze_interior",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "easybreeze_interior",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -15949.9,
+        "y": 695.5
+      },
+      "expected_leaflet": {
+        "lat": 0.13974070159583296,
+        "lng": -0.6751083384685416
+      },
+      "expected_provider": {
+        "x": -0.6751083384685416,
+        "y": 0.13974070159583296
+      },
+      "expected_zone": "area_11_west",
+      "id": "appsample_m2_easybreeze_corner_min",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "easybreeze_corner_min",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -14339.4,
+        "y": 2662.2
+      },
+      "expected_leaflet": {
+        "lat": -0.029125119723585197,
+        "lng": -0.5368267903752407
+      },
+      "expected_provider": {
+        "x": -0.5368267903752407,
+        "y": -0.029125119723585197
+      },
+      "expected_zone": "area_11_west",
+      "id": "appsample_m2_easybreeze_corner_max",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "easybreeze_corner_max",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -14039.4,
+        "y": 1500.0
+      },
+      "expected_leaflet": {
+        "lat": 0.07066430293235001,
+        "lng": -0.5110680418946508
+      },
+      "expected_provider": {
+        "x": -0.5110680418946508,
+        "y": 0.07066430293235001
+      },
+      "expected_zone": "area_11_west",
+      "id": "appsample_m2_easybreeze_pad_east",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "easybreeze_pad_east",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -15000.0,
+        "y": 2962.2
+      },
+      "expected_leaflet": {
+        "lat": -0.054883876217115185,
+        "lng": -0.5935475545295
+      },
+      "expected_provider": {
+        "x": -0.5935475545295,
+        "y": -0.054883876217115185
+      },
+      "expected_zone": "area_11_west",
+      "id": "appsample_m2_easybreeze_pad_south",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "easybreeze_pad_south",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -16349.9,
+        "y": 1500.0
+      },
+      "expected_leaflet": {
+        "lat": 0.07066489043735,
+        "lng": -0.8811533479536615
+      },
+      "expected_provider": {
+        "x": -0.8811533479536615,
+        "y": 0.07066489043735
+      },
+      "expected_zone": "base",
+      "id": "appsample_m2_easybreeze_outside_pad_west",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "easybreeze_outside_pad_west",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -15000.0,
+        "y": 3062.2
+      },
+      "expected_leaflet": {
+        "lat": -0.06346954087662518,
+        "lng": -0.7652475660405
+      },
+      "expected_provider": {
+        "x": -0.7652475660405,
+        "y": -0.06346954087662518
+      },
+      "expected_zone": "base",
+      "id": "appsample_m2_easybreeze_outside_pad_south",
+      "map_id": 2,
+      "provider": "appsample",
+      "region": "easybreeze_outside_pad_south",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "expected_leaflet": {
+        "lat": 0.09208809008,
+        "lng": -0.06889919302
+      },
+      "expected_provider": {
+        "x": -0.06889919302,
+        "y": 0.09208809008
+      },
+      "expected_zone": "base",
+      "id": "appsample_m7_origin",
+      "map_id": 7,
+      "provider": "appsample",
+      "region": "enkanomiya_origin",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 850.0,
+        "y": -620.0
+      },
+      "expected_leaflet": {
+        "lat": 0.304437763774,
+        "lng": 0.222226629865
+      },
+      "expected_provider": {
+        "x": 0.222226629865,
+        "y": 0.304437763774
+      },
+      "expected_zone": "base",
+      "id": "appsample_m7_q4",
+      "map_id": 7,
+      "provider": "appsample",
+      "region": "enkanomiya_q4",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -740.0,
+        "y": 910.0
+      },
+      "expected_leaflet": {
+        "lat": -0.21958643098699998,
+        "lng": -0.322349909414
+      },
+      "expected_provider": {
+        "x": -0.322349909414,
+        "y": -0.21958643098699998
+      },
+      "expected_zone": "base",
+      "id": "appsample_m7_q2",
+      "map_id": 7,
+      "provider": "appsample",
+      "region": "enkanomiya_q2",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "expected_leaflet": {
+        "lat": -0.007533606738,
+        "lng": 0.1389419667
+      },
+      "expected_provider": {
+        "x": 0.1389419667,
+        "y": -0.007533606738
+      },
+      "expected_zone": "base",
+      "id": "appsample_m9_origin",
+      "map_id": 9,
+      "provider": "appsample",
+      "region": "chasm_origin",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 420.0,
+        "y": 530.0
+      },
+      "expected_leaflet": {
+        "lat": -0.37058355167100004,
+        "lng": 0.42664188744599996
+      },
+      "expected_provider": {
+        "x": 0.42664188744599996,
+        "y": -0.37058355167100004
+      },
+      "expected_zone": "base",
+      "id": "appsample_m9_q1",
+      "map_id": 9,
+      "provider": "appsample",
+      "region": "chasm_q1",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -610.0,
+        "y": -480.0
+      },
+      "expected_leaflet": {
+        "lat": 0.32126634339,
+        "lng": -0.278907918193
+      },
+      "expected_provider": {
+        "x": -0.278907918193,
+        "y": 0.32126634339
+      },
+      "expected_zone": "base",
+      "id": "appsample_m9_q3",
+      "map_id": 9,
+      "provider": "appsample",
+      "region": "chasm_q3",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "expected_leaflet": {
+        "lat": -0.03090441433,
+        "lng": 0.03262133342
+      },
+      "expected_provider": {
+        "x": 0.03262133342,
+        "y": -0.03090441433
+      },
+      "expected_zone": "base",
+      "id": "appsample_m34_origin",
+      "map_id": 34,
+      "provider": "appsample",
+      "region": "sea_of_bygone_eras_origin",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 950.0,
+        "y": -780.0
+      },
+      "expected_leaflet": {
+        "lat": 0.23693814065,
+        "lng": 0.35882819256
+      },
+      "expected_provider": {
+        "x": 0.35882819256,
+        "y": 0.23693814065
+      },
+      "expected_zone": "base",
+      "id": "appsample_m34_q4",
+      "map_id": 34,
+      "provider": "appsample",
+      "region": "sea_of_bygone_eras_q4",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -820.0,
+        "y": 640.0
+      },
+      "expected_leaflet": {
+        "lat": -0.25067266457,
+        "lng": -0.24894669236399997
+      },
+      "expected_provider": {
+        "x": -0.24894669236399997,
+        "y": -0.25067266457
+      },
+      "expected_zone": "base",
+      "id": "appsample_m34_q2",
+      "map_id": 34,
+      "provider": "appsample",
+      "region": "sea_of_bygone_eras_q2",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "expected_leaflet": {
+        "lat": 0.0,
+        "lng": 0.0
+      },
+      "expected_provider": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "expected_zone": "base",
+      "id": "appsample_m36_origin",
+      "map_id": 36,
+      "provider": "appsample",
+      "region": "sacred_mountain_origin",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 560.0,
+        "y": 720.0
+      },
+      "expected_leaflet": {
+        "lat": -0.37080176508,
+        "lng": 0.288402934848
+      },
+      "expected_provider": {
+        "x": 0.288402934848,
+        "y": -0.37080176508
+      },
+      "expected_zone": "base",
+      "id": "appsample_m36_q1",
+      "map_id": 36,
+      "provider": "appsample",
+      "region": "sacred_mountain_q1",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -680.0,
+        "y": -510.0
+      },
+      "expected_leaflet": {
+        "lat": 0.262651250265,
+        "lng": -0.35020356374399997
+      },
+      "expected_provider": {
+        "x": -0.35020356374399997,
+        "y": 0.262651250265
+      },
+      "expected_zone": "base",
+      "id": "appsample_m36_q3",
+      "map_id": 36,
+      "provider": "appsample",
+      "region": "sacred_mountain_q3",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "expected_leaflet": {
+        "lat": 0.04287577188,
+        "lng": -0.00411639969
+      },
+      "expected_provider": {
+        "x": -0.00411639969,
+        "y": 0.04287577188
+      },
+      "expected_zone": "base",
+      "id": "appsample_m37_origin",
+      "map_id": 37,
+      "provider": "appsample",
+      "region": "map37_origin",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 730.0,
+        "y": -490.0
+      },
+      "expected_leaflet": {
+        "lat": 0.210945671234,
+        "lng": 0.24627403473299997
+      },
+      "expected_provider": {
+        "x": 0.24627403473299997,
+        "y": 0.210945671234
+      },
+      "expected_zone": "base",
+      "id": "appsample_m37_q4",
+      "map_id": 37,
+      "provider": "appsample",
+      "region": "map37_q4",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -590.0,
+        "y": 810.0
+      },
+      "expected_leaflet": {
+        "lat": -0.234954061746,
+        "lng": -0.20648675079899997
+      },
+      "expected_provider": {
+        "x": -0.20648675079899997,
+        "y": -0.234954061746
+      },
+      "expected_zone": "base",
+      "id": "appsample_m37_q2",
+      "map_id": 37,
+      "provider": "appsample",
+      "region": "map37_q2",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "expected_leaflet": {
+        "lat": 0.0001504959339,
+        "lng": -0.3464388249
+      },
+      "expected_provider": {
+        "x": -0.3464388249,
+        "y": 0.0001504959339
+      },
+      "expected_zone": "base",
+      "id": "appsample_m40_origin",
+      "map_id": 40,
+      "provider": "appsample",
+      "region": "map40_origin",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": 1800.0,
+        "y": -1400.0
+      },
+      "expected_leaflet": {
+        "lat": 0.20947821817390003,
+        "lng": -0.07730251296000001
+      },
+      "expected_provider": {
+        "x": -0.07730251296000001,
+        "y": 0.20947821817390003
+      },
+      "expected_zone": "base",
+      "id": "appsample_m40_q4",
+      "map_id": 40,
+      "provider": "appsample",
+      "region": "map40_q4",
+      "swap_lat_lng": false
+    },
+    {
+      "canonical": {
+        "x": -1650.0,
+        "y": 1250.0
+      },
+      "expected_leaflet": {
+        "lat": -0.1867492560661,
+        "lng": -0.5931471108449999
+      },
+      "expected_provider": {
+        "x": -0.5931471108449999,
+        "y": -0.1867492560661
+      },
+      "expected_zone": "base",
+      "id": "appsample_m40_q2",
+      "map_id": 40,
+      "provider": "appsample",
+      "region": "map40_q2",
+      "swap_lat_lng": false
+    }
+  ]
+}
