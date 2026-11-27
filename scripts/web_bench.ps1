@@ -2,7 +2,10 @@ param(
     [string]$Scenario = '',
     [Nullable[int]]$Limit = $null,
     [string]$BrowserPath = '',
-    [int]$Port = 8765
+    [int]$Port = 8765,
+    # Minimize the bench browser after the map page has loaded, so the tab is hidden and
+    # throttled like a real HoYoLAB tab sitting behind the fullscreen game.
+    [switch]$Minimize
 )
 
 $ErrorActionPreference = 'Stop'
@@ -100,16 +103,72 @@ New-Item -ItemType Directory -Path $UserDataDir -Force | Out-Null
 $exitCode = 2
 try {
     $mapUrl = 'https://act.hoyolab.com/ys/app/interactive-map/index.html#/map/2'
+    # Never pop a window over the developer's screen: headless by default; -Minimize uses an
+    # off-screen window that is then minimized (a hidden tab needs a real window to be throttled).
+    $windowArgs = if ($Minimize) {
+        @('--window-position=-32000,-32000', '--window-size=1280,800')
+    } else {
+        @('--headless=new', '--window-size=1280,800')
+    }
     $chromeArgLine = @(
         "`"--user-data-dir=$UserDataDir`""
         "`"--load-extension=$ExtDir`""
         "`"--disable-extensions-except=$ExtDir`""
         '--no-first-run'
         '--no-default-browser-check'
-        "`"$mapUrl`""
-    ) -join ' '
+    ) + $windowArgs + @("`"$mapUrl`"") -join ' '
 
     $null = Start-Process -FilePath $BrowserPath -ArgumentList $chromeArgLine -PassThru
+
+    if ($Minimize) {
+        if (-not ('GhWebBench.Win' -as [type])) {
+            Add-Type -Namespace GhWebBench -Name Win -MemberDefinition @'
+public delegate bool EnumProc(System.IntPtr h, System.IntPtr l);
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, System.IntPtr l);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr h, out uint pid);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(System.IntPtr h);
+[DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int cmd);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(System.IntPtr h, System.Text.StringBuilder s, int n);
+'@
+        }
+        $minimized = $false
+        $deadline = (Get-Date).AddSeconds(45)
+        while (-not $minimized -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+            $benchPids = @(
+                Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $_.CommandLine -and
+                        $_.CommandLine.IndexOf($UserDataDir, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                    } |
+                    ForEach-Object { [uint32]$_.ProcessId }
+            )
+            $hits = New-Object System.Collections.ArrayList
+            $cb = [GhWebBench.Win+EnumProc]{
+                param($h, $l)
+                $wp = [uint32]0
+                [void][GhWebBench.Win]::GetWindowThreadProcessId($h, [ref]$wp)
+                if ($benchPids -contains $wp -and [GhWebBench.Win]::IsWindowVisible($h)) {
+                    $sb = New-Object System.Text.StringBuilder 256
+                    [void][GhWebBench.Win]::GetWindowText($h, $sb, 256)
+                    if ($sb.ToString() -match 'HoYoLAB') { [void]$hits.Add($h) }
+                }
+                return $true
+            }
+            [void][GhWebBench.Win]::EnumWindows($cb, [System.IntPtr]::Zero)
+            if ($hits.Count -gt 0) {
+                # Give the extension a few seconds to inject before hiding the tab.
+                Start-Sleep -Seconds 5
+                foreach ($h in $hits) { [void][GhWebBench.Win]::ShowWindow($h, 6) }  # SW_MINIMIZE
+                $minimized = $true
+            }
+        }
+        if (-not $minimized) {
+            Write-ErrLine "Could not find the bench browser window to minimize."
+            exit 2
+        }
+        [Console]::Error.WriteLine("[web_bench.ps1] Browser minimized (tab hidden).")
+    }
 
     $benchArgs = @(
         'run', '-q',

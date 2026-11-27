@@ -3334,6 +3334,58 @@
         });
     }
 
+    // Cheap lookup of the live Leaflet map (no full-DOM scan), used to spot a freshly mounted map.
+    function quickLeafletMap() {
+        const container = document.querySelector('.leaflet-container');
+        if (!container) return null;
+        if (container._leaflet_map) return container._leaflet_map;
+        let el = container;
+        while (el) {
+            if (el.__vue__ && el.__vue__.map) return el.__vue__.map;
+            el = el.parentElement;
+        }
+        return null;
+    }
+
+    // Resolves as soon as HoYoLAB has mounted a new, loaded Leaflet map (different from `oldMap`).
+    // Driven by a MutationObserver so it is not slowed down by background-tab timer throttling
+    // (the map tab is usually hidden behind the game); the timers below are only a safety net.
+    function waitForSwitchedMapReady(oldMap, timeoutMs = 4000) {
+        return new Promise((resolve) => {
+            const start = Date.now();
+            let settled = false;
+            let observer = null;
+            let timer = null;
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                if (observer) observer.disconnect();
+                if (timer) clearTimeout(timer);
+                resolve(findMapContext());
+            };
+            const check = () => {
+                if (settled) return;
+                const map = quickLeafletMap();
+                if (map && map !== oldMap && map._loaded) {
+                    finish();
+                } else if (Date.now() - start >= timeoutMs) {
+                    finish();
+                }
+            };
+            try {
+                observer = new MutationObserver(check);
+                observer.observe(document.documentElement, { childList: true, subtree: true });
+            } catch (e) {
+                observer = null;
+            }
+            const tick = () => {
+                check();
+                if (!settled) timer = setTimeout(tick, 250);
+            };
+            timer = setTimeout(tick, 250);
+        });
+    }
+
     function performAutoSyncAndMark(data, markAfterSync = false, eventSeq = 0) {
         try {
             const targetMapId = data.map_id ? parseInt(data.map_id) : 2;
@@ -3343,6 +3395,7 @@
                 const mapName = data.map_name || `Map ${targetMapId}`;
                 setLog(tr('page.sync.switching_map', { name: mapName }), '#38bdf8');
                 if (markAfterSync && !nativeFeedbackActive) playBeep();
+                const oldMap = quickLeafletMap();
 
                 // Switch route via Vue Router or Hash
                 try {
@@ -3369,7 +3422,12 @@
                     }
                 }, 700);
 
-                waitForNewMapReady(4000).then((newCtx) => {
+                // Position-only M-Map sync uses the event-driven wait; SYNC_AND_MARK keeps the old
+                // timer wait because marking also needs the new map's pins to be loaded.
+                const mapReady = markAfterSync
+                    ? waitForNewMapReady(4000)
+                    : waitForSwitchedMapReady(oldMap, 4000);
+                mapReady.then((newCtx) => {
                     setLog(tr('page.sync.map_opened', { name: mapName }), '#22c55e');
                     executeSyncAndMarkOnContext(newCtx, data, markAfterSync, eventSeq);
                 });
