@@ -5992,4 +5992,133 @@ mod tests {
             Err(CoreError::InvalidData(_))
         ));
     }
+
+    #[test]
+    fn transform_vectors_fixture_parity() {
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tests/fixtures/multimap/transform_vectors.json");
+        let raw = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", fixture_path.display()));
+        let doc: Value = serde_json::from_str(&raw).expect("valid transform_vectors.json");
+
+        assert_eq!(doc["schema_version"].as_i64(), Some(1));
+        let forward_abs = doc["tolerances"]["forward_abs"]
+            .as_f64()
+            .expect("tolerances.forward_abs");
+        let leaflet_abs = doc["tolerances"]["leaflet_abs"]
+            .as_f64()
+            .expect("tolerances.leaflet_abs");
+        let roundtrip_abs = doc["tolerances"]["roundtrip_canonical_abs"]
+            .as_f64()
+            .expect("tolerances.roundtrip_canonical_abs");
+
+        let vectors = doc["vectors"]
+            .as_array()
+            .expect("vectors array in transform_vectors.json");
+        assert!(!vectors.is_empty(), "vectors must not be empty");
+
+        let mut seen_pairs: HashSet<(String, i64)> = HashSet::new();
+        for v in vectors {
+            let id = v["id"].as_str().expect("vector.id");
+            let provider = v["provider"].as_str().expect("vector.provider");
+            let map_id = v["map_id"].as_i64().expect("vector.map_id");
+            let expected_zone = v["expected_zone"].as_str().expect("vector.expected_zone");
+            let swap_lat_lng = v["swap_lat_lng"].as_bool().expect("vector.swap_lat_lng");
+            let cx = v["canonical"]["x"].as_f64().expect("canonical.x");
+            let cy = v["canonical"]["y"].as_f64().expect("canonical.y");
+            let exp_px = v["expected_provider"]["x"]
+                .as_f64()
+                .expect("expected_provider.x");
+            let exp_py = v["expected_provider"]["y"]
+                .as_f64()
+                .expect("expected_provider.y");
+            let exp_lat = v["expected_leaflet"]["lat"]
+                .as_f64()
+                .expect("expected_leaflet.lat");
+            let exp_lng = v["expected_leaflet"]["lng"]
+                .as_f64()
+                .expect("expected_leaflet.lng");
+
+            seen_pairs.insert((provider.to_owned(), map_id));
+
+            let tf = provider_default_transform(provider, map_id)
+                .unwrap_or_else(|| panic!("{id}: missing seed transform for {provider}:{map_id}"));
+            assert_eq!(
+                tf.swap_lat_lng, swap_lat_lng,
+                "{id}: swap_lat_lng mismatch"
+            );
+
+            let (px, py) = tf.forward(cx, cy);
+            assert!(
+                (px - exp_px).abs() <= forward_abs && (py - exp_py).abs() <= forward_abs,
+                "{id}: forward({cx}, {cy}) = ({px}, {py}) != expected ({exp_px}, {exp_py})"
+            );
+
+            let (zone_px, zone_py) = if expected_zone == "base" {
+                tf.base.transform(cx, cy)
+            } else {
+                let z = tf
+                    .zones
+                    .iter()
+                    .find(|z| z.id == expected_zone)
+                    .unwrap_or_else(|| panic!("{id}: expected_zone {expected_zone:?} not found"));
+                z.affine.transform(cx, cy)
+            };
+            assert!(
+                (px - zone_px).abs() <= forward_abs && (py - zone_py).abs() <= forward_abs,
+                "{id}: expected_zone={expected_zone} mismatch: forward=({px}, {py}) vs zone=({zone_px}, {zone_py})"
+            );
+
+            let (lat, lng) = tf.to_leaflet_latlng(cx, cy);
+            assert!(
+                (lat - exp_lat).abs() <= leaflet_abs && (lng - exp_lng).abs() <= leaflet_abs,
+                "{id}: to_leaflet_latlng({cx}, {cy}) = ({lat}, {lng}) != expected ({exp_lat}, {exp_lng})"
+            );
+
+            let (rcx, rcy) = tf
+                .inverse(px, py)
+                .unwrap_or_else(|e| panic!("{id}: inverse failed: {e}"));
+            assert!(
+                (rcx - cx).abs() <= roundtrip_abs && (rcy - cy).abs() <= roundtrip_abs,
+                "{id}: inverse roundtrip ({rcx}, {rcy}) != ({cx}, {cy})"
+            );
+
+            let (lrcx, lrcy) = tf
+                .from_leaflet_latlng(lat, lng)
+                .unwrap_or_else(|e| panic!("{id}: from_leaflet_latlng failed: {e}"));
+            assert!(
+                (lrcx - cx).abs() <= roundtrip_abs && (lrcy - cy).abs() <= roundtrip_abs,
+                "{id}: from_leaflet_latlng roundtrip ({lrcx}, {lrcy}) != ({cx}, {cy})"
+            );
+        }
+
+        let required_pairs = [
+            ("hoyolab", 2_i64),
+            ("kongying", 2),
+            ("appsample", 2),
+            ("appsample", 7),
+            ("appsample", 9),
+            ("appsample", 34),
+            ("appsample", 36),
+            ("appsample", 37),
+            ("appsample", 40),
+        ];
+        for (provider, map_id) in required_pairs {
+            assert!(
+                seen_pairs.contains(&(provider.to_owned(), map_id)),
+                "transform_vectors.json missing required seeded pair {provider}:{map_id}"
+            );
+        }
+
+        // Verify forward-only base fallback on non-invertible ocean fold-over sides just outside 350u pad.
+        let as2 = provider_default_transform("appsample", 2).expect("appsample:2");
+        for (cx, cy) in [(-569.0, 6000.0), (-13939.4, 1500.0)] {
+            let (px, py) = as2.forward(cx, cy);
+            let (bx, by) = as2.base.transform(cx, cy);
+            assert!(
+                (px - bx).abs() <= forward_abs && (py - by).abs() <= forward_abs,
+                "appsample:2 ({cx}, {cy}) did not fall back to base"
+            );
+        }
+    }
 }
