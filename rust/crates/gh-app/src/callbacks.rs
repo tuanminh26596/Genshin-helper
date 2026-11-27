@@ -1356,12 +1356,13 @@ mod tests {
         assert_eq!(handled_unmark, json!(true));
 
         let want_unmark = t("hud.flash.web_unmark_failed", &[]);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while std::time::Instant::now() < deadline {
             if state.nav_hud.last_render_meta().subtitle == want_unmark {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            let rem = deadline.saturating_duration_since(std::time::Instant::now());
+            state.nav_hud.wait_for_render_meta(rem, |m| m.subtitle == want_unmark);
         }
         let meta_unmark = state.nav_hud.last_render_meta();
         assert_eq!(meta_unmark.subtitle, want_unmark);
@@ -1388,12 +1389,13 @@ mod tests {
         );
 
         let want_mark = t("hud.flash.web_failed", &[]);
-        let deadline2 = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline2 = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while std::time::Instant::now() < deadline2 {
             if state.nav_hud.last_render_meta().subtitle == want_mark {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            let rem = deadline2.saturating_duration_since(std::time::Instant::now());
+            state.nav_hud.wait_for_render_meta(rem, |m| m.subtitle == want_mark);
         }
         let meta_mark = state.nav_hud.last_render_meta();
         assert_eq!(meta_mark.subtitle, want_mark);

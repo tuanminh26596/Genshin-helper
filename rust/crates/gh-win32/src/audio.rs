@@ -498,7 +498,7 @@ mod tests {
         assert!(!audio.play("info", false));
         assert!(audio.play("info", true));
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while count.load(Ordering::SeqCst) < 4 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -546,7 +546,7 @@ mod tests {
             let (elock, ecv) = &*entered;
             let e = elock.lock().unwrap();
             let (e_guard, timeout_res) = ecv
-                .wait_timeout_while(e, Duration::from_secs(5), |flag| !*flag)
+                .wait_timeout_while(e, Duration::from_secs(15), |flag| !*flag)
                 .unwrap();
             assert!(
                 !timeout_res.timed_out() && *e_guard,
@@ -567,7 +567,7 @@ mod tests {
             cv.notify_all();
         }
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while played_lens.lock().unwrap().len() < 5 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }

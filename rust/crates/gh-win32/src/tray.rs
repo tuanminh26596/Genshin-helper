@@ -1174,7 +1174,7 @@ mod tests {
         assert_eq!(qes.0, 1);
 
         let _ = unsafe { SendMessageW(hw, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0))) };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while !quit_called.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(15));
         }

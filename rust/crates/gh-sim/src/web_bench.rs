@@ -605,6 +605,29 @@ async fn run_web_bench_on_server(
     actual_port: u16,
     scenario_events: &[WebScenarioEvent],
 ) -> Result<WebBenchReport, String> {
+    let event_timeout = Duration::from_secs_f64(opts.event_timeout_s);
+    run_web_bench_on_server_with_timeouts(
+        opts,
+        server,
+        recorder,
+        actual_port,
+        scenario_events,
+        |_| event_timeout,
+    )
+    .await
+}
+
+async fn run_web_bench_on_server_with_timeouts<F>(
+    opts: &WebBenchOptions,
+    server: &SyncServer,
+    recorder: &FeedbackRecorder,
+    actual_port: u16,
+    scenario_events: &[WebScenarioEvent],
+    event_timeout_for: F,
+) -> Result<WebBenchReport, String>
+where
+    F: Fn(usize) -> Duration,
+{
     let connect_deadline = Instant::now() + Duration::from_secs_f64(opts.connect_timeout_s);
 
     // Wait until the extension has actively parked in /poll.
@@ -681,7 +704,6 @@ async fn run_web_bench_on_server(
 
     let mut results = Vec::with_capacity(measured_events.len());
     let mut prev_map_id = warmup_ev.map_id;
-    let event_timeout = Duration::from_secs_f64(opts.event_timeout_s);
 
     for (i, ev) in measured_events.iter().enumerate() {
         let from_map = prev_map_id;
@@ -692,7 +714,7 @@ async fn run_web_bench_on_server(
         let start_idx = recorder.len();
         let sent_at = Instant::now();
         let seq = server.broadcast(ev.payload.clone(), false, false);
-        let deadline = sent_at + event_timeout;
+        let deadline = sent_at + event_timeout_for(i);
 
         let (status, ok, latency_s) = match recorder
             .wait_for_sync_feedback(start_idx, &[seq], deadline)
@@ -1169,7 +1191,6 @@ mod tests {
                         let _ =
                             http_request(port, "POST", "/action_feedback", Some(&wrong_type)).await;
 
-                        tokio::time::sleep(Duration::from_millis(25)).await;
                         let good = json!({
                             "event_type": "SYNC_POSITION_ONLY",
                             "status": "synced",
@@ -1199,15 +1220,25 @@ mod tests {
         let opts = WebBenchOptions {
             scenario_path,
             port,
-            connect_timeout_s: 5.0,
+            connect_timeout_s: 15.0,
             event_timeout_s: 0.35,
             gap_s: 0.0,
             limit: None,
             out_dir: Some(out_dir.clone()),
         };
 
+        // Give matched/error events (indices 0, 1) a generous hang-guard timeout so CPU load
+        // never triggers false timeouts, and keep the short timeout only for the deliberately
+        // dropped event (index 2).
+        let timeout_for_event = |idx: usize| {
+            if idx == 2 {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(10)
+            }
+        };
         let report =
-            run_web_bench_on_server(&opts, &server, &recorder, port, &scenario.events)
+            run_web_bench_on_server_with_timeouts(&opts, &server, &recorder, port, &scenario.events, timeout_for_event)
                 .await
                 .expect("web-bench run completes with structured failures");
 

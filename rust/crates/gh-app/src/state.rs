@@ -3145,8 +3145,8 @@ mod tests {
         let wait_start = Instant::now();
         while !reader_ready.load(Ordering::Acquire) {
             assert!(
-                wait_start.elapsed() < Duration::from_secs(5),
-                "reader_handle did not enter read loop within 5s"
+                wait_start.elapsed() < Duration::from_secs(15),
+                "reader_handle did not enter read loop within 15s"
             );
             std::thread::yield_now();
         }
@@ -3272,12 +3272,13 @@ mod tests {
                 .contains("201")
         );
         let want_offline = t("hud.flash.web_unmark_failed", &[]);
-        let dl1 = Instant::now() + Duration::from_secs(2);
+        let dl1 = Instant::now() + Duration::from_secs(15);
         while Instant::now() < dl1 {
             if state.nav_hud.last_render_meta().subtitle == want_offline {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            let rem = dl1.saturating_duration_since(Instant::now());
+            state.nav_hud.wait_for_render_meta(rem, |m| m.subtitle == want_offline);
         }
         assert_eq!(state.nav_hud.last_render_meta().subtitle, want_offline);
         assert_eq!(state.nav_hud.last_render_meta().palette, HudPalette::Warning);
@@ -3308,12 +3309,13 @@ mod tests {
         assert_eq!(ev["pin_id"], json!("201"));
 
         let want_online = t("hud.flash.undone", &[("name", "Test Chest")]);
-        let dl2 = Instant::now() + Duration::from_secs(2);
+        let dl2 = Instant::now() + Duration::from_secs(15);
         while Instant::now() < dl2 {
             if state.nav_hud.last_render_meta().subtitle == want_online {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            let rem = dl2.saturating_duration_since(Instant::now());
+            state.nav_hud.wait_for_render_meta(rem, |m| m.subtitle == want_online);
         }
         assert_eq!(state.nav_hud.last_render_meta().subtitle, want_online);
 

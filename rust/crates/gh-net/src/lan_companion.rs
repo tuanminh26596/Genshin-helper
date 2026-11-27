@@ -2869,10 +2869,13 @@ mod tests {
         assert!(srv.broadcast_state(json!({"lat": 12.5, "lng": -34.5}), true));
 
         let received_count = Arc::new(AtomicUsize::new(0));
+        let received_notify = Arc::new(Notify::new());
         let received_clone = Arc::clone(&received_count);
+        let received_notify_cb = Arc::clone(&received_notify);
         srv.set_on_client_message(Some(Arc::new(move |val| {
             if val.get("hello").and_then(|v| v.as_str()) == Some("world") {
                 received_clone.fetch_add(1, Ordering::AcqRel);
+                received_notify_cb.notify_waiters();
             }
         })));
 
@@ -2892,8 +2895,13 @@ mod tests {
         assert_eq!(p_pong, b"ping42");
 
         // Send JSON object frame -> triggers on_client_message
+        let recv_fut = received_notify.notified();
         raw_ws_send_masked(&mut ws1, 0x1, br#"{"hello":"world"}"#).await;
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        if received_count.load(Ordering::Acquire) < 1 {
+            tokio::time::timeout(Duration::from_secs(10), recv_fut)
+                .await
+                .expect("on_client_message timeout");
+        }
         assert_eq!(received_count.load(Ordering::Acquire), 1);
 
         // 2nd client allowed (max_clients = 2), 3rd client rejected with 503
@@ -2907,11 +2915,17 @@ mod tests {
         for i in 1..=5 {
             assert!(srv.broadcast_state(json!({"lat": i as f64, "lng": 0.0}), false));
         }
-        tokio::time::sleep(Duration::from_millis(120)).await;
         let mut last_lat = None;
-        while let Ok(Some((op, data))) =
-            tokio::time::timeout(Duration::from_millis(60), raw_ws_recv_frame(&mut ws1)).await
-        {
+        let coalesce_dl = Instant::now() + Duration::from_secs(10);
+        while last_lat != Some(5.0) {
+            let rem = coalesce_dl.saturating_duration_since(Instant::now());
+            assert!(!rem.is_zero(), "timed out waiting for coalesced lat=5.0 (last={last_lat:?})");
+            let Some((op, data)) = tokio::time::timeout(rem, raw_ws_recv_frame(&mut ws1))
+                .await
+                .expect("coalesced state timeout")
+            else {
+                break;
+            };
             if op == 0x1
                 && let Ok(v) = serde_json::from_slice::<Value>(&data)
             {
@@ -2980,15 +2994,21 @@ mod tests {
             .await
             .expect("fast ws");
 
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        // Drain initial state from fast client
-        let _ = tokio::time::timeout(Duration::from_millis(60), raw_ws_recv_frame(&mut fast)).await;
+        // Drain the guaranteed initial STATE snapshot before sending seq=0..8
+        let (op_init, init_data) =
+            tokio::time::timeout(Duration::from_secs(10), raw_ws_recv_frame(&mut fast))
+                .await
+                .expect("initial state timeout")
+                .expect("initial state frame");
+        assert_eq!(op_init, 0x1);
+        let init_v: Value = serde_json::from_slice(&init_data).expect("init json");
+        assert_eq!(init_v["evict_test"], true);
 
         let big_pad = "Z".repeat(70 * 1024);
         for seq in 0..8 {
             assert!(srv.broadcast_state(json!({"seq": seq, "pad": big_pad}), true));
             let (op, data) =
-                tokio::time::timeout(Duration::from_millis(200), raw_ws_recv_frame(&mut fast))
+                tokio::time::timeout(Duration::from_secs(10), raw_ws_recv_frame(&mut fast))
                     .await
                     .expect("fast recv timeout")
                     .expect("fast recv frame");
@@ -2999,7 +3019,7 @@ mod tests {
 
         srv.broadcast_state(json!({"alive": true}), true);
         let (op, data) =
-            tokio::time::timeout(Duration::from_millis(200), raw_ws_recv_frame(&mut fast))
+            tokio::time::timeout(Duration::from_secs(10), raw_ws_recv_frame(&mut fast))
                 .await
                 .expect("alive timeout")
                 .expect("alive frame");
@@ -3196,10 +3216,13 @@ mod tests {
         assert_eq!(rev, 1);
 
         let seen_actions = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen_notify = Arc::new(Notify::new());
         let seen_clone = Arc::clone(&seen_actions);
+        let seen_notify_cb = Arc::clone(&seen_notify);
         srv.set_on_client_message(Some(Arc::new(move |val| {
             if let Some(t) = val.get("type").and_then(Value::as_str) {
                 seen_clone.lock().unwrap().push(t.to_owned());
+                seen_notify_cb.notify_waiters();
             }
         })));
 
@@ -3214,7 +3237,7 @@ mod tests {
         let mut saw_route = false;
         let mut saw_pins = false;
         for _ in 0..4 {
-            if let Ok(Some((op, data))) = tokio::time::timeout(Duration::from_millis(120), raw_ws_recv_frame(&mut ws)).await {
+            if let Ok(Some((op, data))) = tokio::time::timeout(Duration::from_secs(10), raw_ws_recv_frame(&mut ws)).await {
                 assert_eq!(op, 0x1);
                 let v: Value = serde_json::from_slice(&data).unwrap();
                 if v["type"] == "ROUTE_UPDATED" {
@@ -3233,7 +3256,16 @@ mod tests {
         raw_ws_send_masked(&mut ws, 0x1, br#"{"type":"MARK_PIN","action":"mark","pin_id":"999"}"#).await;
         raw_ws_send_masked(&mut ws, 0x1, br#"{"type":"SELECT_TARGET","pin_id":"999","lat":5.5,"lng":6.5}"#).await;
         raw_ws_send_masked(&mut ws, 0x1, br#"{"type":"UNDO_LAST"}"#).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let act_dl = Instant::now() + Duration::from_secs(10);
+        loop {
+            let fut = seen_notify.notified();
+            if seen_actions.lock().unwrap().len() >= 4 {
+                break;
+            }
+            let rem = act_dl.saturating_duration_since(Instant::now());
+            assert!(!rem.is_zero(), "timed out waiting for 4 WS client actions");
+            let _ = tokio::time::timeout(rem, fut).await;
+        }
         let actions = seen_actions.lock().unwrap().clone();
         assert!(actions.contains(&"SELECT_ROUTE_SECTION".to_owned()));
         assert!(actions.contains(&"MARK_PIN".to_owned()));
@@ -3262,7 +3294,7 @@ mod tests {
 
         // JSON PING -> JSON PONG
         raw_ws_send_masked(&mut ws, 0x1, br#"{"type":"PING"}"#).await;
-        let (op_pong, p_pong) = tokio::time::timeout(Duration::from_millis(300), raw_ws_recv_frame(&mut ws))
+        let (op_pong, p_pong) = tokio::time::timeout(Duration::from_secs(10), raw_ws_recv_frame(&mut ws))
             .await
             .expect("pong timeout")
             .expect("pong frame");
@@ -3281,7 +3313,7 @@ mod tests {
         }));
         assert_eq!(rev, 1);
 
-        let (op_snap, p_snap) = tokio::time::timeout(Duration::from_millis(600), raw_ws_recv_frame(&mut ws))
+        let (op_snap, p_snap) = tokio::time::timeout(Duration::from_secs(10), raw_ws_recv_frame(&mut ws))
             .await
             .expect("snapshot timeout")
             .expect("snapshot frame");

@@ -21,9 +21,9 @@ use image::{AnimationDecoder, Delay, ImageDecoder, ImageFormat, ImageReader, Rgb
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiny_skia::{
     FillRule, FilterQuality, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap,
     PixmapMut, PixmapPaint, PremultipliedColorU8, Stroke, Transform,
@@ -3970,10 +3970,13 @@ struct NavHudShared {
     resolver_version: u64,
     last_render_meta: HudRenderMeta,
     render_stats: HudRenderStats,
+    render_seq: u64,
+    hide_ack_seq: u64,
 }
 
 struct NavHandler {
     shared: Arc<Mutex<NavHudShared>>,
+    render_cv: Arc<Condvar>,
     renderer: NavHudRenderer,
     smoother: SpringAngleSmoother,
     distance_smoother: ScalarSmoother,
@@ -4383,6 +4386,9 @@ impl NavHandler {
             let mut g = self.shared.lock().expect("nav hud shared lock poisoned");
             g.last_render_meta = meta;
             g.render_stats = stats;
+            g.render_seq = g.render_seq.wrapping_add(1);
+            drop(g);
+            self.render_cv.notify_all();
         }
     }
 }
@@ -4408,10 +4414,19 @@ impl LayeredHandler for NavHandler {
                     .edit_mode;
                 ctx.set_edit_mode(edit);
                 self.render_tick(ctx, true, false);
+                let mut g = self.shared.lock().expect("nav hud shared lock poisoned");
+                g.render_seq = g.render_seq.wrapping_add(1);
+                drop(g);
+                self.render_cv.notify_all();
                 Some(0)
             }
             WM_APP_HIDE => {
                 if ctx.is_edit_mode() {
+                    let mut g = self.shared.lock().expect("nav hud shared lock poisoned");
+                    g.hide_ack_seq = g.hide_ack_seq.wrapping_add(1);
+                    g.render_seq = g.render_seq.wrapping_add(1);
+                    drop(g);
+                    self.render_cv.notify_all();
                     return Some(0);
                 }
                 if self.render_timer_active {
@@ -4425,6 +4440,11 @@ impl LayeredHandler for NavHandler {
                 self.hover_fade.reset();
                 self.last_hud_screen_rect = None;
                 self.last_uploaded_sig = None;
+                let mut g = self.shared.lock().expect("nav hud shared lock poisoned");
+                g.hide_ack_seq = g.hide_ack_seq.wrapping_add(1);
+                g.render_seq = g.render_seq.wrapping_add(1);
+                drop(g);
+                self.render_cv.notify_all();
                 Some(0)
             }
             WM_APP_CLOSE => {
@@ -4492,6 +4512,7 @@ impl LayeredHandler for NavHandler {
 pub struct NavMiniHud {
     host: LayeredWindowHost,
     shared: Arc<Mutex<NavHudShared>>,
+    render_cv: Arc<Condvar>,
     image_cache: Arc<Mutex<NavHudImageCache>>,
 }
 
@@ -4547,10 +4568,13 @@ impl NavMiniHud {
             resolver_version: 0,
             last_render_meta: HudRenderMeta::default(),
             render_stats: HudRenderStats::default(),
+            render_seq: 0,
+            hide_ack_seq: 0,
         }));
         Self {
             host,
             shared,
+            render_cv: Arc::new(Condvar::new()),
             image_cache: Arc::new(Mutex::new(NavHudImageCache::new())),
         }
     }
@@ -4606,9 +4630,11 @@ impl NavMiniHud {
             return None;
         }
         let shared = Arc::clone(&self.shared);
+        let render_cv = Arc::clone(&self.render_cv);
         let image_cache = Arc::clone(&self.image_cache);
         self.host.ensure_started(move || NavHandler {
             shared,
+            render_cv,
             renderer: NavHudRenderer::with_image_cache(image_cache),
             smoother: SpringAngleSmoother::default(),
             distance_smoother: ScalarSmoother::default(),
@@ -4736,6 +4762,67 @@ impl NavMiniHud {
             .expect("nav hud shared lock poisoned")
             .last_render_meta
             .clone()
+    }
+
+    /// Waits on UI-thread render notifications until `pred` matches `last_render_meta`
+    /// or `timeout` elapses.
+    pub fn wait_for_render_meta<F>(&self, timeout: Duration, mut pred: F) -> bool
+    where
+        F: FnMut(&HudRenderMeta) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.shared.lock().expect("nav hud shared lock poisoned");
+        while !pred(&guard.last_render_meta) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next_guard, _) = self
+                .render_cv
+                .wait_timeout(guard, remaining)
+                .expect("nav hud render condvar poisoned");
+            guard = next_guard;
+        }
+        true
+    }
+
+    /// Waits on UI-thread render/hide/edit notifications until `pred()` returns `true`
+    /// or `timeout` elapses.
+    pub fn wait_until_render<F>(&self, timeout: Duration, mut pred: F) -> bool
+    where
+        F: FnMut() -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let seq = self
+                .shared
+                .lock()
+                .expect("nav hud shared lock poisoned")
+                .render_seq;
+            if pred() {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let guard = self.shared.lock().expect("nav hud shared lock poisoned");
+            if guard.render_seq != seq {
+                continue;
+            }
+            let _ = self
+                .render_cv
+                .wait_timeout(guard, remaining)
+                .expect("nav hud render condvar poisoned");
+        }
+    }
+
+    #[cfg(test)]
+    fn hide_ack_seq(&self) -> u64 {
+        self.shared
+            .lock()
+            .expect("nav hud shared lock poisoned")
+            .hide_ack_seq
     }
 
     pub fn render_stats(&self) -> HudRenderStats {
@@ -6361,6 +6448,13 @@ mod tests {
         }
     }
 
+    fn wait_render<F: FnMut() -> bool>(hud: &NavMiniHud, pred: F, msg: &str) {
+        assert!(
+            hud.wait_until_render(Duration::from_secs(15), pred),
+            "timed out waiting for: {msg}"
+        );
+    }
+
     #[test]
     fn nav_mini_hud_offscreen_wda_dib_reuse_guide_zoom_and_zero_leaks() {
         let hud = NavMiniHud::new(NavHudConfig {
@@ -6427,8 +6521,8 @@ mod tests {
             None,
             None
         ));
-        wait_until(
-            Duration::from_secs(3),
+        wait_render(
+            &hud,
             || hud.is_visible() && hud.surface_realloc_count() >= 1,
             "initial HUD present",
         );
@@ -6451,13 +6545,13 @@ mod tests {
         // Toggle 0x8015 capture visibility
         hud.set_capture_visible(true);
         wait_until(
-            Duration::from_secs(2),
+            Duration::from_secs(15),
             || get_window_display_affinity(hwnd) == Some(WDA_NONE),
             "WDA_NONE",
         );
         hud.set_capture_visible(false);
         wait_until(
-            Duration::from_secs(2),
+            Duration::from_secs(15),
             || get_window_display_affinity(hwnd) == Some(WDA_EXCLUDEFROMCAPTURE),
             "WDA_EXCLUDEFROMCAPTURE",
         );
@@ -6479,8 +6573,8 @@ mod tests {
             None,
             None
         ));
-        wait_until(
-            Duration::from_secs(2),
+        wait_render(
+            &hud,
             || hud.last_render_meta().angle_bucket == NavHudRenderer::quantize_angle_bucket(Some(120.0)),
             "rotated badge render",
         );
@@ -6488,22 +6582,22 @@ mod tests {
 
         // Cycle guide zoom state machine + target switch reset + hide() reset
         assert!(hud.toggle_guide() && hud.is_guide_open() && !hud.is_guide_zoomed());
-        wait_until(
-            Duration::from_secs(3),
+        wait_render(
+            &hud,
             || hud.last_render_meta().guide_open && !hud.last_render_meta().guide_zoomed,
             "compact guide card render",
         );
 
         assert!(hud.toggle_guide() && hud.is_guide_open() && hud.is_guide_zoomed());
-        wait_until(
-            Duration::from_secs(3),
+        wait_render(
+            &hud,
             || hud.last_render_meta().guide_zoomed,
             "zoomed guide card render",
         );
 
         assert!(!hud.toggle_guide() && !hud.is_guide_open() && !hud.is_guide_zoomed());
-        wait_until(
-            Duration::from_secs(2),
+        wait_render(
+            &hud,
             || !hud.last_render_meta().guide_open,
             "guide closed render",
         );
@@ -6529,8 +6623,8 @@ mod tests {
             None,
             None
         ));
-        wait_until(
-            Duration::from_secs(3),
+        wait_render(
+            &hud,
             || hud.is_guide_open() && !hud.is_guide_zoomed() && hud.last_render_meta().title.contains("Câu đố nhỏ"),
             "target switch reset guide_zoomed",
         );
@@ -6545,8 +6639,8 @@ mod tests {
 
         // Edit mode clears WS_EX_TRANSPARENT and ignores WM_APP_HIDE
         assert!(hud.set_edit_mode(true));
-        wait_until(
-            Duration::from_secs(2),
+        wait_render(
+            &hud,
             || {
                 let st = unsafe { GetWindowLongPtrW(HWND(hwnd as *mut c_void), GWL_EXSTYLE) } as u32;
                 (st & WS_EX_TRANSPARENT.0) == 0
@@ -6554,13 +6648,18 @@ mod tests {
             "edit mode interactive style",
         );
         crate::layered::assert_hwnd_offscreen_from_virtual_desktop(hwnd);
+        let hide_seq_before = hud.hide_ack_seq();
         assert!(hud.hide());
-        std::thread::sleep(Duration::from_millis(80));
+        wait_render(
+            &hud,
+            || hud.hide_ack_seq() > hide_seq_before,
+            "WM_APP_HIDE processed during edit mode",
+        );
         assert!(hud.is_visible(), "WM_APP_HIDE must be ignored during edit mode");
 
         assert!(!hud.set_edit_mode(false));
-        wait_until(
-            Duration::from_secs(2),
+        wait_render(
+            &hud,
             || {
                 let st = unsafe { GetWindowLongPtrW(HWND(hwnd as *mut c_void), GWL_EXSTYLE) } as u32;
                 (st & WS_EX_TRANSPARENT.0) != 0
@@ -6569,8 +6668,8 @@ mod tests {
         );
 
         assert!(hud.hide());
-        wait_until(
-            Duration::from_secs(2),
+        wait_render(
+            &hud,
             || !hud.is_visible() && !hud.is_guide_zoomed(),
             "hud hidden",
         );
@@ -6579,7 +6678,7 @@ mod tests {
         assert_eq!(hud.hwnd(), None);
         assert!(!hud.is_visible());
 
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_secs(10);
         let mut counts = gui_counts();
         while (counts.0 > gdi_base || counts.1 > user_base) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
@@ -7050,21 +7149,21 @@ mod tests {
 
         assert!(hud.set_guide_open(true, None));
         assert!(hud.update(g, Some(win), Some(wa), None, None, None, None, 0.0, None, None));
-        wait_until(
-            Duration::from_secs(3),
+        wait_render(
+            &hud,
             || hud.is_visible() && hud.last_render_meta().guide_animated,
             "animated guide card visible",
         );
         let reallocs_open = hud.surface_realloc_count();
-        wait_until(
-            Duration::from_secs(2),
+        wait_render(
+            &hud,
             || hud.last_render_meta().guide_frame_index > 0,
             "animated guide frame advances via render timer",
         );
         assert_eq!(hud.surface_realloc_count(), reallocs_open);
 
         hud.close();
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_secs(10);
         let mut counts = gui_counts();
         while (counts.0 > gdi_base || counts.1 > user_base) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));

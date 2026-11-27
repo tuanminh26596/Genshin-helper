@@ -711,11 +711,13 @@ struct HostMutable {
     screen_offset: (i32, i32),
     surface_size: (i32, i32),
     surface_realloc_count: usize,
+    state_seq: u64,
 }
 
 struct HostShared {
     state: Mutex<HostMutable>,
     ready_cv: Condvar,
+    state_cv: Condvar,
     capture_visible: AtomicBool,
     wda_refresh_count: AtomicUsize,
     config: LayeredWindowConfig,
@@ -780,6 +782,9 @@ impl<'a> LayeredWindowCtx<'a> {
         guard.edit_mode = *self.edit_mode;
         guard.surface_size = self.surface.size();
         guard.surface_realloc_count = self.surface.realloc_count();
+        guard.state_seq = guard.state_seq.wrapping_add(1);
+        drop(guard);
+        self.shared.state_cv.notify_all();
     }
 
     /// Toggles edit mode and updates `WS_EX_TRANSPARENT` + `SWP_FRAMECHANGED`.
@@ -797,6 +802,10 @@ impl<'a> LayeredWindowCtx<'a> {
             && refresh_exclude_from_capture(self.hwnd.0 as isize, !visible)
         {
             self.shared.wda_refresh_count.fetch_add(1, Ordering::AcqRel);
+            let mut guard = self.shared.state.lock().expect("layered host lock poisoned");
+            guard.state_seq = guard.state_seq.wrapping_add(1);
+            drop(guard);
+            self.shared.state_cv.notify_all();
         }
     }
 
@@ -977,6 +986,10 @@ impl WindowInner {
         let exclude = !self.shared.capture_visible.load(Ordering::Acquire);
         if refresh_exclude_from_capture(hwnd.0 as isize, exclude) {
             self.shared.wda_refresh_count.fetch_add(1, Ordering::AcqRel);
+            let mut guard = self.shared.state.lock().expect("layered host lock poisoned");
+            guard.state_seq = guard.state_seq.wrapping_add(1);
+            drop(guard);
+            self.shared.state_cv.notify_all();
         }
     }
 }
@@ -1393,8 +1406,10 @@ impl LayeredWindowHost {
                     screen_offset: initial_offset,
                     surface_size: (0, 0),
                     surface_realloc_count: 0,
+                    state_seq: 0,
                 }),
                 ready_cv: Condvar::new(),
+                state_cv: Condvar::new(),
                 capture_visible: AtomicBool::new(initial_cap),
                 wda_refresh_count: AtomicUsize::new(0),
                 config,
@@ -1630,6 +1645,41 @@ impl LayeredWindowHost {
         let mut guard = shared.state.lock().expect("layered host lock poisoned");
         guard.hwnd = 0;
         guard.visible = false;
+        guard.state_seq = guard.state_seq.wrapping_add(1);
+        drop(guard);
+        shared.state_cv.notify_all();
+    }
+
+    /// Waits on UI-thread state notifications until `pred()` returns `true` or `timeout` elapses.
+    pub fn wait_until_state<F>(&self, timeout: Duration, mut pred: F) -> bool
+    where
+        F: FnMut() -> bool,
+    {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let seq = self
+                .shared
+                .state
+                .lock()
+                .expect("layered host lock poisoned")
+                .state_seq;
+            if pred() {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let guard = self.shared.state.lock().expect("layered host lock poisoned");
+            if guard.state_seq != seq {
+                continue;
+            }
+            let _ = self
+                .shared
+                .state_cv
+                .wait_timeout(guard, remaining)
+                .expect("layered host condvar poisoned");
+        }
     }
 
     pub fn post_message(&self, msg: u32, wparam: usize, lparam: isize) -> bool {
@@ -1978,12 +2028,25 @@ mod tests {
         assert!(init_refreshes >= 1);
 
         assert!(host.set_capture_visible(true));
-        std::thread::sleep(Duration::from_millis(60));
+        assert!(
+            host.wait_until_state(Duration::from_secs(15), || {
+                host.wda_refresh_count() > init_refreshes
+                    && get_window_display_affinity(hwnd) == Some(WDA_NONE)
+            }),
+            "timed out waiting for WDA_NONE"
+        );
         assert_eq!(get_window_display_affinity(hwnd), Some(WDA_NONE));
         assert!(host.wda_refresh_count() > init_refreshes);
 
+        let after_none = host.wda_refresh_count();
         assert!(host.set_capture_visible(false));
-        std::thread::sleep(Duration::from_millis(60));
+        assert!(
+            host.wait_until_state(Duration::from_secs(15), || {
+                host.wda_refresh_count() > after_none
+                    && get_window_display_affinity(hwnd) == Some(WDA_EXCLUDEFROMCAPTURE)
+            }),
+            "timed out waiting for WDA_EXCLUDEFROMCAPTURE"
+        );
         assert_eq!(
             get_window_display_affinity(hwnd),
             Some(WDA_EXCLUDEFROMCAPTURE)
@@ -1991,7 +2054,12 @@ mod tests {
 
         // Wait for timer-driven WDA refresh (80ms period).
         let before_timer = host.wda_refresh_count();
-        std::thread::sleep(Duration::from_millis(160));
+        assert!(
+            host.wait_until_state(Duration::from_secs(15), || {
+                host.wda_refresh_count() > before_timer
+            }),
+            "timed out waiting for timer-driven WDA refresh"
+        );
         assert!(host.wda_refresh_count() > before_timer);
 
         // Snapshot resource count after initial window/DIB creation & present.

@@ -830,7 +830,10 @@ mod tests {
             unsafe { GetWindowLongPtrW(HWND(hwnd as *mut c_void), GWL_EXSTYLE) } as u32;
         assert_eq!(ex_style, EX_STYLE_CLICK_THROUGH);
 
-        std::thread::sleep(Duration::from_millis(80));
+        assert!(
+            overlay.host.wait_until_state(Duration::from_secs(15), || overlay.is_visible()),
+            "timed out waiting for toast overlay to become visible"
+        );
         assert!(overlay.is_visible());
         crate::layered::assert_hwnd_offscreen_from_virtual_desktop(hwnd);
 

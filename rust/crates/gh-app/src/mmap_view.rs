@@ -492,17 +492,55 @@ mod tests {
         Arc::new(f)
     }
 
+    struct FakeGate {
+        entered: (Mutex<bool>, std::sync::Condvar),
+        release: (Mutex<bool>, std::sync::Condvar),
+    }
+
+    impl FakeGate {
+        fn new() -> Self {
+            Self {
+                entered: (Mutex::new(false), std::sync::Condvar::new()),
+                release: (Mutex::new(false), std::sync::Condvar::new()),
+            }
+        }
+
+        fn wait_entered(&self) {
+            let (lock, cv) = &self.entered;
+            let guard = lock.lock().unwrap();
+            let (guard, res) = cv
+                .wait_timeout_while(guard, Duration::from_secs(15), |v| !*v)
+                .unwrap();
+            assert!(!res.timed_out() && *guard, "worker did not enter registrar");
+        }
+
+        fn release(&self) {
+            let (lock, cv) = &self.release;
+            *lock.lock().unwrap() = true;
+            cv.notify_all();
+        }
+    }
+
     /// Registers every frame at a fixed transform (world = 2·screen + (1000, 500)) — i.e. it
     /// "sees" the view as it was at the first frame; the tracker carries it forward.
     struct FakeRegistrar {
         calls: AtomicUsize,
-        delay_ms: u64,
+        gate: Option<Arc<FakeGate>>,
     }
 
     impl ViewRegistrar for FakeRegistrar {
         fn register(&self, _frame: &FrameBuf, _slider: Option<&ZoomSliderResult>) -> Option<ViewRegistration> {
             self.calls.fetch_add(1, Ordering::AcqRel);
-            std::thread::sleep(Duration::from_millis(self.delay_ms));
+            if let Some(ref gate) = self.gate {
+                {
+                    let (lock, cv) = &gate.entered;
+                    *lock.lock().unwrap() = true;
+                    cv.notify_all();
+                }
+                let (lock, cv) = &gate.release;
+                let guard = lock.lock().unwrap();
+                drop(cv.wait_while(guard, |open| !*open).unwrap());
+            }
             Some(ViewRegistration {
                 map_id: 2,
                 scale: 2.0,
@@ -521,14 +559,15 @@ mod tests {
 
     fn wait_idle(e: &MMapViewEngine) {
         let t0 = Instant::now();
-        while e.is_busy() && t0.elapsed() < Duration::from_secs(5) {
+        while e.is_busy() && t0.elapsed() < Duration::from_secs(15) {
             std::thread::sleep(Duration::from_millis(2));
         }
+        assert!(!e.is_busy(), "MMapViewEngine worker did not become idle within 15s");
     }
 
     #[test]
     fn worker_registration_acquires_the_view_and_reset_drops_it() {
-        let reg = Arc::new(FakeRegistrar { calls: AtomicUsize::new(0), delay_ms: 5 });
+        let reg = Arc::new(FakeRegistrar { calls: AtomicUsize::new(0), gate: None });
         let e = MMapViewEngine::new(Arc::clone(&reg));
         // First frame: no motion history yet → not stable → no registration started.
         let v = e.step(frame(0.0, 0.0), None, None, 2);
@@ -552,12 +591,18 @@ mod tests {
 
     #[test]
     fn a_registration_finishing_after_reset_is_discarded() {
-        let reg = Arc::new(FakeRegistrar { calls: AtomicUsize::new(0), delay_ms: 150 });
+        let gate = Arc::new(FakeGate::new());
+        let reg = Arc::new(FakeRegistrar {
+            calls: AtomicUsize::new(0),
+            gate: Some(Arc::clone(&gate)),
+        });
         let e = MMapViewEngine::new(Arc::clone(&reg));
         e.step(frame(0.0, 0.0), None, None, 2);
         e.step(frame(0.0, 0.0), None, None, 2);
+        gate.wait_entered();
         assert!(e.is_busy(), "registration started");
         e.reset();
+        gate.release();
         wait_idle(&e);
         let v = e.step(frame(0.0, 0.0), None, None, 2);
         assert!(v.transform.is_none(), "stale-epoch result must not anchor the new session");
@@ -565,7 +610,7 @@ mod tests {
 
     #[test]
     fn stats_line_waits_for_a_window_and_drawer_frames_are_flagged() {
-        let reg = Arc::new(FakeRegistrar { calls: AtomicUsize::new(0), delay_ms: 0 });
+        let reg = Arc::new(FakeRegistrar { calls: AtomicUsize::new(0), gate: None });
         let e = MMapViewEngine::new(reg);
         let mut f = (*frame(0.0, 0.0)).clone();
         let (w, h) = (f.width as usize, f.height as usize);
@@ -612,7 +657,7 @@ mod tests {
         assert_eq!(view.dim(), (f0.height as usize, f0.width as usize, 4));
         assert_eq!(view.as_ptr(), f0.data.as_ptr());
 
-        let reg = Arc::new(FakeRegistrar { calls: AtomicUsize::new(0), delay_ms: 0 });
+        let reg = Arc::new(FakeRegistrar { calls: AtomicUsize::new(0), gate: None });
         let e = MMapViewEngine::new(reg);
         for _ in 0..3 {
             e.step(Arc::clone(&f0), None, None, 2);
@@ -637,7 +682,7 @@ mod tests {
 
     #[test]
     fn sync_registration_acquires_view_inline_without_worker_thread() {
-        let reg = Arc::new(FakeRegistrar { calls: AtomicUsize::new(0), delay_ms: 0 });
+        let reg = Arc::new(FakeRegistrar { calls: AtomicUsize::new(0), gate: None });
         let e = MMapViewEngine::new_sync(Arc::clone(&reg));
         assert!(
             e.worker.lock().unwrap().is_none(),

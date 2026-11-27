@@ -5251,7 +5251,7 @@ mod tests {
         let srv = SyncServer::new(SyncServerConfig {
             host: "127.0.0.1".to_owned(),
             port: 0,
-            poll_timeout: Duration::from_millis(150),
+            poll_timeout: Duration::from_millis(500),
             ..Default::default()
         });
         let port = srv.start().await.expect("start");
@@ -5278,7 +5278,11 @@ mod tests {
         let f1 = tokio::spawn(async move { cli1.get(u1).send().await.unwrap().json::<Value>().await.unwrap() });
         let f2 = tokio::spawn(async move { cli2.get(u2).send().await.unwrap().json::<Value>().await.unwrap() });
 
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        let wait_dl = Instant::now() + Duration::from_secs(15);
+        while srv.active_poll_waiters() < 2 {
+            assert!(Instant::now() < wait_dl, "timed out waiting for 2 pollers to park");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
 
         // since=-1 still returns immediately
         let hb_fast: Value = cli
@@ -5406,7 +5410,11 @@ mod tests {
         let cli_w = cli.clone();
         let u_w = format!("{base}/poll?since={wait_seq}");
         let fw = tokio::spawn(async move { cli_w.get(u_w).send().await.unwrap().json::<Value>().await.unwrap() });
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        let shut_dl = Instant::now() + Duration::from_secs(15);
+        while srv.active_poll_waiters() < 1 {
+            assert!(Instant::now() < shut_dl, "timed out waiting for shutdown poller to park");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
 
         let r_shut = cli
             .post(format!("{base}/shutdown"))
@@ -5436,7 +5444,11 @@ mod tests {
         let fw1 = tokio::spawn(async move {
             cli_w1.get(u_w1).send().await.unwrap().json::<Value>().await.unwrap()
         });
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        let dl1 = Instant::now() + Duration::from_secs(15);
+        while srv1.active_poll_waiters() < 1 {
+            assert!(Instant::now() < dl1, "timed out waiting for srv1 poller to park");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
 
         let resp1: Value = cli
             .post(format!("{base1}/shutdown"))
@@ -5466,7 +5478,11 @@ mod tests {
         let fw2 = tokio::spawn(async move {
             cli_w2.get(u_w2).send().await.unwrap().json::<Value>().await.unwrap()
         });
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        let dl2 = Instant::now() + Duration::from_secs(15);
+        while srv2.active_poll_waiters() < 1 {
+            assert!(Instant::now() < dl2, "timed out waiting for srv2 poller to park");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
 
         let resp2: Value = cli
             .post(format!("{base2}/shutdown"))

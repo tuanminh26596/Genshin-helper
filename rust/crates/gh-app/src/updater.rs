@@ -1679,7 +1679,7 @@ mod tests {
         let srv = std::thread::spawn(move || {
             for _ in 0..3 {
                 let (mut stream, _) = listener.accept().expect("accept");
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
                 let mut req_buf = Vec::new();
                 let mut chunk = [0u8; 1024];
                 loop {
@@ -1731,7 +1731,7 @@ mod tests {
             st_mut.updater = Arc::new(AppUpdater::with_config(
                 UpdateCheckConfig {
                     api_base_url: base,
-                    timeout_secs: 5,
+                    timeout_secs: 15,
                     ..Default::default()
                 },
                 "5.7.0".to_owned(),
@@ -1745,7 +1745,7 @@ mod tests {
             .expect("background check ok");
         assert!(res.has_update);
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while state_arc.updater.phase() != UpdatePhase::ReadyToInstall
             && Instant::now() < deadline
         {

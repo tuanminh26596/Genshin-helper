@@ -292,8 +292,8 @@ mod tests {
             &ops,
             &["Genshin Impact"],
             Some(&cb),
-            Duration::from_millis(150),
-            Duration::from_millis(5),
+            Duration::from_secs(10),
+            Duration::from_millis(1),
         );
 
         assert_eq!(res, "browser");
