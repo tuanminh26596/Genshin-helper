@@ -744,7 +744,7 @@ impl AppState {
             "UNLOCK_TARGET" => {
                 let cleared = {
                     let mut nav = self.nav_controller.lock().unwrap_or_else(|e| e.into_inner());
-                    nav.clear_target_lock()
+                    nav.clear_user_locks()
                 };
                 if cleared {
                     self.nav_flash("hud.flash.unlocked_target", HudPalette::Info, 2.0, &[]);
@@ -2193,7 +2193,7 @@ impl AppState {
         }
         let cleared = {
             let mut nav = self.nav_controller.lock().unwrap_or_else(|e| e.into_inner());
-            nav.clear_target_lock()
+            nav.clear_user_locks()
         };
         if cleared {
             self.nav_flash("hud.flash.unlocked_target", HudPalette::Info, 2.2, &[]);
@@ -3574,6 +3574,77 @@ mod tests {
         assert!(state.nav_controller.lock().unwrap().locked_target_pin().is_some());
         state.handle_lan_client_message(json!({ "type": "UNLOCK_TARGET" }));
         assert!(state.nav_controller.lock().unwrap().locked_target_pin().is_none());
+
+        state.mmap_overlay.close();
+        state.nav_hud.close();
+        state.hud_toast.close();
+        state.guide_fetcher.stop();
+        state.audio.close();
+        state.capturer.close();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cycle_lock_cleared_by_unlock_hotkey_and_lan_message() {
+        let seq = STATE_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "gh_app_state_cycle_unlock_{}_{seq}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let state = make_test_state(&root);
+        {
+            let mut nav = state.nav_controller.lock().unwrap();
+            nav.set_pins(
+                vec![
+                    NavPin::new("pin_near", "Near Chest", 0.0, 0.0),
+                    NavPin::new("pin_far", "Far Chest", -60.0, 0.0),
+                ],
+                true,
+                None,
+            );
+            let g0 = nav.compute_guidance(-5.0, 0.0, Some(0.0), 2, None, false, "TRACKING", "");
+            assert_eq!(g0.target.as_ref().map(|p| p.id.as_str()), Some("pin_near"));
+        }
+
+        // 1. Cycle via Alt+E (`nav_next`), then clear via Alt+F6 (`nav_unlock`).
+        state.handle_nav_next_hotkey();
+        {
+            let nav = state.nav_controller.lock().unwrap();
+            assert_eq!(nav.user_locked_id(), Some("pin_far"));
+            assert!(nav.locked_target_pin().is_none());
+        }
+        state.handle_nav_unlock_hotkey();
+        {
+            let mut nav = state.nav_controller.lock().unwrap();
+            assert!(nav.user_locked_id().is_none());
+            let g_takeover =
+                nav.compute_guidance(0.0, 0.0, Some(0.0), 2, None, false, "TRACKING", "");
+            assert_eq!(
+                g_takeover.target.as_ref().map(|p| p.id.as_str()),
+                Some("pin_near")
+            );
+        }
+
+        // 2. Cycle via Alt+E again, then clear via LAN `UNLOCK_TARGET`.
+        state.handle_nav_next_hotkey();
+        assert_eq!(
+            state.nav_controller.lock().unwrap().user_locked_id(),
+            Some("pin_far")
+        );
+        state.handle_lan_client_message(json!({ "type": "UNLOCK_TARGET" }));
+        {
+            let mut nav = state.nav_controller.lock().unwrap();
+            assert!(nav.user_locked_id().is_none());
+            let g_takeover =
+                nav.compute_guidance(0.0, 0.0, Some(0.0), 2, None, false, "TRACKING", "");
+            assert_eq!(
+                g_takeover.target.as_ref().map(|p| p.id.as_str()),
+                Some("pin_near")
+            );
+        }
 
         state.mmap_overlay.close();
         state.nav_hud.close();

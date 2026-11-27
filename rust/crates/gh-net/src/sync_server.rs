@@ -3287,7 +3287,7 @@ async fn handle_nav_command(
         let (payload, should_push_lan) = {
             let mut nav = inner.nav_state.lock().expect("nav_state lock poisoned");
             if matches!(action_str.as_str(), "unlock_target" | "clear_target_lock") {
-                let cleared = nav.controller.clear_target_lock();
+                let cleared = nav.controller.clear_user_locks();
                 let cur = nav
                     .controller
                     .current_target()
@@ -6661,6 +6661,72 @@ mod tests {
             .unwrap();
         assert_eq!(ev_ky["target_provider"], "kongying");
         assert!(ev_ky.get("owner_tab_id").is_none());
+
+        srv.stop().await;
+    }
+
+    #[tokio::test]
+    async fn standalone_nav_command_unlock_clears_cycle_lock() {
+        let srv = SyncServer::new(SyncServerConfig::default());
+        let port = srv.start().await.expect("start sync server");
+        let base = format!("http://127.0.0.1:{port}");
+        let cli = reqwest::Client::new();
+
+        let np_res: Value = cli
+            .post(format!("{base}/nearby_pins"))
+            .json(&json!({
+                "map_id": 2,
+                "pins": [
+                    {"id": "p_near", "name": "Near", "lat": 0.0, "lng": 0.0, "map_id": 2},
+                    {"id": "p_far", "name": "Far", "lat": -60.0, "lng": 0.0, "map_id": 2}
+                ]
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(np_res["count"], 2);
+
+        // Cycle via `next` -> sets user_locked_id (without target_lock_pin).
+        let next_res: Value = cli
+            .post(format!("{base}/nav_command"))
+            .json(&json!({"action": "next"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(next_res["ok"], true);
+        assert_eq!(next_res["target"]["id"], "p_far");
+
+        // Standalone `unlock_target` clears the cycle lock and reports cleared=true.
+        let unlock_res: Value = cli
+            .post(format!("{base}/nav_command"))
+            .json(&json!({"action": "unlock_target"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(unlock_res["ok"], true);
+        assert_eq!(unlock_res["cleared"], true);
+
+        // Second unlock when no lock is active reports cleared=false.
+        let noop_res: Value = cli
+            .post(format!("{base}/nav_command"))
+            .json(&json!({"action": "clear_target_lock"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(noop_res["ok"], true);
+        assert_eq!(noop_res["cleared"], false);
 
         srv.stop().await;
     }

@@ -553,7 +553,7 @@ impl ServerCallbacks for AppServerCallbacks {
                     .nav_controller
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                let cleared = nav.clear_target_lock();
+                let cleared = nav.clear_user_locks();
                 let tgt = nav.current_target().map(NavPin::to_wire_json);
                 let sum = serde_json::to_value(nav.summary()).unwrap_or(Value::Null);
                 (cleared, tgt, sum)
@@ -1603,6 +1603,72 @@ mod tests {
         );
         assert!(items[0].payload.get("cookie").is_none());
         assert!(items[1].payload.get("authorization").is_none());
+
+        state.nav_hud.close();
+        state.hud_toast.close();
+        state.guide_fetcher.stop();
+        state.audio.close();
+        state.capturer.close();
+        let _ = std::fs::remove_dir_all(&tmp_root);
+    }
+
+    #[test]
+    fn on_nav_command_unlock_clears_cycle_lock_and_restores_proximity_takeover() {
+        let seq_id = CB_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp_root = std::env::temp_dir().join(format!(
+            "gh_app_cb_cycle_unlock_{}_{seq_id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_root);
+        std::fs::create_dir_all(&tmp_root).unwrap();
+
+        let state = make_test_state(&tmp_root);
+        let cb = AppServerCallbacks::new_offline_replay(Arc::clone(&state));
+        assert_eq!(
+            cb.on_nearby_pins(&json!({
+                "map_id": 2,
+                "pins": [
+                    {"id": "pin_near", "lat": 0.0, "lng": 0.0, "name": "Near Chest"},
+                    {"id": "pin_far", "lat": -60.0, "lng": 0.0, "name": "Far Chest"}
+                ]
+            }))
+            .unwrap(),
+            2
+        );
+        {
+            let mut nav = state.nav_controller.lock().unwrap();
+            let g0 = nav.compute_guidance(-5.0, 0.0, Some(0.0), 2, None, false, "TRACKING", "");
+            assert_eq!(g0.target.as_ref().map(|p| p.id.as_str()), Some("pin_near"));
+        }
+
+        // Cycle via web nav_command `next`, then unlock via `unlock_target`.
+        let next_res = cb.on_nav_command(&json!({"action": "next"})).unwrap();
+        assert_eq!(next_res["target"]["id"], "pin_far");
+        assert_eq!(
+            state.nav_controller.lock().unwrap().user_locked_id(),
+            Some("pin_far")
+        );
+
+        let unlock_res = cb.on_nav_command(&json!({"action": "unlock_target"})).unwrap();
+        assert_eq!(unlock_res["ok"], json!(true));
+        assert_eq!(unlock_res["cleared"], json!(true));
+        {
+            let mut nav = state.nav_controller.lock().unwrap();
+            assert!(nav.user_locked_id().is_none());
+            let g_after =
+                nav.compute_guidance(0.0, 0.0, Some(0.0), 2, None, false, "TRACKING", "");
+            assert_eq!(
+                g_after.target.as_ref().map(|p| p.id.as_str()),
+                Some("pin_near")
+            );
+        }
+
+        // Second unlock when no lock is active reports cleared = false.
+        let noop_res = cb
+            .on_nav_command(&json!({"action": "clear_target_lock"}))
+            .unwrap();
+        assert_eq!(noop_res["ok"], json!(true));
+        assert_eq!(noop_res["cleared"], json!(false));
 
         state.nav_hud.close();
         state.hud_toast.close();

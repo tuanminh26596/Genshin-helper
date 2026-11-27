@@ -1603,6 +1603,19 @@ impl NavigationController {
         true
     }
 
+    /// Clears any manual user lock (single-pin target lock, cycle/selection lock,
+    /// or cross-floor override). Returns `true` if any user lock was active.
+    pub fn clear_user_locks(&mut self) -> bool {
+        let cleared_target = self.clear_target_lock();
+        let cleared_user = self.user_locked_id.take().is_some();
+        let cleared_override = self.pinned_override_id.take().is_some();
+        let cleared = cleared_target || cleared_user || cleared_override;
+        if cleared {
+            self.closer_candidate = None;
+        }
+        cleared
+    }
+
     /// Returns the currently locked single target pin, if any.
     pub fn locked_target_pin(&self) -> Option<&NavPin> {
         let locked = self.target_lock_pin.as_ref()?;
@@ -4644,5 +4657,61 @@ mod tests {
             .expect("teleport stop should auto-pass");
         assert_eq!(ev_tp.passed_stop_id.as_deref(), Some("rt_tp"));
         assert_eq!(nav.current_target().map(|p| p.id.as_str()), Some("rt_wp"));
+    }
+
+    #[test]
+    fn clear_user_locks_releases_cycle_and_cross_floor_locks_and_restores_proximity_takeover() {
+        let near = make_pin("near", "Near Chest", 0.0, 0.0);
+        let far = make_pin("far", "Far Chest", -60.0, 0.0);
+        let mut ug = make_pin("ug", "Cave Chest", -15.0, 0.0);
+        ug.floor_id = Some("372".to_owned());
+        ug.is_underground = true;
+
+        let mut nav = NavigationController::with_pins(vec![near.clone(), far.clone(), ug]);
+        let g0 = nav.compute_guidance(-5.0, 0.0, Some(0.0), 2, None, false, "TRACKING", "");
+        assert_eq!(g0.target.as_ref().map(|p| p.id.as_str()), Some("near"));
+        assert!(nav.user_locked_id().is_none());
+
+        // Alt+E (next_target) locks onto the farther pin via user_locked_id (no target_lock_pin).
+        let cycled = nav.next_target().expect("next target");
+        assert_eq!(cycled.id, "far");
+        assert_eq!(nav.user_locked_id(), Some("far"));
+        assert!(nav.locked_target_pin().is_none());
+
+        // Narrow clear_target_lock leaves cycle lock untouched (internal callers depend on this).
+        assert!(!nav.clear_target_lock());
+        assert_eq!(nav.user_locked_id(), Some("far"));
+
+        // While locked, walking next to `near` does NOT trigger proximity_takeover.
+        let g_locked = nav.compute_guidance(-1.0, 0.0, Some(0.0), 2, None, false, "TRACKING", "");
+        assert_eq!(g_locked.target.as_ref().map(|p| p.id.as_str()), Some("far"));
+
+        // Cancel user locks -> clears user_locked_id and reports true once, then false.
+        assert!(nav.clear_user_locks());
+        assert!(!nav.clear_user_locks());
+        assert!(nav.user_locked_id().is_none());
+
+        // Moving next to `near` now triggers proximity_takeover.
+        let g_after = nav.compute_guidance(0.0, 0.0, Some(0.0), 2, None, false, "TRACKING", "");
+        assert_eq!(g_after.target.as_ref().map(|p| p.id.as_str()), Some("near"));
+
+        // Cross-floor cycle (`prev_target` wraps to `ug`) sets both user_locked_id and pinned_override_id.
+        let cross = nav.prev_target().expect("cross-floor prev target");
+        assert_eq!(cross.id, "ug");
+        assert_eq!(nav.user_locked_id(), Some("ug"));
+        assert_eq!(nav.pinned_override_id.as_deref(), Some("ug"));
+        assert!(nav.clear_user_locks());
+        assert!(nav.user_locked_id().is_none());
+        assert!(nav.pinned_override_id.is_none());
+        let g_surface = nav.compute_guidance(-2.0, 0.0, Some(0.0), 2, None, false, "TRACKING", "");
+        assert_eq!(g_surface.target.as_ref().map(|p| p.id.as_str()), Some("near"));
+
+        // Explicit single-pin lock is also cleared by clear_user_locks.
+        nav.lock_target_pin(far);
+        assert!(nav.locked_target_pin().is_some());
+        assert!(nav.clear_user_locks());
+        assert!(nav.locked_target_pin().is_none());
+        assert!(nav.user_locked_id().is_none());
+        assert!(!nav.clear_user_locks());
     }
 }

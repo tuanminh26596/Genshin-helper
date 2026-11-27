@@ -3,7 +3,6 @@
   "name": "nav_unlock_clears_nav_next_lock",
   "session": "sess_20261127_011805",
   "description": "After Alt+E (nav_next) locks onto a farther pin, Alt+F6 (nav_unlock) should clear user_locked_id and allow proximity takeover back to the nearest pin as the player walks up to it.",
-  "known_bug": "Alt+F6 (nav_unlock) does not clear an Alt+E (nav_next) lock",
   "inputs": [
     {
       "frame": 355,
