@@ -7,7 +7,6 @@
   "width": 2560,
   "height": 1440,
   "is_gamepad": false,
-  "known_bug": "M-Map locate on sparse zoomed-out Nod-Krai moon surface (Map 40) false-locks with 2-3 inliers (~185w off true position 5072,-174).",
   "mmap_locate": {
     "expected_map_id": 40,
     "expected_world_x": 5072.0,

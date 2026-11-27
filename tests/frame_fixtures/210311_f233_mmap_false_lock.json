@@ -7,7 +7,6 @@
   "width": 2560,
   "height": 1440,
   "is_gamepad": false,
-  "known_bug": "M-Map locate on collinear Dark Side of the Moon waypoints (Map 40) with prior last_known_pos near (5072,-174) false-locks via 2-point prev_bonus at (5014,-152) [~4630w off true 385,-4].",
   "mmap_locate": {
     "expected_map_id": 40,
     "expected_world_x": 385.0,

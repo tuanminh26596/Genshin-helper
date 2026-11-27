@@ -38,6 +38,19 @@ pub const WORLD_ANCHOR_MAP_IDS: [i32; 4] = [2, 9, 34, 36];
 pub const ARROW_PIVOT_OFFSET_PX_1440: f64 = 2.78;
 pub const DEFAULT_ICON_ANCHOR_OFFSET_PX_1440: (f64, f64) = (0.0, 5.0);
 
+const PASS1_CYAN_FLOOD_FRAC: f64 = 0.15;
+const PASS1_STRICT_MIN_S: u8 = 185;
+const PASS1_STRICT_MIN_V: u8 = 180;
+const PASS2B_CYAN_FLOOD_FRAC: f64 = 0.25;
+
+const PREV_BONUS_MIN_TERRAIN_SCORE: f64 = 0.22;
+const PREV_BONUS_MAX_TERRAIN_DEFICIT: f64 = 0.08;
+
+pub(crate) const WEAK_MATCH_TERRAIN_CHECK_THRESH: f64 = 0.28;
+const TERRAIN_GUARD_MIN_ALT_SCORE: f64 = 0.30;
+const TERRAIN_GUARD_MIN_MARGIN: f64 = 0.12;
+const TERRAIN_GUARD_MIN_SHIFT_W: f64 = 40.0;
+
 pub const DEFAULT_AREA_NAMES: &[(i32, &str)] = &[
     (1, "Mondstadt"),
     (2, "Liyue"),
@@ -2336,6 +2349,28 @@ impl MapLocator {
                 };
             }
             zero_ui_exclusion_rects(mask_buf, h, w);
+            // Blue-cyan moon terrain (e.g. Map 40) floods the permissive S>=115 mask over >15%
+            // of the frame, merging real waypoint rings into background blobs. Tighten to the
+            // high-saturation waypoint halo band when flooded.
+            let p1_active = mask_buf.iter().filter(|&&v| v != 0).count();
+            let p1_flooded = (p1_active as f64) > (n_px as f64 * PASS1_CYAN_FLOOD_FRAC);
+            if p1_flooded {
+                for (i, dst) in mask_buf.iter_mut().enumerate() {
+                    let p = i * 3;
+                    let hv = hsv_s[p];
+                    let sv = hsv_s[p + 1];
+                    let vv = hsv_s[p + 2];
+                    *dst = if (85..=126).contains(&hv)
+                        && sv >= PASS1_STRICT_MIN_S
+                        && vv >= PASS1_STRICT_MIN_V
+                    {
+                        255
+                    } else {
+                        0
+                    };
+                }
+                zero_ui_exclusion_rects(mask_buf, h, w);
+            }
             fast_open_rect_binary(mask_buf, tmp_buf, h, w, k_size);
             let contours = extract_filtered_contours_external_slice(
                 mask_buf,
@@ -2426,7 +2461,7 @@ impl MapLocator {
         }
 
         // Pass 2b: Dimmed / Anemo-teal / inactive-layer waypoints with ring contrast
-        if clean.len() < 6 {
+        if clean.len() < 6 && !p1_flooded {
             for (i, dst) in mask_buf.iter_mut().enumerate() {
                 let p = i * 3;
                 let hv = hsv_s[p];
@@ -2439,95 +2474,98 @@ impl MapLocator {
                 };
             }
             zero_ui_exclusion_rects(mask_buf, h, w);
-            fast_open_rect_binary(mask_buf, tmp_buf, h, w, 2);
-            let cnts2 = extract_filtered_contours_external_slice(
-                mask_buf,
-                h,
-                w,
-                min_area,
-                max_area,
-                1,
-                i32::MAX,
-            );
-            let outer_rad = ((20.0 * scale_ui).round_ties_even() as isize).max(14);
-            let min_silver = ((75.0 * scale_factor) as usize).max(14);
-            let mut cands2: Vec<(f64, f64, i32)> = Vec::new();
-            for cnt in &cnts2 {
-                let area = contour_area(cnt);
-                if !(min_area..=max_area).contains(&area) {
-                    continue;
-                }
-                let mc = contour_moments(cnt);
-                if mc.m00 <= 0.0 {
-                    continue;
-                }
-                let cx = mc.m10 / mc.m00;
-                let cy = mc.m01 / mc.m00;
-                if clean
-                    .iter()
-                    .any(|x| (cx - x.0).hypot(cy - x.1) < merge_dist)
-                {
-                    continue;
-                }
-                let y0 = (cy as isize - outer_rad).max(0) as usize;
-                let y1 = (cy as isize + outer_rad).min(h as isize).max(0) as usize;
-                let x0 = (cx as isize - outer_rad).max(0) as usize;
-                let x1 = (cx as isize + outer_rad).min(w as isize).max(0) as usize;
-                if y1 <= y0 || x1 <= x0 {
-                    continue;
-                }
-                let ph = y1 - y0;
-                let pw = x1 - x0;
+            let p2b_active = mask_buf.iter().filter(|&&v| v != 0).count();
+            if (p2b_active as f64) <= (n_px as f64 * PASS2B_CYAN_FLOOD_FRAC) {
+                fast_open_rect_binary(mask_buf, tmp_buf, h, w, 2);
+                let cnts2 = extract_filtered_contours_external_slice(
+                    mask_buf,
+                    h,
+                    w,
+                    min_area,
+                    max_area,
+                    1,
+                    i32::MAX,
+                );
+                let outer_rad = ((20.0 * scale_ui).round_ties_even() as isize).max(14);
+                let min_silver = ((75.0 * scale_factor) as usize).max(14);
+                let mut cands2: Vec<(f64, f64, i32)> = Vec::new();
+                for cnt in &cnts2 {
+                    let area = contour_area(cnt);
+                    if !(min_area..=max_area).contains(&area) {
+                        continue;
+                    }
+                    let mc = contour_moments(cnt);
+                    if mc.m00 <= 0.0 {
+                        continue;
+                    }
+                    let cx = mc.m10 / mc.m00;
+                    let cy = mc.m01 / mc.m00;
+                    if clean
+                        .iter()
+                        .any(|x| (cx - x.0).hypot(cy - x.1) < merge_dist)
+                    {
+                        continue;
+                    }
+                    let y0 = (cy as isize - outer_rad).max(0) as usize;
+                    let y1 = (cy as isize + outer_rad).min(h as isize).max(0) as usize;
+                    let x0 = (cx as isize - outer_rad).max(0) as usize;
+                    let x1 = (cx as isize + outer_rad).min(w as isize).max(0) as usize;
+                    if y1 <= y0 || x1 <= x0 {
+                        continue;
+                    }
+                    let ph = y1 - y0;
+                    let pw = x1 - x0;
 
-                let mut silver_cnt = 0usize;
-                let mut silver_sum = 0.0f64;
-                let mut ring_bg_cnt = 0usize;
-                let mut ring_bg_sum = 0.0f64;
-                let mut neutral_arrow_cnt = 0usize;
-                for py in 0..ph {
-                    let on_ring_y = py < 3 || py + 3 >= ph;
-                    for px_i in 0..pw {
-                        let g = gray_frame[[y0 + py, x0 + px_i]];
-                        let s_val = hsv[[y0 + py, x0 + px_i, 1]];
-                        let is_silver = g > 158 && s_val < 68;
-                        if is_silver {
-                            silver_cnt += 1;
-                            silver_sum += g as f64;
-                        } else if on_ring_y || px_i < 3 || px_i + 3 >= pw {
-                            ring_bg_cnt += 1;
-                            ring_bg_sum += g as f64;
-                        }
-                        if g > 195 && s_val < 65 {
-                            neutral_arrow_cnt += 1;
+                    let mut silver_cnt = 0usize;
+                    let mut silver_sum = 0.0f64;
+                    let mut ring_bg_cnt = 0usize;
+                    let mut ring_bg_sum = 0.0f64;
+                    let mut neutral_arrow_cnt = 0usize;
+                    for py in 0..ph {
+                        let on_ring_y = py < 3 || py + 3 >= ph;
+                        for px_i in 0..pw {
+                            let g = gray_frame[[y0 + py, x0 + px_i]];
+                            let s_val = hsv[[y0 + py, x0 + px_i, 1]];
+                            let is_silver = g > 158 && s_val < 68;
+                            if is_silver {
+                                silver_cnt += 1;
+                                silver_sum += g as f64;
+                            } else if on_ring_y || px_i < 3 || px_i + 3 >= pw {
+                                ring_bg_cnt += 1;
+                                ring_bg_sum += g as f64;
+                            }
+                            if g > 195 && s_val < 65 {
+                                neutral_arrow_cnt += 1;
+                            }
                         }
                     }
+                    if silver_cnt < min_silver {
+                        continue;
+                    }
+                    if let Some((ax, ay)) = arrow_pos
+                        && (cx - ax).hypot(cy - ay) < arrow_tol
+                        && neutral_arrow_cnt < min_neutral_arrow
+                    {
+                        continue;
+                    }
+                    let ring_bg_mean = if ring_bg_cnt > 0 {
+                        ring_bg_sum / ring_bg_cnt as f64
+                    } else {
+                        255.0
+                    };
+                    let contrast = (silver_sum / silver_cnt as f64) - ring_bg_mean;
+                    if contrast > 28.0 {
+                        cands2.push((cx, cy, silver_cnt as i32));
+                    }
                 }
-                if silver_cnt < min_silver {
-                    continue;
-                }
-                if let Some((ax, ay)) = arrow_pos
-                    && (cx - ax).hypot(cy - ay) < arrow_tol
-                    && neutral_arrow_cnt < min_neutral_arrow
-                {
-                    continue;
-                }
-                let ring_bg_mean = if ring_bg_cnt > 0 {
-                    ring_bg_sum / ring_bg_cnt as f64
-                } else {
-                    255.0
-                };
-                let contrast = (silver_sum / silver_cnt as f64) - ring_bg_mean;
-                if contrast > 28.0 {
-                    cands2.push((cx, cy, silver_cnt as i32));
-                }
-            }
-            cands2.sort_by_key(|a| std::cmp::Reverse(a.2));
-            for c_item in cands2 {
-                if !clean
-                    .iter()
-                    .any(|x| (c_item.0 - x.0).hypot(c_item.1 - x.1) < merge_dist)
-                {
-                    clean.push(c_item);
+                cands2.sort_by_key(|a| std::cmp::Reverse(a.2));
+                for c_item in cands2 {
+                    if !clean
+                        .iter()
+                        .any(|x| (c_item.0 - x.0).hypot(c_item.1 - x.1) < merge_dist)
+                    {
+                        clean.push(c_item);
+                    }
                 }
             }
         }
@@ -2553,7 +2591,7 @@ impl MapLocator {
                     min_w_area,
                     max_w_area,
                     1,
-                    i32::MAX,
+                    max_dim.ceil() as i32,
                 );
                 {
                 let outer_rad = ((20.0 * scale_ui).round_ties_even() as isize).max(14);
@@ -2561,6 +2599,9 @@ impl MapLocator {
                 for cnt in &cnts_w {
                     let wa = contour_area(cnt);
                     if !(min_w_area..=max_w_area).contains(&wa) {
+                        continue;
+                    }
+                    if !is_compact_pin_contour(cnt, wa, max_dim) {
                         continue;
                     }
                     let mc = contour_moments(cnt);
@@ -2841,6 +2882,7 @@ impl MapLocator {
         (tx + dwx, ty + dwy, true)
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn match_single_map<'a>(
         &self,
@@ -2856,6 +2898,40 @@ impl MapLocator {
         allow_2point: bool,
         strict_scale: Option<f64>,
         frame_gray: Option<ArrayView2<'_, u8>>,
+    ) -> Option<MatchResult<'a>> {
+        self.match_single_map_with_ug(
+            candidates,
+            map_id,
+            all_wps,
+            allowed_wp_indices,
+            cand_limit,
+            frame_w,
+            base_scale,
+            target_area_id,
+            arrow_pos,
+            allow_2point,
+            strict_scale,
+            frame_gray,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn match_single_map_with_ug<'a>(
+        &self,
+        candidates: &[(f64, f64, i32)],
+        map_id: i32,
+        all_wps: &'a [WaypointEntry],
+        allowed_wp_indices: &[usize],
+        cand_limit: usize,
+        frame_w: usize,
+        base_scale: f64,
+        target_area_id: Option<i32>,
+        arrow_pos: Option<(f64, f64)>,
+        allow_2point: bool,
+        strict_scale: Option<f64>,
+        frame_gray: Option<ArrayView2<'_, u8>>,
+        is_underground: bool,
     ) -> Option<MatchResult<'a>> {
         let n_cands = candidates.len();
         if n_cands < 2 || allowed_wp_indices.len() < 2 {
@@ -3222,24 +3298,41 @@ impl MapLocator {
 
             if !hyps_2p.is_empty() {
                 hyps_2p.sort_by(|a, b| b.0.total_cmp(&a.0));
-                let last_pos = self.last_known_pos();
-                let mut best_2p_final: Option<MatchTuple<'a>> = None;
-                let mut best_2p_score = -999999.0f64;
+                let (last_pos, last_map_id) = self
+                    .tracking
+                    .lock()
+                    .ok()
+                    .map_or((None, None), |g| (g.last_known_pos, g.last_map_id));
+                let terrain_available =
+                    !is_underground && frame_gray.is_some() && self.has_terrain_for_map(map_id);
+                let mut scored_2p = Vec::with_capacity(10);
                 for (g_sc, inl_2p, sc_2p, t_2p) in hyps_2p.into_iter().take(10) {
-                    let t_sc = if frame_gray.is_some() {
+                    let t_sc = if terrain_available {
                         self.score_terrain_alignment(frame_gray, map_id, sc_2p, t_2p[0], t_2p[1], 8)
                     } else {
                         0.0
                     };
-                    let mut prev_bonus = 0.0f64;
-                    if let (Some(lp), Some(ap)) = (last_pos, arrow_pos) {
-                        let pwx = sc_2p * ap.0 + t_2p[0];
-                        let pwy = sc_2p * ap.1 + t_2p[1];
-                        let dp = (pwx - lp.0).hypot(pwy - lp.1);
-                        if dp <= 800.0 {
-                            prev_bonus = (800.0 - dp) * 0.25;
-                        }
-                    }
+                    scored_2p.push((g_sc, inl_2p, sc_2p, t_2p, t_sc));
+                }
+                let best_t_sc = scored_2p
+                    .iter()
+                    .map(|item| item.4)
+                    .fold(0.0f64, f64::max);
+
+                let mut best_2p_final: Option<MatchTuple<'a>> = None;
+                let mut best_2p_score = -999999.0f64;
+                for (g_sc, inl_2p, sc_2p, t_2p, t_sc) in scored_2p {
+                    let prev_bonus = compute_2p_prev_bonus(
+                        last_pos,
+                        last_map_id,
+                        map_id,
+                        arrow_pos,
+                        sc_2p,
+                        t_2p,
+                        terrain_available,
+                        t_sc,
+                        best_t_sc,
+                    );
                     let total_sc = g_sc + t_sc * 650.0 + prev_bonus;
                     if total_sc > best_2p_score {
                         best_2p_score = total_sc;
@@ -4047,7 +4140,7 @@ impl MapLocator {
             let all_idx: Vec<usize> = (0..mdata.waypoints.len()).collect();
             let lims: &[usize] = if candidates.len() > 12 { &[12, 18] } else { &[12] };
             for &lim in lims {
-                if let Some((inl, sc, t_vec, rmse)) = self.match_single_map(
+                if let Some((inl, sc, t_vec, rmse)) = self.match_single_map_with_ug(
                     &candidates,
                     t_mid,
                     &mdata.waypoints,
@@ -4060,6 +4153,7 @@ impl MapLocator {
                     true,
                     strict_sub,
                     Some(frame_gray.view()),
+                    is_ug_hint,
                 ) {
                     best_candidate_match = Some((mdata, inl, sc, t_vec, rmse));
                     break;
@@ -4087,7 +4181,7 @@ impl MapLocator {
                     })
                     .collect();
                 if major_idx.len() >= 2
-                    && let Some((inl, sc, t_vec, rmse)) = self.match_single_map(
+                    && let Some((inl, sc, t_vec, rmse)) = self.match_single_map_with_ug(
                         &candidates,
                         2,
                         &m2.waypoints,
@@ -4100,6 +4194,7 @@ impl MapLocator {
                         target_area_id.is_some(),
                         strict_m2,
                         Some(frame_gray.view()),
+                        is_ug_hint,
                     )
                 {
                     best_candidate_match = Some((m2, inl, sc, t_vec, rmse));
@@ -4109,7 +4204,7 @@ impl MapLocator {
             if best_candidate_match.is_none() {
                 let lims: &[usize] = if candidates.len() > 12 { &[12, 18] } else { &[12] };
                 for &lim in lims {
-                    if let Some((inl, sc, t_vec, rmse)) = self.match_single_map(
+                    if let Some((inl, sc, t_vec, rmse)) = self.match_single_map_with_ug(
                         &candidates,
                         2,
                         &m2.waypoints,
@@ -4122,6 +4217,7 @@ impl MapLocator {
                         target_area_id.is_some(),
                         strict_m2,
                         Some(frame_gray.view()),
+                        is_ug_hint,
                     ) {
                         best_candidate_match = Some((m2, inl, sc, t_vec, rmse));
                         break;
@@ -4131,7 +4227,7 @@ impl MapLocator {
 
             if best_candidate_match.is_none() && m2.waypoints.len() > prim_idx.len() {
                 let all_idx: Vec<usize> = (0..m2.waypoints.len()).collect();
-                if let Some((inl, sc, t_vec, rmse)) = self.match_single_map(
+                if let Some((inl, sc, t_vec, rmse)) = self.match_single_map_with_ug(
                     &candidates,
                     2,
                     &m2.waypoints,
@@ -4144,6 +4240,7 @@ impl MapLocator {
                     target_area_id.is_some(),
                     strict_m2,
                     Some(frame_gray.view()),
+                    is_ug_hint,
                 ) {
                     best_candidate_match = Some((m2, inl, sc, t_vec, rmse));
                 }
@@ -4166,7 +4263,7 @@ impl MapLocator {
                 let strict_sub = ZoomSliderDetector::get_map_scale(slider_res, mid, w);
                 let base_s = strict_sub.unwrap_or_else(|| map_base_scale_cfg(mid));
                 let all_idx: Vec<usize> = (0..mdata.waypoints.len()).collect();
-                if let Some((inl, sc, t_vec, rmse)) = self.match_single_map(
+                if let Some((inl, sc, t_vec, rmse)) = self.match_single_map_with_ug(
                     &candidates,
                     mid,
                     &mdata.waypoints,
@@ -4179,6 +4276,7 @@ impl MapLocator {
                     false,
                     strict_sub,
                     Some(frame_gray.view()),
+                    is_ug_hint,
                 ) {
                     let score = inl.len() as f64 * 150.0 - (rmse * 5.0);
                     if score > best_score {
@@ -4194,21 +4292,25 @@ impl MapLocator {
             && !is_ug_hint
             && slider_res.is_some()
             && _inl.len() <= 4
-            && self.has_terrain_for_map(_mdata.id)
         {
-            let t_sc = self.score_terrain_alignment(
-                Some(frame_gray.view()),
-                _mdata.id,
-                _sc,
-                _t_vec[0],
-                _t_vec[1],
-                8,
-            );
-            if t_sc < 0.24 {
-                let fb_mid = target_map_id
-                    .filter(|mid| self.db.maps.contains_key(mid))
-                    .unwrap_or(_mdata.id);
-                if let Some(fb_scale) = ZoomSliderDetector::get_map_scale(slider_res, fb_mid, w)
+            let fb_mid = target_map_id
+                .filter(|mid| self.db.maps.contains_key(mid))
+                .unwrap_or(_mdata.id);
+            if self.has_terrain_for_map(fb_mid) {
+                let t_sc = if self.has_terrain_for_map(_mdata.id) {
+                    self.score_terrain_alignment(
+                        Some(frame_gray.view()),
+                        _mdata.id,
+                        _sc,
+                        _t_vec[0],
+                        _t_vec[1],
+                        8,
+                    )
+                } else {
+                    0.0
+                };
+                if t_sc < WEAK_MATCH_TERRAIN_CHECK_THRESH
+                    && let Some(fb_scale) = ZoomSliderDetector::get_map_scale(slider_res, fb_mid, w)
                     && let Some(alt_0p) = self.match_zero_waypoint_terrain(
                         frame_gray.view(),
                         fb_mid,
@@ -4224,9 +4326,19 @@ impl MapLocator {
                         alt_0p.2[1],
                         8,
                     );
-                    if alt_t >= 0.40
-                        && alt_t >= t_sc + 0.20
-                        && let Some(fb_mdata) = self.db.map(fb_mid)
+                    if should_terrain_guard_override(
+                        _inl.len(),
+                        _mdata.id,
+                        _sc,
+                        _t_vec,
+                        t_sc,
+                        fb_mid,
+                        alt_0p.1,
+                        alt_0p.2,
+                        alt_t,
+                        w,
+                        h,
+                    ) && let Some(fb_mdata) = self.db.map(fb_mid)
                     {
                         best_candidate_match =
                             Some((fb_mdata, alt_0p.0, alt_0p.1, alt_0p.2, alt_0p.3));
@@ -4576,6 +4688,110 @@ impl MapLocator {
             .infer_unique_underground_floor(map_id, lat, lng, margin)
             .map(|(fid, lbl)| (fid.to_string(), lbl))
     }
+}
+
+/// Rejects open-stroke text glyphs and wide label chevrons in Pass 2c by contour compactness,
+/// aspect ratio, solidity, and circularity so only solid pin teardrops remain.
+fn is_compact_pin_contour(cnt: &[Point2i], area: f64, max_dim: f64) -> bool {
+    if area <= 0.0 || cnt.len() < 3 {
+        return false;
+    }
+    let r = bounding_rect(cnt);
+    let bw = r.width as f64;
+    let bh = r.height as f64;
+    if bw <= 0.0 || bh <= 0.0 || bw > max_dim || bh > max_dim {
+        return false;
+    }
+    if (bw / bh) > 1.50 || (bh / bw) > 2.20 {
+        return false;
+    }
+    let extent = area / (bw * bh);
+    if extent < 0.38 {
+        return false;
+    }
+    let hull = convex_hull(cnt);
+    let hull_area = contour_area(&hull);
+    if hull_area <= 0.0 || (area / hull_area) < 0.72 {
+        return false;
+    }
+    let peri = arc_length(cnt, true);
+    if peri <= 0.0 {
+        return false;
+    }
+    let circularity = 4.0 * std::f64::consts::PI * area / (peri * peri);
+    circularity >= 0.42
+}
+
+/// Gates the 2-point `prev_bonus` on terrain agreement so a pre-teleport `last_known_pos`
+/// cannot pull sparse 2-waypoint matches toward a location whose terrain disagrees.
+#[allow(clippy::too_many_arguments)]
+fn compute_2p_prev_bonus(
+    last_pos: Option<(f64, f64)>,
+    last_map_id: Option<i32>,
+    map_id: i32,
+    arrow_pos: Option<(f64, f64)>,
+    sc_2p: f64,
+    t_2p: [f64; 2],
+    terrain_available: bool,
+    t_sc: f64,
+    best_t_sc: f64,
+) -> f64 {
+    let (Some(lp), Some(ap)) = (last_pos, arrow_pos) else {
+        return 0.0;
+    };
+    if last_map_id.is_some_and(|lm| lm != map_id) {
+        return 0.0;
+    }
+    if terrain_available
+        && (t_sc < PREV_BONUS_MIN_TERRAIN_SCORE
+            || (best_t_sc - t_sc) > PREV_BONUS_MAX_TERRAIN_DEFICIT)
+    {
+        return 0.0;
+    }
+    let pwx = sc_2p * ap.0 + t_2p[0];
+    let pwy = sc_2p * ap.1 + t_2p[1];
+    let dp = (pwx - lp.0).hypot(pwy - lp.1);
+    if dp <= 800.0 {
+        (800.0 - dp) * 0.25
+    } else {
+        0.0
+    }
+}
+
+/// Decides when the surface terrain head-to-head guard replaces a weak (`<= 4` inlier)
+/// waypoint match with the zero-waypoint terrain alignment.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn should_terrain_guard_override(
+    inliers_count: usize,
+    wp_map_id: i32,
+    wp_scale: f64,
+    wp_t: [f64; 2],
+    wp_terrain_score: f64,
+    alt_map_id: i32,
+    alt_scale: f64,
+    alt_t: [f64; 2],
+    alt_terrain_score: f64,
+    frame_w: usize,
+    frame_h: usize,
+) -> bool {
+    if inliers_count > 4 {
+        return false;
+    }
+    if alt_terrain_score < TERRAIN_GUARD_MIN_ALT_SCORE
+        || alt_terrain_score < wp_terrain_score + TERRAIN_GUARD_MIN_MARGIN
+    {
+        return false;
+    }
+    if alt_map_id != wp_map_id {
+        return true;
+    }
+    let cx = frame_w as f64 * 0.5;
+    let cy = frame_h as f64 * 0.5;
+    let wp_wx = wp_scale * cx + wp_t[0];
+    let wp_wy = wp_scale * cy + wp_t[1];
+    let alt_wx = alt_scale * cx + alt_t[0];
+    let alt_wy = alt_scale * cy + alt_t[1];
+    (wp_wx - alt_wx).hypot(wp_wy - alt_wy) >= TERRAIN_GUARD_MIN_SHIFT_W
 }
 
 fn compress_chain_simple_local(pts: &[Point2i]) -> Vec<Point2i> {
@@ -5915,5 +6131,484 @@ mod tests {
         assert_eq!(r_ug.surface_idx, 0);
         assert!(r_ug.is_underground);
         assert_eq!(r_ug.floor_name, "B1");
+    }
+
+    fn build_synthetic_terrain_raster(h: usize, w: usize) -> TerrainRaster {
+        let mut gray = Array2::<u8>::zeros((h, w));
+        for y in 0..h {
+            for x in 0..w {
+                let xf = x as f64;
+                let yf = y as f64;
+                // Non-periodic multi-frequency + quadrant-chirp pattern so regions T and F have
+                // zero cross-correlation and strong Sobel edges everywhere.
+                let freq_x = 0.09 + 0.00018 * xf;
+                let freq_y = 0.11 + 0.00015 * yf;
+                let v = 128.0
+                    + 55.0 * (xf * freq_x + 0.4 * yf * 0.07).sin()
+                    + 45.0 * (yf * freq_y - 0.3 * xf * 0.05).cos()
+                    + 22.0 * ((xf * 0.23).sin() * (yf * 0.29).cos());
+                gray[[y, x]] = v.clamp(12.0, 245.0) as u8;
+            }
+        }
+        TerrainRaster {
+            gray,
+            meta: [0.0, 0.0, -1.0, 0.0, 0.0],
+        }
+    }
+
+    fn render_frame_gray_from_terrain(
+        terrain: &TerrainRaster,
+        fw: usize,
+        fh: usize,
+        scale: f64,
+        tx: f64,
+        ty: f64,
+        noise_amp: f64,
+    ) -> Array2<u8> {
+        let pow2z = 2.0f64.powf(terrain.meta[2]);
+        let (th, tw) = terrain.gray.dim();
+        let mut out = Array2::<u8>::zeros((fh, fw));
+        for y in 0..fh {
+            let wy = y as f64 * scale + ty;
+            let ry = ((wy * pow2z).round() as isize).clamp(0, th as isize - 1) as usize;
+            for x in 0..fw {
+                let wx = x as f64 * scale + tx;
+                let rx = ((wx * pow2z).round() as isize).clamp(0, tw as isize - 1) as usize;
+                let mut v = terrain.gray[[ry, rx]] as f64;
+                if noise_amp > 0.0 {
+                    // Deterministic high-frequency pseudo-random noise uncorrelated with terrain
+                    let hash = ((x as u64).wrapping_mul(73_856_093)
+                        ^ (y as u64).wrapping_mul(19_349_663))
+                        & 0xFF;
+                    let n = ((hash as f64 / 255.0) * 2.0 - 1.0) * noise_amp;
+                    v += n;
+                }
+                out[[y, x]] = v.clamp(0.0, 255.0) as u8;
+            }
+        }
+        out
+    }
+
+    fn paint_disc_bgr(img: &mut Array3<u8>, cx: f64, cy: f64, r: f64, bgr: [u8; 3]) {
+        let (h, w, _) = img.dim();
+        let y0 = (cy - r - 1.0).max(0.0) as usize;
+        let y1 = (cy + r + 1.0).min((h - 1) as f64) as usize;
+        let x0 = (cx - r - 1.0).max(0.0) as usize;
+        let x1 = (cx + r + 1.0).min((w - 1) as f64) as usize;
+        let r2 = r * r;
+        for y in y0..=y1 {
+            let dy = y as f64 - cy;
+            for x in x0..=x1 {
+                let dx = x as f64 - cx;
+                if dx * dx + dy * dy <= r2 {
+                    img[[y, x, 0]] = bgr[0];
+                    img[[y, x, 1]] = bgr[1];
+                    img[[y, x, 2]] = bgr[2];
+                }
+            }
+        }
+    }
+
+    fn paint_cyan_white_waypoint(img: &mut Array3<u8>, cx: f64, cy: f64) {
+        // Outer vivid cyan glow halo (H~99, S~228, V~235) + crisp white core
+        paint_disc_bgr(img, cx, cy, 13.0, [235, 165, 25]);
+        paint_disc_bgr(img, cx, cy, 8.0, [245, 245, 245]);
+    }
+
+    fn paint_player_arrow_bgr(img: &mut Array3<u8>, cx: f64, cy: f64, r: f64) {
+        // Up-pointing cyan triangle (H=94, S=240, V=245 -> BGR approx [245, 185, 15])
+        // Area ~ 0.5 * (1.732 * r) * (1.5 * r) ~ 1.3 * r^2; at r=27 => ~950 px^2 in [550, 1650].
+        let p0 = (cx, cy - r);
+        let p1 = (cx - 0.866 * r, cy + 0.55 * r);
+        let p2 = (cx + 0.866 * r, cy + 0.55 * r);
+        let (h, w, _) = img.dim();
+        let x0 = (cx - r - 2.0).max(0.0) as usize;
+        let x1 = (cx + r + 2.0).min((w - 1) as f64) as usize;
+        let y0 = (cy - r - 2.0).max(0.0) as usize;
+        let y1 = (cy + r + 2.0).min((h - 1) as f64) as usize;
+        let sign = |ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64| -> f64 {
+            (px - bx) * (ay - by) - (ax - bx) * (py - by)
+        };
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let xf = x as f64;
+                let yf = y as f64;
+                let d1 = sign(p0.0, p0.1, p1.0, p1.1, xf, yf);
+                let d2 = sign(p1.0, p1.1, p2.0, p2.1, xf, yf);
+                let d3 = sign(p2.0, p2.1, p0.0, p0.1, xf, yf);
+                let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+                let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+                if !(has_neg && has_pos) {
+                    img[[y, x, 0]] = 245;
+                    img[[y, x, 1]] = 185;
+                    img[[y, x, 2]] = 15;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn two_point_prev_bonus_does_not_override_terrain_disagreement() {
+        let base = make_temp_dir("2p_prev_bonus");
+        let mm_path = base.join("multimap.json");
+        std::fs::write(
+            &mm_path,
+            r#"{
+                "version": "4.0.0",
+                "maps": {
+                    "40": {
+                        "id": 40,
+                        "name": "Frost Moon",
+                        "waypoints": [
+                            {"id": 1, "label_id": 3, "is_primary": true, "x_pos": 500.0, "y_pos": 360.0, "area_id": 15},
+                            {"id": 2, "label_id": 3, "is_primary": true, "x_pos": 700.0, "y_pos": 360.0, "area_id": 15},
+                            {"id": 3, "label_id": 3, "is_primary": true, "x_pos": 2500.0, "y_pos": 360.0, "area_id": 15},
+                            {"id": 4, "label_id": 3, "is_primary": true, "x_pos": 2700.0, "y_pos": 360.0, "area_id": 15}
+                        ]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut loc = MapLocator::with_paths(
+            LocatorPaths {
+                db_path: Some(mm_path),
+                terrain_npz_path: Some(base.join("absent_t.npz")),
+                cave_masks_npz_path: Some(base.join("absent_c.npz")),
+                ui_anchors_npz_path: Some(base.join("absent_u.npz")),
+                legacy_underground_db_path: None,
+            },
+            None,
+        );
+        let raster = Arc::new(build_synthetic_terrain_raster(800, 1800));
+        let mut tmap = BTreeMap::new();
+        tmap.insert(40, Arc::clone(&raster));
+        loc.set_terrain_data(tmap);
+
+        // True scene centered at arrow world (600.0, 360.0) -> tx=-40.0, ty=0.0 at scale=1.0 on 1280x720.
+        // Heavy uncorrelated noise degrades Sobel alignment at true Pair A to ~0.24-0.30 so
+        // t_sc * 650 (< 200) would lose to stale Pair B's prev_bonus (+200) if ungated!
+        let mut chosen_noise = 0.0;
+        let mut frame_gray = render_frame_gray_from_terrain(&raster, 1280, 720, 1.0, -40.0, 0.0, 0.0);
+        for noise in [115.0, 130.0, 145.0, 160.0, 175.0, 190.0] {
+            let cand = render_frame_gray_from_terrain(&raster, 1280, 720, 1.0, -40.0, 0.0, noise);
+            let sc_a = loc.score_terrain_alignment(Some(cand.view()), 40, 1.0, -40.0, 0.0, 8);
+            if (0.225..=0.295).contains(&sc_a) {
+                frame_gray = cand;
+                chosen_noise = noise;
+                break;
+            }
+        }
+        let sc_true = loc.score_terrain_alignment(Some(frame_gray.view()), 40, 1.0, -40.0, 0.0, 8);
+        let sc_stale = loc.score_terrain_alignment(Some(frame_gray.view()), 40, 1.0, 1960.0, 0.0, 8);
+        assert!(
+            (0.225..=0.295).contains(&sc_true),
+            "unexpected true terrain score {sc_true:.4} (noise={chosen_noise})"
+        );
+        assert!(
+            sc_stale < 0.12,
+            "unexpected stale terrain score {sc_stale:.4}"
+        );
+
+        // Prime stale last_known_pos at Pair B (world 2600, 360)
+        {
+            let mut g = loc.tracking.lock().unwrap();
+            g.last_known_pos = Some((2600.0, 360.0));
+            g.last_map_id = Some(40);
+        }
+
+        let m40 = loc.map_meta(40).unwrap();
+        let all_idx: Vec<usize> = (0..m40.waypoints.len()).collect();
+        let cands = [(540.0, 360.0, 400), (740.0, 360.0, 400)];
+        let (_, sc, t_vec, _) = loc
+            .match_single_map(
+                &cands,
+                40,
+                &m40.waypoints,
+                &all_idx,
+                12,
+                1280,
+                1.0,
+                None,
+                Some((640.0, 360.0)),
+                true,
+                Some(1.0),
+                Some(frame_gray.view()),
+            )
+            .expect("2-point fallback match");
+
+        let arrow_wx = sc * 640.0 + t_vec[0];
+        assert!(
+            (arrow_wx - 600.0).abs() < 40.0,
+            "prev_bonus pulled match toward stale pos: arrow_wx={arrow_wx:.1} (expected ~600.0)"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn surface_terrain_guard_overrides_weak_false_lock() {
+        let base = make_temp_dir("terrain_guard_weak");
+        let mm_path = base.join("multimap.json");
+        // False-lock triangle F near (2300..2540, 300..480), plus two off-screen corner bounds
+        // (100, 20) and (100, 1450) so Map 40's area_bbox spans the full synthetic terrain.
+        // Zero waypoints sit inside true region T's viewport around (950, 700).
+        std::fs::write(
+            &mm_path,
+            r#"{
+                "version": "4.0.0",
+                "maps": {
+                    "40": {
+                        "id": 40,
+                        "name": "Frost Moon",
+                        "waypoints": [
+                            {"id": 1, "label_id": 3, "is_primary": true, "x_pos": 100.0, "y_pos": 20.0, "area_id": 15},
+                            {"id": 2, "label_id": 3, "is_primary": true, "x_pos": 100.0, "y_pos": 1450.0, "area_id": 15},
+                            {"id": 10, "label_id": 3, "is_primary": true, "x_pos": 2300.0, "y_pos": 300.0, "area_id": 15},
+                            {"id": 11, "label_id": 3, "is_primary": true, "x_pos": 2540.0, "y_pos": 300.0, "area_id": 15},
+                            {"id": 12, "label_id": 3, "is_primary": true, "x_pos": 2420.0, "y_pos": 480.0, "area_id": 15}
+                        ]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut loc = MapLocator::with_paths(
+            LocatorPaths {
+                db_path: Some(mm_path),
+                terrain_npz_path: Some(base.join("absent_t.npz")),
+                cave_masks_npz_path: Some(base.join("absent_c.npz")),
+                ui_anchors_npz_path: Some(base.join("absent_u.npz")),
+                legacy_underground_db_path: None,
+            },
+            Some(Arc::new(FixedOcrProvider("Frost Moon"))),
+        );
+        let raster = Arc::new(build_synthetic_terrain_raster(1050, 1800));
+        let mut tmap = BTreeMap::new();
+        tmap.insert(40, Arc::clone(&raster));
+        loc.set_terrain_data(tmap);
+
+        // True view on 2560x1440 at slider t=0.5 (calibrated scale s = 0.919) centered around world (950, 700)
+        let true_scale = 0.919;
+        let true_wx = 950.0;
+        let true_wy = 700.0;
+        let true_tx = true_wx - true_scale * 1280.0;
+        let true_ty = true_wy - true_scale * 720.0;
+
+        // Tune smooth uncorrelated interference (180-deg rotated twin with identical gradient
+        // spectrum) so full-res terrain correlation alt_t at T lands in [0.31, 0.385] (above the
+        // fixed 0.30 guard threshold, below the broken 0.40 threshold).
+        let base_gray =
+            render_frame_gray_from_terrain(&raster, 2560, 1440, true_scale, true_tx, true_ty, 0.0);
+        let mut frame_gray = base_gray.clone();
+        for w_pct in (10u32..=85).step_by(5) {
+            let a = w_pct as f64 / 100.0;
+            let mut cand = Array2::<u8>::zeros((1440, 2560));
+            for y in 0..1440 {
+                for x in 0..2560 {
+                    let d = base_gray[[1439 - y, 2559 - x]] as f64;
+                    let v = a * base_gray[[y, x]] as f64 + (1.0 - a) * d;
+                    cand[[y, x]] = v.clamp(0.0, 255.0) as u8;
+                }
+            }
+            let sc_t = loc.score_terrain_alignment(
+                Some(cand.view()),
+                40,
+                true_scale,
+                true_tx,
+                true_ty,
+                8,
+            );
+            if (0.31..=0.385).contains(&sc_t) {
+                frame_gray = cand;
+                break;
+            }
+        }
+        let alt_t = loc.score_terrain_alignment(
+            Some(frame_gray.view()),
+            40,
+            true_scale,
+            true_tx,
+            true_ty,
+            8,
+        );
+        assert!(
+            (0.31..=0.385).contains(&alt_t),
+            "expected alt_t in [0.31, 0.385], got {alt_t:.4}"
+        );
+
+        let mut frame = Array3::<u8>::zeros((1440, 2560, 3));
+        for y in 0..1440 {
+            for x in 0..2560 {
+                let g = frame_gray[[y, x]];
+                frame[[y, x, 0]] = g;
+                frame[[y, x, 1]] = g;
+                frame[[y, x, 2]] = g;
+            }
+        }
+        // Paint player arrow at center (1280, 720)
+        paint_player_arrow_bgr(&mut frame, 1280.0, 720.0, 27.0);
+
+        // Paint 3 decoy waypoint icons mimicking triangle F at scale 0.919, shifted onto screen
+        let f_tx = 2420.0 - true_scale * 1100.0;
+        let f_ty = 360.0 - true_scale * 600.0;
+        for (wx, wy) in [(2300.0, 300.0), (2540.0, 300.0), (2420.0, 480.0)] {
+            let sx = (wx - f_tx) / true_scale;
+            let sy = (wy - f_ty) / true_scale - 5.0; // compensate default anchor +5y
+            paint_cyan_white_waypoint(&mut frame, sx, sy);
+        }
+
+        let slider_t05 = ZoomSliderResult {
+            success: true,
+            found: true,
+            ratio_t: 0.5,
+            rho: 0.5,
+            scale: 0.0,
+            match_score: 0.99,
+            score: 0.99,
+            ccoeff: 0.99,
+            box_coords: [0; 4],
+            x_track: 0.0,
+            y_thumb_global: 0.0,
+            total_span: 256.0,
+        };
+        let res = loc
+            .locate_player(frame.view(), true, Some(&slider_t05))
+            .expect("locate_player result");
+        assert!(res.has_world_coords && res.map_id == Some(40), "{res:?}");
+        let got_x = res.world_x.unwrap();
+        let got_y = res.world_y.unwrap();
+        let err_true = (got_x - true_wx).hypot(got_y - true_wy);
+        assert!(
+            err_true <= 45.0,
+            "terrain guard did not override 3-inlier false lock: got=({got_x:.1},{got_y:.1}), expected=({true_wx:.1},{true_wy:.1}), err={err_true:.1}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn pass2c_rejects_text_glyphs_and_keeps_compact_pin() {
+        let base = make_temp_dir("pass2c_shape");
+        let loc = MapLocator::with_paths(
+            LocatorPaths {
+                db_path: Some(base.join("absent.json")),
+                terrain_npz_path: Some(base.join("absent_t.npz")),
+                cave_masks_npz_path: Some(base.join("absent_c.npz")),
+                ui_anchors_npz_path: Some(base.join("absent_u.npz")),
+                legacy_underground_db_path: None,
+            },
+            None,
+        );
+        let mut frame = Array3::<u8>::from_elem((1440, 2560, 3), 40u8);
+        let paint_rect = |img: &mut Array3<u8>, x0: usize, y0: usize, x1: usize, y1: usize| {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    img[[y, x, 0]] = 240;
+                    img[[y, x, 1]] = 240;
+                    img[[y, x, 2]] = 240;
+                }
+            }
+        };
+        // Text glyph 'E' at (700, 600), 14x16
+        paint_rect(&mut frame, 700, 600, 703, 616);
+        paint_rect(&mut frame, 700, 600, 714, 603);
+        paint_rect(&mut frame, 700, 607, 712, 609);
+        paint_rect(&mut frame, 700, 613, 714, 616);
+        // Text glyph 'H' at (820, 600), 14x16
+        paint_rect(&mut frame, 820, 600, 823, 616);
+        paint_rect(&mut frame, 831, 600, 834, 616);
+        paint_rect(&mut frame, 820, 607, 834, 609);
+        // Text glyph 'L' at (940, 600), 14x16
+        paint_rect(&mut frame, 940, 600, 943, 616);
+        paint_rect(&mut frame, 940, 613, 954, 616);
+        // Text glyph 'C' at (1060, 600), 14x16
+        paint_rect(&mut frame, 1060, 600, 1063, 616);
+        paint_rect(&mut frame, 1060, 600, 1074, 603);
+        paint_rect(&mut frame, 1060, 613, 1074, 616);
+        // Wide chevron / horizontal label stroke (16x8, area ~64) at (1400, 600)
+        paint_rect(&mut frame, 1400, 600, 1416, 604);
+        paint_rect(&mut frame, 1404, 604, 1412, 608);
+
+        // One real compact solid white pin at (1200, 600) (~18x22 oval)
+        for y in 589..=611 {
+            for x in 1191..=1209 {
+                let dx = (x as f64 - 1200.0) / 9.0;
+                let dy = (y as f64 - 600.0) / 11.0;
+                if dx * dx + dy * dy <= 1.0 {
+                    frame[[y, x, 0]] = 242;
+                    frame[[y, x, 1]] = 242;
+                    frame[[y, x, 2]] = 242;
+                }
+            }
+        }
+
+        let cands = loc.detect_waypoint_candidates(frame.view(), None, None);
+        assert_eq!(
+            cands.len(),
+            1,
+            "expected only the 1 compact pin, got {cands:?}"
+        );
+        assert!(
+            (cands[0].0 - 1200.0).hypot(cands[0].1 - 600.0) < 4.0,
+            "unexpected pin center: {:?}",
+            cands[0]
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn pass1_recovers_waypoints_on_cyan_flooded_background() {
+        let base = make_temp_dir("pass1_flood");
+        let loc = MapLocator::with_paths(
+            LocatorPaths {
+                db_path: Some(base.join("absent.json")),
+                terrain_npz_path: Some(base.join("absent_t.npz")),
+                cave_masks_npz_path: Some(base.join("absent_c.npz")),
+                ui_anchors_npz_path: Some(base.join("absent_u.npz")),
+                legacy_underground_db_path: None,
+            },
+            None,
+        );
+        // Flooded Map-40-like bright blue-cyan moon backdrop:
+        // BGR [205, 165, 95] -> HSV H~101, S~137, V~205 (triggers old Pass 1 S>=115, V>=130),
+        // and gray ~149 >= 145 so Pass 2c border check rejects it too.
+        let mut frame = Array3::<u8>::zeros((1440, 2560, 3));
+        for y in 0..1440 {
+            for x in 0..2560 {
+                frame[[y, x, 0]] = 205;
+                frame[[y, x, 1]] = 165;
+                frame[[y, x, 2]] = 95;
+            }
+        }
+        let targets = [
+            (900.0, 600.0),
+            (1100.0, 620.0),
+            (1400.0, 650.0),
+            (1600.0, 700.0),
+        ];
+        for &(tx, ty) in &targets {
+            paint_cyan_white_waypoint(&mut frame, tx, ty);
+        }
+
+        let cands = loc.detect_waypoint_candidates(frame.view(), None, None);
+        assert!(
+            cands.len() <= 6,
+            "expected <= 6 candidates on flooded background, got {}",
+            cands.len()
+        );
+        for &(tx, ty) in &targets {
+            let best_d = cands
+                .iter()
+                .map(|c| (c.0 - tx).hypot(c.1 - ty))
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                best_d < 6.0,
+                "missed waypoint ({tx},{ty}) on cyan-flooded frame (best_d={best_d:.1}, cands={cands:?})"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

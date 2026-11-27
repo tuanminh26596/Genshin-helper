@@ -28,6 +28,19 @@ pub const MODEL_C: f64 = 1.9242;
 
 pub const SLIDER_MIN_CCORR: f64 = 0.88;
 
+/// Map 40 (Nod-Krai / Frost Moon) linear scale law @2560x1440 (`s_40(t) = MID - SLOPE * (t - 0.50)`).
+/// Calibrated via OLS across 7 distinct zoom levels (11 frames from `sess_20261127_210311`,
+/// `sess_20261127_011544`, `sess_20261127_081807`, and `Test-images/Screenshot 2026-09-20 102751.png`,
+/// verified by both isometric waypoint LSQ and Sobel terrain correlation peaks):
+///   t=0.4323 -> 1.0191 (old 1.0396, +2.0%), t=0.4985 -> 0.9220 (+1.7%),
+///   t=0.5313 -> 0.8707 (+1.8%), t=0.5833 -> 0.7982 (+1.0%),
+///   t=0.6823 -> 0.6476 (+0.9%), t=0.7448 -> 0.5617 (-0.9%), t=0.7917 -> 0.4874 (-0.6%).
+/// Max relative residual across t in [0.43, 0.79]: 0.62% (<= 0.26% across [0.43, 0.59]).
+pub const MAP40_SCALE_MID_1440P: f64 = 0.919;
+pub const MAP40_SCALE_SLOPE_1440P: f64 = 1.474;
+pub const MAP40_SCALE_MIN_1440P: f64 = 0.18;
+pub const MAP40_SCALE_MAX_1440P: f64 = 1.66;
+
 const ZOOM_THUMB_TEMPLATE_PNG: &[u8] = include_bytes!("../../../../assets/zoom_thumb_template.png");
 
 /// Per-map scale multipliers relative to Map 2 (Teyvat) at the same zoom slider ratio `t`
@@ -346,7 +359,8 @@ impl ZoomSliderDetector {
         let t = res.ratio_t.clamp(0.0, 1.0);
         let fw_ratio = 2560.0 / (frame_w.max(1) as f64);
         if map_id == 40 {
-            let s_40 = (0.935 - 1.545 * (t - 0.50)).clamp(0.22, 1.65);
+            let s_40 = (MAP40_SCALE_MID_1440P - MAP40_SCALE_SLOPE_1440P * (t - 0.50))
+                .clamp(MAP40_SCALE_MIN_1440P, MAP40_SCALE_MAX_1440P);
             return Some(s_40 * fw_ratio);
         }
         let s_m2 = (SCALE_T0_1440P + (SCALE_T1_1440P - SCALE_T0_1440P) * t) * fw_ratio;
@@ -376,9 +390,9 @@ mod tests {
         };
 
         for (t, exp_m2, exp_40, exp_36, exp_999) in [
-            (0.0, 1.9242, 1.65, 1.400_817_6, 1.443_15),
-            (0.5, 1.1214, 0.935, 0.816_379_2, 0.841_05),
-            (1.0, 0.3186, 0.22, 0.231_940_8, 0.238_95),
+            (0.0, 1.9242, 1.656, 1.400_817_6, 1.443_15),
+            (0.5, 1.1214, 0.919, 0.816_379_2, 0.841_05),
+            (1.0, 0.3186, 0.182, 0.231_940_8, 0.238_95),
         ] {
             let r = make_res(t);
             assert!((ZoomSliderDetector::get_map_scale(Some(&r), 2, 2560).unwrap() - exp_m2).abs() < 1e-6);
@@ -424,5 +438,44 @@ mod tests {
         assert!(res.match_score > 0.999);
         assert!(res.ccoeff > 0.999);
         assert!((res.y_thumb_global - (y0 as f64 + 15.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn map40_scale_matches_measured_calibration_points() {
+        // 7 distinct Map 40 zoom levels @2560x1440 verified via waypoint LSQ & Sobel terrain peaks:
+        // (t, measured_scale_1440p)
+        let measured = [
+            (0.432_292, 1.019_08),
+            (0.498_540, 0.922_03),
+            (0.531_250, 0.870_70),
+            (0.583_333, 0.798_19),
+            (0.682_292, 0.647_64),
+            (0.744_792, 0.561_67),
+            (0.791_667, 0.487_40),
+        ];
+        for (t, exp_s) in measured {
+            let res = ZoomSliderResult {
+                success: true,
+                found: true,
+                ratio_t: t,
+                rho: RHO_MIN + t * RHO_SPAN,
+                scale: 0.0,
+                match_score: 1.0,
+                score: 1.0,
+                ccoeff: 1.0,
+                box_coords: [0; 4],
+                x_track: 0.0,
+                y_thumb_global: 0.0,
+                total_span: 256.0,
+            };
+            let got = ZoomSliderDetector::get_map_scale(Some(&res), 40, 2560)
+                .expect("map 40 scale");
+            let rel_err = (got - exp_s).abs() / exp_s;
+            assert!(
+                rel_err <= 0.01,
+                "t={t:.6}: got={got:.5}, expected={exp_s:.5} (rel_err={:.3}%)",
+                rel_err * 100.0
+            );
+        }
     }
 }
