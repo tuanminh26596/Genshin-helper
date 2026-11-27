@@ -7,6 +7,7 @@ use crate::compositor::{
     OfflineRadarAssets, composite_radar_onto_frame, save_bgra_png,
 };
 use crate::verified_gt::{SessionCheckpointGt, VerifiedGtFile};
+use gh_app::BUILD_GIT_COMMIT;
 use gh_app::capture_backend::FrameCapturer;
 use gh_app::diagnostics::{DiagnosticManager, MinimapPreLostRingBuffer};
 use gh_app::log_buffer::LogRingBuffer;
@@ -25,6 +26,10 @@ use gh_core::i18n::get_language;
 use gh_core::map_bridge::PerMapAffineRegistry;
 use gh_core::nav_controller::NavigationController;
 use gh_core::paths::{AppPaths, RuntimeMode};
+use gh_core::provenance::{
+    DATASET_FILENAMES, ReplayProvenance, SessionProvenance, compare_git_commits,
+    fingerprint_data_dir,
+};
 use gh_core::traits::OcrProvider;
 use gh_cv::map_state::MapState;
 use gh_cv::minimap_tracker::MinimapPose;
@@ -204,6 +209,8 @@ pub struct ReplayReport {
     pub post_tick: PostTickTelemetry,
     pub regression: RegressionReport,
     pub accuracy: AccuracyReport,
+    #[serde(default)]
+    pub provenance: ReplayProvenance,
 }
 
 #[derive(Debug, Clone)]
@@ -915,6 +922,55 @@ fn compute_regression(
     }
 }
 
+/// Reads the optional `provenance` object from `<source_dir>/info.json` (`None` for old sessions).
+pub fn read_session_provenance(source_dir: &Path) -> Option<SessionProvenance> {
+    let raw = std::fs::read_to_string(source_dir.join("info.json")).ok()?;
+    let val: Value = serde_json::from_str(&raw).ok()?;
+    let prov = val.get("provenance")?;
+    if prov.is_null() {
+        return None;
+    }
+    serde_json::from_value::<SessionProvenance>(prov.clone()).ok()
+}
+
+/// Resolves which dataset directory replay loads: `<source_dir>/assets_cache/data` when
+/// the map database is present there, otherwise falls back to `--data-dir`.
+pub fn resolve_replay_data_dir(
+    source_dir: &Path,
+    fallback_data_dir: &Path,
+) -> (PathBuf, &'static str) {
+    let session_data_dir = source_dir.join("assets_cache").join("data");
+    if session_data_dir.join(DATASET_FILENAMES[0]).is_file() {
+        (session_data_dir, "session")
+    } else {
+        (fallback_data_dir.to_path_buf(), "data_dir")
+    }
+}
+
+/// Builds the replay report provenance block comparing recorded session metadata against the
+/// dataset directory and build commit actually used during replay.
+pub fn build_replay_provenance(
+    recorded: Option<SessionProvenance>,
+    replay_data_source: &str,
+    effective_data_dir: &Path,
+    current_commit: &str,
+) -> ReplayProvenance {
+    let replay_datasets = fingerprint_data_dir(effective_data_dir);
+    let datasets_match = recorded
+        .as_ref()
+        .map(|rec| rec.datasets.matches(&replay_datasets));
+    let same_commit = recorded
+        .as_ref()
+        .and_then(|rec| compare_git_commits(&rec.git_commit, current_commit));
+    ReplayProvenance {
+        recorded,
+        replay_data_source: replay_data_source.to_owned(),
+        replay_datasets,
+        datasets_match,
+        same_commit,
+    }
+}
+
 pub fn run_replay(opts: &ReplayOptions) -> Result<ReplayReport, String> {
     run_replay_with_poses(opts).map(|(report, _)| report)
 }
@@ -965,11 +1021,21 @@ pub fn run_replay_full(
     };
     let paimon_present_at_start = paimon_cache.is_file();
 
+    let (effective_data_dir, replay_data_source) =
+        resolve_replay_data_dir(&opts.source_dir, &opts.data_dir);
+    let recorded_provenance = read_session_provenance(&opts.source_dir);
+    let provenance = build_replay_provenance(
+        recorded_provenance,
+        replay_data_source,
+        &effective_data_dir,
+        BUILD_GIT_COMMIT,
+    );
+
     let enable_mmap_view = opts.verify_mmap_view || opts.render_out.is_some();
     let capturer = Arc::new(ReplayCapturer::new());
     let (state, tile_cache, cfg_snap, relocator_ready) = build_offline_replay_state(
         &sandbox.0,
-        &opts.data_dir,
+        &effective_data_dir,
         tiles_dir.clone(),
         ug_dir.clone(),
         paimon_cache.clone(),
@@ -1364,6 +1430,7 @@ pub fn run_replay_full(
         post_tick,
         regression,
         accuracy,
+        provenance,
     };
 
     state.capturer.close();
@@ -1450,6 +1517,133 @@ mod tests {
         assert_eq!(report.capture_coverage.unserved.close_or_slider_probe, 3);
         assert!(!report.accuracy.has_verified_gt);
         assert!(out_report.is_file());
+        // Legacy session without provenance or assets_cache/data falls back to --data-dir
+        assert_eq!(report.provenance.recorded, None);
+        assert_eq!(report.provenance.replay_data_source, "data_dir");
+        assert_eq!(report.provenance.datasets_match, None);
+        assert_eq!(report.provenance.same_commit, None);
+        assert!(
+            report
+                .provenance
+                .replay_datasets
+                .get(DATASET_FILENAMES[0])
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn replay_uses_session_datasets_when_present_and_tracks_datasets_match() {
+        let sandbox = TempSandboxDir::new("gh_sim_replay_prov").unwrap();
+        let fallback_data_dir = sandbox.0.join("fallback_data");
+        std::fs::create_dir_all(&fallback_data_dir).unwrap();
+        write_json_atomic(
+            &fallback_data_dir.join(DATASET_FILENAMES[0]),
+            &json!({"version": "4.0.0", "maps": {}, "tag": "fallback"}),
+        )
+        .unwrap();
+
+        let mk_session = |name: &str| {
+            let sdir = sandbox.0.join(name);
+            std::fs::create_dir_all(sdir.join("frames")).unwrap();
+            let img = image::RgbaImage::from_pixel(434, 348, image::Rgba([20, 40, 60, 255]));
+            for i in 1..=1usize {
+                img.save(sdir.join("frames").join(format!("{i:06}.png")))
+                    .unwrap();
+            }
+            std::fs::write(
+                sdir.join("meta.jsonl"),
+                "{\"i\":1,\"ts\":10.0,\"frame_w\":2560,\"frame_h\":1440,\"state\":\"UNLOCALIZED\"}\n",
+            )
+            .unwrap();
+            sdir
+        };
+
+        // 1. Session with assets_cache/data + matching provenance -> loads from "session", datasets_match = Some(true)
+        let s_hermetic = mk_session("sess_hermetic");
+        let sess_data = s_hermetic.join("assets_cache").join("data");
+        std::fs::create_dir_all(&sess_data).unwrap();
+        write_json_atomic(
+            &sess_data.join(DATASET_FILENAMES[0]),
+            &json!({"version": "4.0.0", "maps": {}, "tag": "session_override"}),
+        )
+        .unwrap();
+        let sess_fp = fingerprint_data_dir(&sess_data);
+        let fallback_fp = fingerprint_data_dir(&fallback_data_dir);
+        assert_ne!(sess_fp, fallback_fp);
+        write_json_atomic(
+            &s_hermetic.join("info.json"),
+            &json!({
+                "schema_version": 1,
+                "provenance": {
+                    "app_version": gh_app::BUILD_APP_VERSION,
+                    "git_commit": BUILD_GIT_COMMIT,
+                    "data_source": "installed",
+                    "datasets": sess_fp,
+                }
+            }),
+        )
+        .unwrap();
+
+        let rep_hermetic = run_replay(&ReplayOptions {
+            source_dir: s_hermetic,
+            data_dir: fallback_data_dir.clone(),
+            gt_file: sandbox.0.join("verified_gt.json"),
+            tiles_dir: None,
+            ug_dir: None,
+            paimon_cache_path: None,
+            ffmpeg_path: None,
+            max_frames: None,
+            drift_threshold_w: DEFAULT_DRIFT_THRESHOLD_W,
+            verify_mmap_view: false,
+            render_out: None,
+            out_report: None,
+        })
+        .unwrap();
+        assert_eq!(rep_hermetic.provenance.replay_data_source, "session");
+        assert_eq!(rep_hermetic.provenance.replay_datasets, sess_fp);
+        assert_eq!(rep_hermetic.provenance.datasets_match, Some(true));
+        if !BUILD_GIT_COMMIT.eq_ignore_ascii_case("unknown") {
+            assert_eq!(rep_hermetic.provenance.same_commit, Some(true));
+        }
+
+        // 2. Session WITHOUT assets_cache/data whose recorded provenance had different datasets & commit ->
+        // falls back to --data-dir, datasets_match = Some(false), same_commit = Some(false) (unless build commit unknown)
+        let s_mismatch = mk_session("sess_mismatch");
+        write_json_atomic(
+            &s_mismatch.join("info.json"),
+            &json!({
+                "schema_version": 1,
+                "provenance": {
+                    "app_version": "5.7.0",
+                    "git_commit": "0000000000000000000000000000000000000000",
+                    "data_source": "installed",
+                    "datasets": sess_fp,
+                }
+            }),
+        )
+        .unwrap();
+
+        let rep_mismatch = run_replay(&ReplayOptions {
+            source_dir: s_mismatch,
+            data_dir: fallback_data_dir,
+            gt_file: sandbox.0.join("verified_gt.json"),
+            tiles_dir: None,
+            ug_dir: None,
+            paimon_cache_path: None,
+            ffmpeg_path: None,
+            max_frames: None,
+            drift_threshold_w: DEFAULT_DRIFT_THRESHOLD_W,
+            verify_mmap_view: false,
+            render_out: None,
+            out_report: None,
+        })
+        .unwrap();
+        assert_eq!(rep_mismatch.provenance.replay_data_source, "data_dir");
+        assert_eq!(rep_mismatch.provenance.replay_datasets, fallback_fp);
+        assert_eq!(rep_mismatch.provenance.datasets_match, Some(false));
+        if !BUILD_GIT_COMMIT.eq_ignore_ascii_case("unknown") {
+            assert_eq!(rep_mismatch.provenance.same_commit, Some(false));
+        }
     }
 
     #[test]
@@ -1541,6 +1735,8 @@ mod tests {
                 tiles_dir: sandbox.0.join("src_tiles"),
                 ug_overlays_dir: sandbox.0.join("src_ug"),
                 paimon_cache_path: sandbox.0.join("paimon_tpl.npz"),
+                data_dir: data_dir.clone(),
+                data_source: "dev".to_owned(),
                 maps_db: Arc::new(MultimapDb::default()),
                 max_queue: 16,
             },

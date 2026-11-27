@@ -12,9 +12,13 @@
 //!   into `<session>/assets_cache/` on finish so offline replay matches live assets.
 
 use crate::diagnostics::local_timestamp_compact_and_iso;
+use crate::{BUILD_APP_VERSION, BUILD_GIT_COMMIT};
 use gh_core::atomic_io::write_json_atomic;
 use gh_core::frame::{FrameBuf, PixelFormat, RectI32};
 use gh_core::multimap::MultimapDb;
+use gh_core::provenance::{
+    DATASET_FILENAMES, SessionProvenance, fingerprint_data_dir, sanitize_data_source_label,
+};
 use gh_core::{CoreError, CoreResult};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeSet, HashSet, VecDeque};
@@ -87,6 +91,8 @@ pub struct SessionRecorderConfig {
     pub tiles_dir: PathBuf,
     pub ug_overlays_dir: PathBuf,
     pub paimon_cache_path: PathBuf,
+    pub data_dir: PathBuf,
+    pub data_source: String,
     pub maps_db: Arc<MultimapDb>,
     pub max_queue: usize,
 }
@@ -141,6 +147,8 @@ pub struct SessionRecorder {
     tiles_dir: PathBuf,
     ug_overlays_dir: PathBuf,
     paimon_cache_path: PathBuf,
+    data_dir: PathBuf,
+    data_source: String,
     maps_db: Arc<MultimapDb>,
     on_done: Mutex<Option<SessionDoneCallback>>,
     shared: Arc<(Mutex<RecorderShared>, Condvar)>,
@@ -184,6 +192,8 @@ impl SessionRecorder {
             tiles_dir: cfg.tiles_dir,
             ug_overlays_dir: cfg.ug_overlays_dir,
             paimon_cache_path: cfg.paimon_cache_path,
+            data_dir: cfg.data_dir,
+            data_source: sanitize_data_source_label(&cfg.data_source),
             maps_db: cfg.maps_db,
             on_done: Mutex::new(on_done),
             shared: Arc::new((
@@ -479,50 +489,42 @@ impl SessionRecorder {
             )
         };
 
-        // Mandatory hermetic assets_cache/ snapshot for offline replay parity
-        let assets_snap = snapshot_session_assets(
-            &self.out_dir.join("assets_cache"),
-            &self.tiles_dir,
-            &self.ug_overlays_dir,
-            &self.paimon_cache_path,
-            &self.maps_db,
-            &visited_coords,
-            &visited_floors,
-        );
-
         let video_size_bytes = std::fs::metadata(self.out_dir.join("video.mkv"))
             .map(|m| m.len())
             .unwrap_or(0);
-        let info = json!({
-            "schema_version": 1,
-            "video_file": "video.mkv",
-            "video_size_bytes": video_size_bytes,
-            "codec": self.codec.as_str(),
-            "width": width,
-            "height": height,
-            "fps": self.fps,
-            "seconds_target": self.seconds,
-            "frames": frames,
-            "dropped_queue": dropped_queue,
-            "dropped_resize": dropped_resize,
-            "dropped_total": dropped_queue + dropped_resize,
-            "write_errors": write_errors,
-            "ffmpeg_exit_code": ffmpeg_exit,
-            "capture_paths_seen": capture_paths,
-            "assets_cache": {
-                "tiles_copied": assets_snap.tiles_copied,
-                "ug_overlays_copied": assets_snap.ug_overlays_copied,
-                "paimon_copied": assets_snap.paimon_copied,
+        let assets_snap = finalize_session_artifacts(
+            &self.out_dir,
+            &self.tiles_dir,
+            &self.ug_overlays_dir,
+            &self.paimon_cache_path,
+            &self.data_dir,
+            &self.data_source,
+            &self.maps_db,
+            &visited_coords,
+            &visited_floors,
+            SessionInfoInputs {
+                video_size_bytes,
+                codec: self.codec,
+                width,
+                height,
+                fps: self.fps,
+                seconds_target: self.seconds,
+                frames,
+                dropped_queue,
+                dropped_resize,
+                write_errors,
+                ffmpeg_exit_code: ffmpeg_exit,
+                capture_paths_seen: capture_paths,
             },
-        });
-        let _ = write_json_atomic(&self.out_dir.join("info.json"), &info);
+        );
         tracing::info!(
-            "[SessionRecorder] Done: {} frames ({} dropped, {:.1} MB, {} tiles / {} ug cached) -> {}",
+            "[SessionRecorder] Done: {} frames ({} dropped, {:.1} MB, {} tiles / {} ug / {} data cached) -> {}",
             frames,
             dropped_queue + dropped_resize,
             video_size_bytes as f64 / (1024.0 * 1024.0),
             assets_snap.tiles_copied,
             assets_snap.ug_overlays_copied,
+            assets_snap.datasets_copied,
             self.out_dir.display()
         );
 
@@ -739,15 +741,95 @@ struct AssetsSnapshotStats {
     tiles_copied: usize,
     ug_overlays_copied: usize,
     paimon_copied: bool,
+    datasets_copied: usize,
 }
 
-/// Mandatorily copies all cached HD tiles & underground overlays relevant to the visited trajectory
-/// (plus `paimon_tpl.npz` if present) into `<session>/assets_cache/`.
+struct SessionInfoInputs {
+    video_size_bytes: u64,
+    codec: SessionCodec,
+    width: u32,
+    height: u32,
+    fps: f64,
+    seconds_target: f64,
+    frames: usize,
+    dropped_queue: usize,
+    dropped_resize: usize,
+    write_errors: usize,
+    ffmpeg_exit_code: Option<i32>,
+    capture_paths_seen: Vec<String>,
+}
+
+fn build_session_provenance(data_dir: &Path, data_source: &str) -> SessionProvenance {
+    SessionProvenance {
+        app_version: BUILD_APP_VERSION.to_owned(),
+        git_commit: BUILD_GIT_COMMIT.to_owned(),
+        data_source: sanitize_data_source_label(data_source),
+        datasets: fingerprint_data_dir(data_dir),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_session_artifacts(
+    out_dir: &Path,
+    src_tiles_dir: &Path,
+    src_ug_dir: &Path,
+    src_paimon_path: &Path,
+    src_data_dir: &Path,
+    data_source: &str,
+    maps_db: &MultimapDb,
+    visited_coords: &[(i32, f64, f64)],
+    visited_floors: &HashSet<(i32, i32)>,
+    inputs: SessionInfoInputs,
+) -> AssetsSnapshotStats {
+    // Mandatory hermetic assets_cache/ snapshot for offline replay parity
+    let assets_snap = snapshot_session_assets(
+        &out_dir.join("assets_cache"),
+        src_tiles_dir,
+        src_ug_dir,
+        src_paimon_path,
+        src_data_dir,
+        maps_db,
+        visited_coords,
+        visited_floors,
+    );
+    let provenance = build_session_provenance(src_data_dir, data_source);
+
+    let info = json!({
+        "schema_version": 1,
+        "video_file": "video.mkv",
+        "video_size_bytes": inputs.video_size_bytes,
+        "codec": inputs.codec.as_str(),
+        "width": inputs.width,
+        "height": inputs.height,
+        "fps": inputs.fps,
+        "seconds_target": inputs.seconds_target,
+        "frames": inputs.frames,
+        "dropped_queue": inputs.dropped_queue,
+        "dropped_resize": inputs.dropped_resize,
+        "dropped_total": inputs.dropped_queue + inputs.dropped_resize,
+        "write_errors": inputs.write_errors,
+        "ffmpeg_exit_code": inputs.ffmpeg_exit_code,
+        "capture_paths_seen": inputs.capture_paths_seen,
+        "assets_cache": {
+            "tiles_copied": assets_snap.tiles_copied,
+            "ug_overlays_copied": assets_snap.ug_overlays_copied,
+            "paimon_copied": assets_snap.paimon_copied,
+        },
+        "provenance": provenance,
+    });
+    let _ = write_json_atomic(&out_dir.join("info.json"), &info);
+    assets_snap
+}
+
+/// Mandatorily copies all cached HD tiles, underground overlays, `paimon_tpl.npz`, and live
+/// dataset files relevant to the session into `<session>/assets_cache/`.
+#[allow(clippy::too_many_arguments)]
 fn snapshot_session_assets(
     assets_cache_dir: &Path,
     src_tiles_dir: &Path,
     src_ug_dir: &Path,
     src_paimon_path: &Path,
+    src_data_dir: &Path,
     maps_db: &MultimapDb,
     visited_coords: &[(i32, f64, f64)],
     visited_floors: &HashSet<(i32, i32)>,
@@ -849,6 +931,15 @@ fn snapshot_session_assets(
         stats.paimon_copied = true;
     }
 
+    let dst_data = assets_cache_dir.join("data");
+    let _ = std::fs::create_dir_all(&dst_data);
+    for fname in DATASET_FILENAMES {
+        let src = src_data_dir.join(fname);
+        if src.is_file() && std::fs::copy(&src, dst_data.join(fname)).is_ok() {
+            stats.datasets_copied += 1;
+        }
+    }
+
     stats
 }
 
@@ -945,6 +1036,11 @@ mod tests {
         let paimon = root.join("paimon_tpl.npz");
         std::fs::write(&paimon, b"NPZDATA").unwrap();
 
+        let src_data = root.join("src_data");
+        std::fs::create_dir_all(&src_data).unwrap();
+        std::fs::write(src_data.join(DATASET_FILENAMES[0]), b"{\"maps\":{}}").unwrap();
+        std::fs::write(src_data.join(DATASET_FILENAMES[1]), b"TERRAIN").unwrap();
+
         let mut floors = HashSet::new();
         floors.insert((2, 77));
         let st = snapshot_session_assets(
@@ -952,6 +1048,7 @@ mod tests {
             &src_tiles,
             &src_ug,
             &paimon,
+            &src_data,
             &db,
             &[(2, 0.0, 0.0)],
             &floors,
@@ -959,9 +1056,109 @@ mod tests {
         assert_eq!(st.tiles_copied, 1);
         assert_eq!(st.ug_overlays_copied, 1);
         assert!(st.paimon_copied);
+        assert_eq!(st.datasets_copied, 2);
         assert!(dst_cache.join("tiles").join("2").join("0").join("94_64.webp").is_file());
         assert!(dst_cache.join("ug_overlays").join("2_g10_f77.png").is_file());
         assert!(dst_cache.join("paimon_tpl.npz").is_file());
+        assert!(dst_cache.join("data").join(DATASET_FILENAMES[0]).is_file());
+        assert!(dst_cache.join("data").join(DATASET_FILENAMES[1]).is_file());
+        assert!(!dst_cache.join("data").join(DATASET_FILENAMES[2]).exists());
+        assert!(!dst_cache.join("data").join(DATASET_FILENAMES[3]).exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn finalize_session_artifacts_copies_datasets_and_writes_provenance_without_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "gh_sess_prov_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let out_dir = root.join("sess_prov_test");
+        let src_data = root.join("live_data");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::create_dir_all(&src_data).unwrap();
+
+        let mm_bytes = br#"{"version":"4.0.0","maps":{}}"#;
+        let terrain_bytes = b"TERRAIN_BYTES";
+        let cave_bytes = b"CAVE_BYTES";
+        std::fs::write(src_data.join(DATASET_FILENAMES[0]), mm_bytes).unwrap();
+        std::fs::write(src_data.join(DATASET_FILENAMES[1]), terrain_bytes).unwrap();
+        std::fs::write(src_data.join(DATASET_FILENAMES[2]), cave_bytes).unwrap();
+        // DATASET_FILENAMES[3] intentionally missing (matching installed dataset layout)
+
+        let db = load_multimap_db(&src_data.join(DATASET_FILENAMES[0])).unwrap();
+        let st = finalize_session_artifacts(
+            &out_dir,
+            &root.join("tiles"),
+            &root.join("ug"),
+            &root.join("paimon_tpl.npz"),
+            &src_data,
+            "installed",
+            &db,
+            &[],
+            &HashSet::new(),
+            SessionInfoInputs {
+                video_size_bytes: 1234,
+                codec: SessionCodec::Libx264Rgb,
+                width: 1280,
+                height: 720,
+                fps: 20.0,
+                seconds_target: 0.0,
+                frames: 10,
+                dropped_queue: 0,
+                dropped_resize: 0,
+                write_errors: 0,
+                ffmpeg_exit_code: Some(0),
+                capture_paths_seen: vec!["gdi".to_owned()],
+            },
+        );
+        assert_eq!(st.datasets_copied, 3);
+        assert_eq!(
+            std::fs::read(out_dir.join("assets_cache").join("data").join(DATASET_FILENAMES[0]))
+                .unwrap(),
+            mm_bytes
+        );
+        assert_eq!(
+            std::fs::read(out_dir.join("assets_cache").join("data").join(DATASET_FILENAMES[1]))
+                .unwrap(),
+            terrain_bytes
+        );
+        assert_eq!(
+            std::fs::read(out_dir.join("assets_cache").join("data").join(DATASET_FILENAMES[2]))
+                .unwrap(),
+            cave_bytes
+        );
+        assert!(
+            !out_dir
+                .join("assets_cache")
+                .join("data")
+                .join(DATASET_FILENAMES[3])
+                .exists()
+        );
+
+        let info: Value = serde_json::from_str(
+            &std::fs::read_to_string(out_dir.join("info.json")).unwrap(),
+        )
+        .unwrap();
+        // Existing keys unchanged
+        assert_eq!(info["schema_version"], json!(1));
+        assert_eq!(info["frames"], json!(10));
+        assert_eq!(info["codec"], json!("libx264rgb"));
+        assert_eq!(info["assets_cache"]["tiles_copied"], json!(0));
+
+        // Provenance stamped accurately
+        let prov = &info["provenance"];
+        assert_eq!(prov["app_version"], json!(BUILD_APP_VERSION));
+        assert_eq!(prov["git_commit"], json!(BUILD_GIT_COMMIT));
+        assert_eq!(prov["data_source"], json!("installed"));
+        let expected_fp = fingerprint_data_dir(&src_data);
+        assert_eq!(
+            prov["datasets"],
+            serde_json::to_value(&expected_fp).unwrap()
+        );
+        assert!(prov["datasets"][DATASET_FILENAMES[3]].is_null());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -989,6 +1186,8 @@ mod tests {
                 tiles_dir: root.join("tiles"),
                 ug_overlays_dir: root.join("ug"),
                 paimon_cache_path: root.join("paimon.npz"),
+                data_dir: root.clone(),
+                data_source: "dev".to_owned(),
                 maps_db: db,
                 max_queue: 16,
             },

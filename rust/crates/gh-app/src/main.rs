@@ -289,6 +289,8 @@ async fn main() {
     let ug_provider = stack.ug_provider;
     let minimap_tracker = stack.minimap_tracker;
     let state_machine = stack.state_machine;
+    let loaded_data_dir = stack.data_dir;
+    let loaded_data_source = stack.data_source;
 
     let lan_bind_host = gh_net::lan_companion::resolve_lan_bind_host(
         std::env::var("GH_LAN_BIND_HOST").ok().as_deref(),
@@ -598,6 +600,8 @@ async fn main() {
             let st_rec = Arc::clone(&state);
             let hud_rec = Arc::clone(&nav_hud);
             let paths_rec = paths.clone();
+            let data_dir_rec = loaded_data_dir.clone();
+            let data_source_rec = loaded_data_source.clone();
             let fps_rec = args.record_fps;
             let hk_label = args.record_hotkey.trim().to_ascii_uppercase();
 
@@ -615,6 +619,8 @@ async fn main() {
                         tiles_dir: paths_rec.tiles_dir.clone(),
                         ug_overlays_dir: paths_rec.ug_overlays_dir.clone(),
                         paimon_cache_path: paths_rec.paimon_cache_path(),
+                        data_dir: data_dir_rec.clone(),
+                        data_source: data_source_rec.clone(),
                         maps_db: Arc::clone(&st_rec.maps_db),
                         max_queue: 64,
                     },
