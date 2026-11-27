@@ -2550,7 +2550,7 @@ mod tests {
             active_floor_idx: 1,
             surface_idx: 0,
             floor_name: "Lower".to_owned(),
-            floor_short: "L2".to_owned(),
+            floor_short: "sub".to_owned(),
             hoyolab_floor_name: Some("Lower Level".to_owned()),
             group_id: Some(101),
             group_name: Some("Cavern".to_owned()),
