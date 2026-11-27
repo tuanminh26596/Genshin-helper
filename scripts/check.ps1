@@ -230,6 +230,14 @@ function Select-CheckPlan {
     $paths = @($normalizedPaths.ToArray())
 
     $extMatches = @($paths | Where-Object { $_ -like 'extension/*' })
+    $extSmokeMatches = @(
+        $paths | Where-Object {
+            $_ -like 'extension/*' -or
+            $_ -eq 'tests/extension_browser_smoke.mjs' -or
+            $_ -eq 'tests/extension_dom_fixtures.mjs' -or
+            $_ -like 'tests/fixtures/hoyolab_popup/*'
+        }
+    )
     $rustMatches = @($paths | Where-Object { $_ -like 'rust/*' })
     $blackboxMatches = @(
         $paths | Where-Object {
@@ -311,9 +319,9 @@ function Select-CheckPlan {
                     }
                 }
                 'ext-smoke' {
-                    if ($extMatches.Count -gt 0) {
+                    if ($extSmokeMatches.Count -gt 0) {
                         $selected = $true
-                        $reason = Format-MatchReason -MatchedPaths $extMatches
+                        $reason = Format-MatchReason -MatchedPaths $extSmokeMatches
                     }
                 }
                 'blackbox' {
@@ -897,6 +905,11 @@ function Build-RealExecutors {
                 $outcome.ExitCode = 1
                 return
             }
+            $domRc = Invoke-NativeStream -FilePath 'node' -ArgumentList @((Join-Path $repoRoot 'tests\extension_dom_fixtures.mjs'))
+            if ($domRc -ne 0) {
+                $outcome.ExitCode = $domRc
+                return
+            }
             $outcome.ExitCode = Invoke-NativeStream -FilePath 'node' -ArgumentList @((Join-Path $repoRoot 'tests\extension_browser_smoke.mjs'))
         }.GetNewClosure()
 
@@ -1019,6 +1032,24 @@ function Invoke-SelfTest {
             Paths    = @('extension/popup.js')
             Expected = @('guards', 'audit', 'ext-i18n', 'ext-smoke')
             RecWb    = $true
+        }
+        @{
+            Name     = 'tests/extension_browser_smoke.mjs -> ext-smoke'
+            Paths    = @('tests/extension_browser_smoke.mjs')
+            Expected = @('guards', 'audit', 'ext-smoke')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'tests/extension_dom_fixtures.mjs -> ext-smoke'
+            Paths    = @('tests/extension_dom_fixtures.mjs')
+            Expected = @('guards', 'audit', 'ext-smoke')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'tests/fixtures/hoyolab_popup/** -> ext-smoke'
+            Paths    = @('tests/fixtures/hoyolab_popup/en.html')
+            Expected = @('guards', 'audit', 'ext-smoke')
+            RecWb    = $false
         }
         @{
             Name     = 'rust/** (gh-hud) -> clippy, nextest only'
