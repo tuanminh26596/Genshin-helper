@@ -230,7 +230,7 @@ impl MapLocator {
             let all_idx: Vec<usize> = (0..mdata.waypoints.len()).collect();
             let lims: &[usize] = if candidates.len() > 12 { &[12, 18] } else { &[12] };
             for &lim in lims {
-                if let Some((inl, sc, t_vec, rmse)) = self.match_single_map(
+                if let Some((inl, sc, t_vec, rmse)) = self.match_single_map_with_ug(
                     &candidates,
                     t_mid,
                     &mdata.waypoints,
@@ -243,6 +243,7 @@ impl MapLocator {
                     true,
                     strict_sub,
                     Some(frame_gray),
+                    is_ug_hint,
                 ) {
                     best = Some((mdata, inl, sc, t_vec, rmse));
                     break;
@@ -280,7 +281,7 @@ impl MapLocator {
                     .filter(|&i| matches!(m2.waypoints[i].label_id, 2 | 154))
                     .collect();
                 if major_idx.len() >= 2
-                    && let Some((inl, sc, t_vec, rmse)) = self.match_single_map(
+                    && let Some((inl, sc, t_vec, rmse)) = self.match_single_map_with_ug(
                         &candidates,
                         2,
                         &m2.waypoints,
@@ -293,6 +294,7 @@ impl MapLocator {
                         target_area_id.is_some(),
                         strict_m2,
                         Some(frame_gray),
+                        is_ug_hint,
                     )
                 {
                     best = Some((m2, inl, sc, t_vec, rmse));
@@ -302,7 +304,7 @@ impl MapLocator {
             if best.is_none() {
                 let lims: &[usize] = if candidates.len() > 12 { &[12, 18] } else { &[12] };
                 for &lim in lims {
-                    if let Some((inl, sc, t_vec, rmse)) = self.match_single_map(
+                    if let Some((inl, sc, t_vec, rmse)) = self.match_single_map_with_ug(
                         &candidates,
                         2,
                         &m2.waypoints,
@@ -315,6 +317,7 @@ impl MapLocator {
                         target_area_id.is_some(),
                         strict_m2,
                         Some(frame_gray),
+                        is_ug_hint,
                     ) {
                         best = Some((m2, inl, sc, t_vec, rmse));
                         break;
@@ -324,7 +327,7 @@ impl MapLocator {
 
             if best.is_none() && m2.waypoints.len() > prim_idx.len() {
                 let all_idx: Vec<usize> = (0..m2.waypoints.len()).collect();
-                if let Some((inl, sc, t_vec, rmse)) = self.match_single_map(
+                if let Some((inl, sc, t_vec, rmse)) = self.match_single_map_with_ug(
                     &candidates,
                     2,
                     &m2.waypoints,
@@ -337,6 +340,7 @@ impl MapLocator {
                     target_area_id.is_some(),
                     strict_m2,
                     Some(frame_gray),
+                    is_ug_hint,
                 ) {
                     best = Some((m2, inl, sc, t_vec, rmse));
                 }
@@ -365,7 +369,7 @@ impl MapLocator {
                 let strict_sub = ZoomSliderDetector::get_map_scale(slider_res, mid, w);
                 let base_s = strict_sub.unwrap_or_else(|| map_base_scale_cfg(mid));
                 let all_idx: Vec<usize> = (0..mdata.waypoints.len()).collect();
-                if let Some((inl, sc, t_vec, rmse)) = self.match_single_map(
+                if let Some((inl, sc, t_vec, rmse)) = self.match_single_map_with_ug(
                     &candidates,
                     mid,
                     &mdata.waypoints,
@@ -378,6 +382,7 @@ impl MapLocator {
                     false,
                     strict_sub,
                     Some(frame_gray),
+                    is_ug_hint,
                 ) {
                     best = Some((mdata, inl, sc, t_vec, rmse));
                     break;
@@ -391,15 +396,25 @@ impl MapLocator {
             && !is_ug_hint
             && slider_res.is_some()
             && inl.len() <= 4
-            && self.has_terrain_for_map(mdata.id)
         {
-            let t_sc =
-                self.score_terrain_alignment(Some(frame_gray), mdata.id, sc, t_vec[0], t_vec[1], 8);
-            if t_sc < 0.24 {
-                let fb_mid = target_map_id
-                    .filter(|mid| self.db.maps.contains_key(mid))
-                    .unwrap_or(mdata.id);
-                if let Some(fb_scale) = ZoomSliderDetector::get_map_scale(slider_res, fb_mid, w)
+            let fb_mid = target_map_id
+                .filter(|mid| self.db.maps.contains_key(mid))
+                .unwrap_or(mdata.id);
+            if self.has_terrain_for_map(fb_mid) {
+                let t_sc = if self.has_terrain_for_map(mdata.id) {
+                    self.score_terrain_alignment(
+                        Some(frame_gray),
+                        mdata.id,
+                        sc,
+                        t_vec[0],
+                        t_vec[1],
+                        8,
+                    )
+                } else {
+                    0.0
+                };
+                if t_sc < WEAK_MATCH_TERRAIN_CHECK_THRESH
+                    && let Some(fb_scale) = ZoomSliderDetector::get_map_scale(slider_res, fb_mid, w)
                     && let Some(alt) =
                         self.match_zero_waypoint_terrain(frame_gray, fb_mid, fb_scale, target_area_id)
                 {
@@ -411,9 +426,19 @@ impl MapLocator {
                         alt.2[1],
                         8,
                     );
-                    if alt_t >= 0.40
-                        && alt_t >= t_sc + 0.20
-                        && let Some(fb_mdata) = self.db.map(fb_mid)
+                    if should_terrain_guard_override(
+                        inl.len(),
+                        mdata.id,
+                        sc,
+                        t_vec,
+                        t_sc,
+                        fb_mid,
+                        alt.1,
+                        alt.2,
+                        alt_t,
+                        w,
+                        h,
+                    ) && let Some(fb_mdata) = self.db.map(fb_mid)
                     {
                         terrain_only = alt.0.is_empty();
                         best = Some((fb_mdata, alt.0, alt.1, alt.2, alt.3));
