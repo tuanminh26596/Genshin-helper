@@ -535,13 +535,14 @@ impl MapLocator {
                 e.2 += ty;
             }
         }
-        let mut top: Vec<(u32, f64, f64)> = bins.into_values().filter(|b| b.0 >= 2).collect();
-        top.sort_by_key(|b| std::cmp::Reverse(b.0));
+        let mut top: Vec<_> =
+            bins.into_iter().filter(|(_, b)| b.0 >= 2).collect();
+        top.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
         top.truncate(VOTE_TOP_BINS);
 
         // Verify: unique nearest-waypoint inliers within `tol` for each hypothesis.
         let mut hyps: Vec<(Vec<InlierPair<'a>>, [f64; 2], f64)> = Vec::new();
-        for &(n, sx, sy) in &top {
+        for &(_, (n, sx, sy)) in &top {
             let t = [sx / f64::from(n), sy / f64::from(n)];
             let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
             for (ci, c) in candidates.iter().enumerate() {

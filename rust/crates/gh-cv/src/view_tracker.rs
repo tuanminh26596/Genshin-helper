@@ -508,7 +508,8 @@ fn fill_patch(canvas: &[f32], window: &[f32], out: &mut [Complex<f32>], magnify:
             let inv_r = 1.0 / r;
             let max_x = (CANVAS_W - 1) as f64;
             let max_y = (CANVAS_H - 1) as f64;
-            out.par_chunks_mut(PATCH_W)
+            let row_sums: Vec<f64> = out
+                .par_chunks_mut(PATCH_W)
                 .enumerate()
                 .map(|(py, dst)| {
                     let sy = (cy + ((PATCH_Y0 + py) as f64 - cy) * inv_r).clamp(0.0, max_y);
@@ -532,7 +533,8 @@ fn fill_patch(canvas: &[f32], window: &[f32], out: &mut [Complex<f32>], magnify:
                     }
                     row_sum
                 })
-                .sum()
+                .collect();
+            row_sums.into_iter().sum()
         }
     };
     let mean = (sum / PATCH_N as f64) as f32;

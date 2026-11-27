@@ -3149,9 +3149,9 @@ impl MapLocator {
         }
 
         if !hyps_3p.is_empty() && (best_match.is_none() || best_score < 700.0) {
-            let mut top_3p: Vec<Hyp3p<'a>> = hyps_3p.into_values().collect();
-            top_3p.sort_by(|a, b| b.score.total_cmp(&a.score));
-            for h3 in top_3p.into_iter().take(12) {
+            let mut top_3p: Vec<([usize; 3], Hyp3p<'a>)> = hyps_3p.into_iter().collect();
+            top_3p.sort_by(|a, b| b.1.score.total_cmp(&a.1.score).then_with(|| a.0.cmp(&b.0)));
+            for (_, h3) in top_3p.into_iter().take(12) {
                 let t_bonus =
                     self.score_terrain_alignment(frame_gray, map_id, h3.scale, h3.tx, h3.ty, 8)
                         * 450.0;
@@ -4322,7 +4322,10 @@ impl MapLocator {
                     }
                 }
                 if !counts.is_empty() {
-                    area_id = counts.into_iter().max_by_key(|&(_, c)| c).map(|(a, _)| a);
+                    area_id = counts
+                        .into_iter()
+                        .max_by_key(|&(aid, c)| (c, std::cmp::Reverse(aid)))
+                        .map(|(a, _)| a);
                 } else if target_area_id.is_some() {
                     area_id = target_area_id;
                 } else if !mdata.waypoints.is_empty() {

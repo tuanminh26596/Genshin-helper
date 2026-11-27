@@ -1147,6 +1147,10 @@ impl AppState {
     }
 
     pub fn apply_map_m_anchor(&self, res: &LocateResult) {
+        self.apply_map_m_anchor_at(res, self.start_instant.elapsed().as_secs_f64());
+    }
+
+    pub fn apply_map_m_anchor_at(&self, res: &LocateResult, now_s: f64) {
         if !res.has_world_coords {
             return;
         }
@@ -1194,11 +1198,10 @@ impl AppState {
             gs.last_pos = Some(pos_info);
         }
 
-        let now = self.start_instant.elapsed().as_secs_f64();
         {
             let mut guard = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((ref mut tracker, ref mut last_ts)) = *guard {
-                let ts = if now < *last_ts { *last_ts } else { now };
+                let ts = if now_s < *last_ts { *last_ts } else { now_s };
                 *last_ts = ts;
                 let _ = tracker.set_map_m_anchor(
                     map_id,
@@ -3855,5 +3858,121 @@ mod tests {
         assert_eq!(other.pins.len(), 2);
         assert!(other.route_anchor.is_none());
         assert!(other.route_legs.is_none());
+    }
+
+    #[test]
+    fn apply_map_m_anchor_at_uses_supplied_timestamp_without_wall_clock_skew() {
+        use gh_cv::minimap_tracker::{HybridMinimapTracker, MinimapTrackerConfig};
+        use gh_cv::tile_cache::{LruTerrainTileCache, TileCacheConfig};
+
+        let seq = STATE_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "gh_app_state_anchor_ts_{}_{seq}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut state = make_test_state(&root);
+        if let Some(st) = Arc::get_mut(&mut state) {
+            st.start_instant = Instant::now()
+                .checked_sub(std::time::Duration::from_secs(60))
+                .expect("60s monotonic offset");
+        } else {
+            panic!("make_test_state should return a unique Arc<AppState>");
+        }
+
+        let tile_cache = Arc::new(
+            LruTerrainTileCache::from_config(TileCacheConfig {
+                use_default_npz: false,
+                ..Default::default()
+            })
+            .expect("empty tile cache"),
+        );
+        let tracker = HybridMinimapTracker::new(
+            tile_cache,
+            MinimapTrackerConfig::production_defaults(),
+        )
+        .expect("tracker");
+        *state.tracker.lock().unwrap() = Some((tracker, 0.0));
+
+        let res = LocateResult {
+            detected: true,
+            has_world_coords: true,
+            map_id: Some(7),
+            map_name: None,
+            area_id: None,
+            area_name: None,
+            world_x: Some(99.4),
+            world_y: Some(-47.5),
+            lat: Some(-47.5),
+            lng: Some(99.4),
+            pixel_x: 1280.0,
+            pixel_y: 720.0,
+            heading: 0.0,
+            scale: Some(1.0),
+            inliers_count: Some(6),
+            rmse: Some(1.0),
+            is_underground: false,
+            in_game_is_underground: None,
+            floor_idx: 0,
+            total_floors: 1,
+            active_floor_idx: 0,
+            surface_idx: 0,
+            floor_name: "G".to_owned(),
+            floor_short: "G".to_owned(),
+            hoyolab_floor_name: None,
+            group_id: None,
+            group_name: None,
+            floor_id: None,
+            has_layers: false,
+            zoom_ratio_t: None,
+            candidates: None,
+            inliers: None,
+            slider_res: None,
+            region_text: None,
+            target_map_id: None,
+            target_area_id: None,
+            slot_types: None,
+            reason: None,
+            debug_included: false,
+        };
+
+        // Simulated M-Map sync at 26.257 s must NOT be pulled forward by the 60 s wall-clock start_instant.
+        state.apply_map_m_anchor_at(&res, 26.257);
+        {
+            let guard = state.tracker.lock().unwrap();
+            let (_, last_ts) = guard.as_ref().unwrap();
+            assert!(
+                (*last_ts - 26.257).abs() < 1e-9 && *last_ts < 30.0,
+                "expected simulated anchor timestamp 26.257, got {last_ts}"
+            );
+        }
+
+        // Subsequent simulated pause at 26.414 s keeps monotonic delta (28.044 - 26.414 = 1.630 >= 1.2 s).
+        state.pause_minimap_tracker_at(26.414, "map_m_open");
+        {
+            let guard = state.tracker.lock().unwrap();
+            let (_, last_ts) = guard.as_ref().unwrap();
+            assert!((*last_ts - 26.414).abs() < 1e-9);
+        }
+
+        // Contrast with live wall-clock wrapper apply_map_m_anchor(&res): uses elapsed() >= 55 s.
+        state.apply_map_m_anchor(&res);
+        {
+            let guard = state.tracker.lock().unwrap();
+            let (_, last_ts) = guard.as_ref().unwrap();
+            assert!(
+                *last_ts >= 55.0,
+                "live apply_map_m_anchor should read wall-clock elapsed (>=55s), got {last_ts}"
+            );
+        }
+
+        state.nav_hud.close();
+        state.hud_toast.close();
+        state.guide_fetcher.stop();
+        state.audio.close();
+        state.capturer.close();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -408,7 +408,13 @@ fn step_map_frame(
     let frame = Arc::new(frame);
     let view = match state.mmap_view.as_ref() {
         Some(engine) if p.guide_view && step.state != MapState::Closed => {
-            Some(engine.step(Arc::clone(&frame), step.check.slider_res.as_ref(), p.cursor_client, p.guide_map))
+            Some(engine.step_at(
+                Arc::clone(&frame),
+                step.check.slider_res.as_ref(),
+                p.cursor_client,
+                p.guide_map,
+                p.now_s,
+            ))
         }
         _ => None,
     };
@@ -932,7 +938,7 @@ pub fn apply_tick_output(
                                         })
                                     });
                                 }
-                                state.apply_map_m_anchor(&res);
+                                state.apply_map_m_anchor_at(&res, tick_out.tick_ts);
                                 summary.map_m_synced = true;
                                 summary.map_m_sync_payload = Some(payload);
                                 if let (Some(wx), Some(wy)) = (res.world_x, res.world_y) {
@@ -993,7 +999,7 @@ pub fn apply_tick_output(
                                             })
                                         });
                                     }
-                                    state.apply_map_m_anchor(&v_res);
+                                    state.apply_map_m_anchor_at(&v_res, tick_out.tick_ts);
                                     summary.map_m_synced = true;
                                     summary.pending_verify_corrected = true;
                                     summary.map_m_anchor =

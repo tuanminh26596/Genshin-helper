@@ -27,6 +27,40 @@ use std::time::{Duration, Instant};
 /// Registers one M-Map frame (the expensive "anchor" step).
 pub trait ViewRegistrar: Send + Sync + 'static {
     fn register(&self, frame: &FrameBuf, slider: Option<&ZoomSliderResult>) -> Option<ViewRegistration>;
+
+    fn register_at(
+        &self,
+        frame: &FrameBuf,
+        slider: Option<&ZoomSliderResult>,
+        _now_s: Option<f64>,
+    ) -> Option<ViewRegistration> {
+        self.register(frame, slider)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RegionStamp {
+    Wall(Instant),
+    Sim(f64),
+}
+
+impl RegionStamp {
+    fn now(now_s: Option<f64>) -> Self {
+        match now_s {
+            Some(t) => Self::Sim(t),
+            None => Self::Wall(Instant::now()),
+        }
+    }
+
+    fn is_fresh(self, now_s: Option<f64>) -> bool {
+        match (self, now_s) {
+            (Self::Sim(t0), Some(t1)) => {
+                t1 >= t0 && (t1 - t0) < REGION_OCR_EVERY.as_secs_f64()
+            }
+            (Self::Wall(t0), None) => t0.elapsed() < REGION_OCR_EVERY,
+            _ => false,
+        }
+    }
 }
 
 /// The region label is re-read at most this often while registrations keep succeeding.
@@ -74,7 +108,7 @@ fn frame_view_as_bgr_or_bgra(view: FrameView<'_>) -> Option<ArrayView3<'_, u8>> 
 /// registration drops it, so a map switch is picked up on the next one.
 pub struct LocatorRegistrar {
     locator: Arc<MapLocator>,
-    region: Mutex<Option<(Instant, Option<i32>)>>,
+    region: Mutex<Option<(RegionStamp, Option<i32>)>>,
 }
 
 impl LocatorRegistrar {
@@ -85,14 +119,20 @@ impl LocatorRegistrar {
         }
     }
 
-    fn register_bgr(&self, bgr: ArrayView3<'_, u8>, slider: Option<&ZoomSliderResult>) -> Option<ViewRegistration> {
+    fn register_bgr(
+        &self,
+        bgr: ArrayView3<'_, u8>,
+        slider: Option<&ZoomSliderResult>,
+        now_s: Option<f64>,
+    ) -> Option<ViewRegistration> {
         let cached = {
             let g = self.region.lock().unwrap_or_else(|e| e.into_inner());
-            g.filter(|(t, _)| t.elapsed() < REGION_OCR_EVERY).map(|(_, m)| m)
+            g.filter(|(t, _)| t.is_fresh(now_s)).map(|(_, m)| m)
         };
         let map = cached.unwrap_or_else(|| {
             let m = self.locator.detect_region_name(bgr).0;
-            *self.region.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), m));
+            *self.region.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((RegionStamp::now(now_s), m));
             m
         });
         let opts = ViewOptions {
@@ -111,12 +151,21 @@ impl LocatorRegistrar {
 
 impl ViewRegistrar for LocatorRegistrar {
     fn register(&self, frame: &FrameBuf, slider: Option<&ZoomSliderResult>) -> Option<ViewRegistration> {
+        self.register_at(frame, slider, None)
+    }
+
+    fn register_at(
+        &self,
+        frame: &FrameBuf,
+        slider: Option<&ZoomSliderResult>,
+        now_s: Option<f64>,
+    ) -> Option<ViewRegistration> {
         let fv = frame.as_view();
         if let Some(bgr) = frame_view_as_bgr(fv) {
-            return self.register_bgr(bgr, slider);
+            return self.register_bgr(bgr, slider, now_s);
         }
         let bgr = frame_view_to_bgr(fv).ok()?;
-        self.register_bgr(bgr.view(), slider)
+        self.register_bgr(bgr.view(), slider, now_s)
     }
 }
 
@@ -136,6 +185,7 @@ struct Job {
     seq: u64,
     frame: Arc<FrameBuf>,
     slider: Option<ZoomSliderResult>,
+    now_s: Option<f64>,
 }
 
 enum WorkerCmd {
@@ -267,6 +317,17 @@ impl MMapViewEngine {
         cursor: Option<(f64, f64)>,
         map_fallback: i32,
     ) -> ViewFrame {
+        self.step_at(frame, slider, cursor, map_fallback, None)
+    }
+
+    pub fn step_at(
+        &self,
+        frame: Arc<FrameBuf>,
+        slider: Option<&ZoomSliderResult>,
+        cursor: Option<(f64, f64)>,
+        map_fallback: i32,
+        now_s: Option<f64>,
+    ) -> ViewFrame {
         let t0 = Instant::now();
         self.shared.active.store(true, Ordering::Release);
         let fv = frame.as_view();
@@ -300,6 +361,7 @@ impl MMapViewEngine {
                 seq,
                 frame,
                 slider: slider.cloned(),
+                now_s,
             };
             if let Some(ref inline_reg) = self.inline_registrar {
                 run_one_registration(&self.shared, inline_reg.as_ref(), job);
@@ -419,7 +481,7 @@ impl Drop for MMapViewEngine {
 
 fn run_one_registration(shared: &Shared, registrar: &dyn ViewRegistrar, job: Job) {
     let t0 = Instant::now();
-    let reg = registrar.register(&job.frame, job.slider.as_ref());
+    let reg = registrar.register_at(&job.frame, job.slider.as_ref(), job.now_s);
     let reg_ms = t0.elapsed().as_secs_f64() * 1000.0;
     drop(job.frame);
     let verdict = reg.as_ref().and_then(|r| {
@@ -704,5 +766,62 @@ mod tests {
         e.reset();
         let after = e.step(frame(40.0, 0.0), None, None, 2);
         assert!(after.transform.is_none());
+    }
+
+    #[test]
+    fn region_stamp_simulated_clock_and_step_at_forward_timestamp() {
+        let s0 = RegionStamp::now(Some(10.0));
+        assert!(s0.is_fresh(Some(10.0)));
+        assert!(s0.is_fresh(Some(11.49)));
+        assert!(!s0.is_fresh(Some(11.5)));
+        assert!(!s0.is_fresh(Some(9.99)));
+        assert!(!s0.is_fresh(None));
+
+        struct RecordingRegistrar {
+            seen_now_s: Mutex<Vec<Option<f64>>>,
+        }
+
+        impl ViewRegistrar for RecordingRegistrar {
+            fn register(
+                &self,
+                frame: &FrameBuf,
+                slider: Option<&ZoomSliderResult>,
+            ) -> Option<ViewRegistration> {
+                self.register_at(frame, slider, None)
+            }
+
+            fn register_at(
+                &self,
+                _frame: &FrameBuf,
+                _slider: Option<&ZoomSliderResult>,
+                now_s: Option<f64>,
+            ) -> Option<ViewRegistration> {
+                self.seen_now_s.lock().unwrap().push(now_s);
+                Some(ViewRegistration {
+                    map_id: 2,
+                    scale: 2.0,
+                    tx: 1000.0,
+                    ty: 500.0,
+                    inliers_count: 12,
+                    rmse: 1.0,
+                    terrain_score: 0.5,
+                    terrain_only: false,
+                    zoom_ratio_t: Some(0.5),
+                    is_underground: false,
+                    candidates_count: 12,
+                })
+            }
+        }
+
+        let reg = Arc::new(RecordingRegistrar {
+            seen_now_s: Mutex::new(Vec::new()),
+        });
+        let e = MMapViewEngine::new_sync(Arc::clone(&reg));
+        let f = frame(0.0, 0.0);
+        e.step_at(Arc::clone(&f), None, None, 2, Some(42.5));
+        let v = e.step_at(Arc::clone(&f), None, None, 2, Some(42.5));
+        assert!(v.transform.is_some());
+        let seen = reg.seen_now_s.lock().unwrap().clone();
+        assert_eq!(seen, vec![Some(42.5)]);
     }
 }
