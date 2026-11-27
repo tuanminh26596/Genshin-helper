@@ -411,6 +411,310 @@ class TestTier3CrossFeature(unittest.TestCase):
         self.assertEqual(self.client.get("/status").json().get("active_map_provider"), "appsample")
         _ = seq_qs
 
+    def test_multitab_hoyolab_appsample_owner_routing_and_rollback_isolation(self) -> None:
+        if not get_config().is_rust:
+            self.skipTest("Multi-provider owner routing is Rust-only")
+
+        start_lan = self.client.post_json("/lan_companion", {"action": "start"}).json()
+        self.assertTrue(start_lan["ok"])
+        token = start_lan["token"]
+
+        try:
+            with WsClient("127.0.0.1", self.server.lan_port, f"/ws/{token}") as ws:
+                init_frame = ws.recv_json(timeout=4.0)
+                self.assertEqual(init_frame["type"], "STATE")
+
+                # 1. Claim HoYoLAB ownership (tab_hl) and seed HoYoLAB pins.
+                v_hl = self.client.post_json(
+                    "/tab_visibility",
+                    {
+                        "tab_id": "tab_hl",
+                        "provider_id": "hoyolab",
+                        "visible": True,
+                        "focused": True,
+                        "interacted": True,
+                    },
+                ).json()
+                self.assertTrue(v_hl["is_owner"])
+                self.assertEqual(v_hl["active_provider"], "hoyolab")
+                self.assertEqual(v_hl["owner_tab_id"], "tab_hl")
+
+                hl_pins = [
+                    {
+                        "id": "pin_alpha",
+                        "name": "Anemoculus Alpha",
+                        "category": "Anemoculus",
+                        "label_id": 5,
+                        "lat": 25.0,
+                        "lng": 30.0,
+                        "map_id": 2,
+                    },
+                    {
+                        "id": "12345",
+                        "name": "HoYoLAB Chest",
+                        "category": "Common Chest",
+                        "label_id": 17,
+                        "lat": 40.0,
+                        "lng": 45.0,
+                        "map_id": 2,
+                    },
+                ]
+                np_hl = self.client.post_json(
+                    "/nearby_pins",
+                    {
+                        "tab_id": "tab_hl",
+                        "provider_id": "hoyolab",
+                        "tab_visible": True,
+                        "tab_focused": True,
+                        "map_id": 2,
+                        "lat": 0.0,
+                        "lng": 0.0,
+                        "pins": hl_pins,
+                    },
+                ).json()
+                self.assertTrue(np_hl["ok"])
+                self.assertEqual(np_hl["count"], 2)
+
+                # 2. Background AppSample /nearby_pins (tab_as) must be ignored as secondary client.
+                bg_as = self.client.post_json(
+                    "/nearby_pins",
+                    {
+                        "tab_id": "tab_as",
+                        "provider_id": "appsample",
+                        "tab_visible": True,
+                        "tab_focused": False,
+                        "user_initiated": False,
+                        "map_id": 2,
+                        "lat": 0.0,
+                        "lng": 0.0,
+                        "pins": [
+                            {
+                                "id": "appsample:5001",
+                                "name": "Exquisite Chest",
+                                "category": "Exquisite Chest",
+                                "lat": 20.0,
+                                "lng": 15.0,
+                                "map_id": 2,
+                            }
+                        ],
+                    },
+                ).json()
+                self.assertTrue(bg_as.get("ignored_secondary_client"))
+                self.assertFalse(bg_as.get("is_owner"))
+                self.assertEqual(self.client.get("/status").json().get("active_map_provider"), "hoyolab")
+
+                # 3. Mark "pin_alpha" via /nav_command, then broadcast NAV_MARK_PIN for HoYoLAB pin "12345"
+                #    via LAN WS and assert concurrent pollers receive identical stamped event (no double-mark).
+                r_mark_alpha = self.client.post_json(
+                    "/nav_command",
+                    {"action": "mark", "pin_id": "pin_alpha"},
+                ).json()
+                self.assertTrue(r_mark_alpha["ok"])
+                collected_before_ws = int(r_mark_alpha["summary"]["collected"])
+                self.assertGreaterEqual(collected_before_ws, 1)
+
+                seq_hl = self._current_seq()
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    f_p1 = pool.submit(
+                        lambda: HttpClient("127.0.0.1", self.server.ws_port, timeout=10.0)
+                        .get(f"/poll?since={seq_hl}")
+                        .json()
+                    )
+                    f_p2 = pool.submit(
+                        lambda: HttpClient("127.0.0.1", self.server.ws_port, timeout=10.0)
+                        .get(f"/poll?since={seq_hl}")
+                        .json()
+                    )
+                    time.sleep(0.2)
+                    ws.send_json(
+                        {
+                            "type": "MARK_PIN",
+                            "action": "mark",
+                            "pin_id": "12345",
+                            "map_id": 2,
+                            "lat": 40.0,
+                            "lng": 45.0,
+                            "name": "HoYoLAB Chest",
+                        }
+                    )
+                    ev1 = f_p1.result(timeout=5.0)
+                    ev2 = f_p2.result(timeout=5.0)
+
+                self.assertEqual(ev1, ev2)
+                self.assertEqual(ev1["type"], "NAV_MARK_PIN")
+                self.assertEqual(ev1["pin_id"], "12345")
+                self.assertEqual(ev1["target_provider"], "hoyolab")
+                self.assertEqual(ev1["owner_tab_id"], "tab_hl")
+
+                collected_after_hl = int(
+                    self.client.post_json("/nav_command", {"action": "refresh"})
+                    .json()["summary"]["collected"]
+                )
+                self.assertEqual(collected_after_hl, collected_before_ws + 1)
+
+                # 4. Error /action_feedback for foreign/untracked pin "appsample:999" must NOT roll back
+                #    marked HoYoLAB pins ("pin_alpha", "12345").
+                r_fb_foreign = self.client.post_json(
+                    "/action_feedback",
+                    {
+                        "event_type": "NAV_MARK",
+                        "status": "error",
+                        "seq": 8801,
+                        "action": "mark",
+                        "pin_id": "appsample:999",
+                    },
+                ).json()
+                self.assertTrue(r_fb_foreign["ok"])
+                self.assertFalse(r_fb_foreign["deduped"])
+
+                collected_after_foreign_err = int(
+                    self.client.post_json("/nav_command", {"action": "refresh"})
+                    .json()["summary"]["collected"]
+                )
+                self.assertEqual(collected_after_foreign_err, collected_after_hl)
+
+                # 5. Switch ownership to AppSample (tab_as) and verify NAV_MARK_PIN for "appsample:5001"
+                #    carries target_provider="appsample", owner_tab_id="tab_as", while HoYoLAB pins stay untouched.
+                v_as = self.client.post_json(
+                    "/tab_visibility",
+                    {
+                        "tab_id": "tab_as",
+                        "provider_id": "appsample",
+                        "visible": True,
+                        "focused": True,
+                        "interacted": True,
+                    },
+                ).json()
+                self.assertTrue(v_as["is_owner"])
+                self.assertEqual(v_as["active_provider"], "appsample")
+                self.assertEqual(v_as["owner_tab_id"], "tab_as")
+
+                np_as = self.client.post_json(
+                    "/nearby_pins",
+                    {
+                        "tab_id": "tab_as",
+                        "provider_id": "appsample",
+                        "tab_visible": True,
+                        "tab_focused": True,
+                        "map_id": 2,
+                        "lat": 0.0,
+                        "lng": 0.0,
+                        "pins": [
+                            {
+                                "id": "appsample:5001",
+                                "name": "Exquisite Chest",
+                                "category": "Exquisite Chest",
+                                "lat": 20.0,
+                                "lng": 15.0,
+                                "map_id": 2,
+                            }
+                        ],
+                    },
+                ).json()
+                self.assertTrue(np_as["ok"])
+                self.assertEqual(np_as["count"], 1)
+
+                seq_as = self._current_seq()
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    f_a1 = pool.submit(
+                        lambda: HttpClient("127.0.0.1", self.server.ws_port, timeout=10.0)
+                        .get(f"/poll?since={seq_as}")
+                        .json()
+                    )
+                    f_a2 = pool.submit(
+                        lambda: HttpClient("127.0.0.1", self.server.ws_port, timeout=10.0)
+                        .get(f"/poll?since={seq_as}")
+                        .json()
+                    )
+                    time.sleep(0.2)
+                    ws.send_json(
+                        {
+                            "type": "MARK_PIN",
+                            "action": "mark",
+                            "pin_id": "appsample:5001",
+                            "map_id": 2,
+                            "lat": 20.0,
+                            "lng": 15.0,
+                            "name": "Exquisite Chest",
+                        }
+                    )
+                    ev_a1 = f_a1.result(timeout=5.0)
+                    ev_a2 = f_a2.result(timeout=5.0)
+
+                self.assertEqual(ev_a1, ev_a2)
+                self.assertEqual(ev_a1["type"], "NAV_MARK_PIN")
+                self.assertEqual(ev_a1["pin_id"], "appsample:5001")
+                self.assertEqual(ev_a1["target_provider"], "appsample")
+                self.assertEqual(ev_a1["owner_tab_id"], "tab_as")
+
+                # AppSample pin set has 1 collected pin; rolling back only appsample:5001 drops
+                # AppSample collected count to 0 while leaving HoYoLAB's collected pins untouched.
+                sum_as_marked = self.client.post_json("/nav_command", {"action": "refresh"}).json()["summary"]
+                self.assertEqual(int(sum_as_marked["total"]), 1)
+                self.assertEqual(int(sum_as_marked["collected"]), 1)
+
+                self.client.post_json(
+                    "/action_feedback",
+                    {
+                        "event_type": "NAV_MARK",
+                        "status": "error",
+                        "seq": 8802,
+                        "action": "mark",
+                        "pin_id": "appsample:5001",
+                    },
+                )
+                sum_as_after_rb = self.client.post_json("/nav_command", {"action": "refresh"}).json()["summary"]
+                self.assertEqual(int(sum_as_after_rb["collected"]), 0)
+
+                # Switch back to HoYoLAB and push hl_pins -> both HoYoLAB pins remain collected (untouched).
+                self.client.post_json(
+                    "/tab_visibility",
+                    {
+                        "tab_id": "tab_hl",
+                        "provider_id": "hoyolab",
+                        "visible": True,
+                        "focused": True,
+                        "interacted": True,
+                    },
+                )
+                self.client.post_json(
+                    "/nearby_pins",
+                    {
+                        "tab_id": "tab_hl",
+                        "provider_id": "hoyolab",
+                        "tab_visible": True,
+                        "tab_focused": True,
+                        "map_id": 2,
+                        "lat": 0.0,
+                        "lng": 0.0,
+                        "pins": hl_pins,
+                    },
+                )
+                sum_hl_after = self.client.post_json("/nav_command", {"action": "refresh"}).json()["summary"]
+                self.assertEqual(int(sum_hl_after["collected"]), collected_after_hl)
+        finally:
+            self.client.post_json("/lan_companion", {"action": "stop"})
+            self.client.post_json(
+                "/tab_visibility",
+                {"tab_id": "tab_as", "provider_id": "appsample", "visible": False, "closing": True},
+            )
+            self.client.post_json(
+                "/tab_visibility",
+                {"tab_id": "tab_hl", "provider_id": "hoyolab", "visible": False, "closing": True},
+            )
+            # Clean up collected pins marked during this test so shared-server sibling tests stay isolated.
+            for pid, seq_n in (("pin_alpha", 8803), ("12345", 8804)):
+                self.client.post_json(
+                    "/action_feedback",
+                    {
+                        "event_type": "NAV_MARK",
+                        "status": "error",
+                        "seq": seq_n,
+                        "action": "mark",
+                        "pin_id": pid,
+                    },
+                )
+
 
 class TestTier3PortTakeover(unittest.TestCase):
     """Real WSAEADDRINUSE port takeover across two isolated server instances."""

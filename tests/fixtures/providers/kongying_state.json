@@ -1,0 +1,204 @@
+{
+  "captured_at": "2026-11-28T02:08:48+07:00",
+  "source_url": "https://v3.yuanshen.site/",
+  "method": "headless Chromium CDP guest inspection (#q-app.__vue_app__ router matched vm & Leaflet _layers after teleport_switch + chest item selection)",
+  "sanitized": true,
+  "live_schema_notes": {
+    "hasWindowL": false,
+    "swap_lat_lng": true,
+    "default_guest_markers_before_selection": 0,
+    "teleport_flag_path": "layer.options.icon.options.teleport",
+    "marker_data_keys": ["id", "markerTitle", "position", "content", "picture", "hiddenFlag", "extra"],
+    "marked_layers_storage_key": "marked_layers"
+  },
+  "map": {
+    "center": { "lat": 1000, "lng": -3800 },
+    "zoom": -2.5,
+    "minZoom": -4,
+    "maxZoom": 2,
+    "hasWindowL": false
+  },
+  "vm": {
+    "underground_show": false,
+    "underground_opacity": false,
+    "hasRefreshLayergroup": true
+  },
+  "mainStore": {
+    "selected_area": "蒙德",
+    "selected_child_area": {
+      "id": 6,
+      "code": "A:MD:MENGDE",
+      "name": "蒙德"
+    },
+    "area_list": [
+      { "id": 6, "code": "A:MD:MENGDE", "name": "蒙德" },
+      { "id": 17, "code": "A:MD:XUESHAN", "name": "龙脊雪山" },
+      { "id": 55, "code": "A:MD:SHENDIAN", "name": "空之神殿" },
+      { "id": 2, "code": "A:LY:LIYUE", "name": "璃月" },
+      { "id": 4, "code": "A:LY:CENGYAN_UG", "name": "地下矿区" }
+    ],
+    "selected_item_list": [
+      { "id": 16, "name": "华丽的宝箱" },
+      { "id": 17, "name": "珍贵的宝箱" },
+      { "id": 10, "name": "精致的宝箱" }
+    ]
+  },
+  "markers": [
+    {
+      "latlng": { "lat": 167.76838717003, "lng": -4715.1891624725 },
+      "icon_options": { "teleport": true },
+      "data": {
+        "id": 6278,
+        "markerTitle": "传送锚点",
+        "position": "167.76838717003,-4715.1891624725",
+        "content": "【蒙德 风龙废墟】",
+        "picture": "",
+        "hiddenFlag": 0,
+        "extra": {}
+      }
+    },
+    {
+      "latlng": { "lat": 645.53949671565, "lng": -4538.232254391 },
+      "icon_options": { "teleport": true },
+      "data": {
+        "id": 6279,
+        "markerTitle": "传送锚点",
+        "position": "645.53949671565,-4538.232254391",
+        "content": "【蒙德 风龙废墟】",
+        "picture": "",
+        "hiddenFlag": 0,
+        "extra": {}
+      }
+    },
+    {
+      "latlng": { "lat": 370.90860037652, "lng": -4360.9421144686 },
+      "icon_options": { "teleport": true },
+      "data": {
+        "id": 6280,
+        "markerTitle": "传送锚点",
+        "position": "370.90860037652,-4360.9421144686",
+        "content": "【蒙德 风龙废墟】",
+        "picture": "",
+        "hiddenFlag": 0,
+        "extra": {}
+      }
+    },
+    {
+      "latlng": { "lat": 72.500254649975, "lng": -4265.5 },
+      "icon_options": { "teleport": true },
+      "data": {
+        "id": 6281,
+        "markerTitle": "传送锚点",
+        "position": "72.500254649975,-4265.5",
+        "content": "【蒙德 风龙废墟】",
+        "picture": "",
+        "hiddenFlag": 0,
+        "extra": {}
+      }
+    },
+    {
+      "latlng": { "lat": 479.70576116829, "lng": -3994.650456529 },
+      "icon_options": { "teleport": true },
+      "data": {
+        "id": 6282,
+        "markerTitle": "传送锚点",
+        "position": "479.70576116829,-3994.650456529",
+        "content": "【蒙德 明冠山地】",
+        "picture": "",
+        "hiddenFlag": 0,
+        "extra": {}
+      }
+    },
+    {
+      "latlng": { "lat": 1040.6326901073, "lng": -3884.3439744663 },
+      "icon_options": { "teleport": true },
+      "data": {
+        "id": 6283,
+        "markerTitle": "传送锚点",
+        "position": "1040.6326901073,-3884.3439744663",
+        "content": "【蒙德 苍风高地】",
+        "picture": "",
+        "hiddenFlag": 0,
+        "extra": {}
+      }
+    },
+    {
+      "latlng": { "lat": 1319.8804911037, "lng": -3606.7583012494 },
+      "icon_options": { "teleport": false },
+      "data": {
+        "id": 1288,
+        "markerTitle": "击败魔物",
+        "position": "1319.8804911037,-3606.7583012494",
+        "content": "在此处击败【丘丘人】解锁【精致的宝箱】\n内有【原石×2、风之印×3】、【冒险阅历+30】",
+        "picture": "https://oss.yuanshen.site/kyjg/2024-12-14/d5352ac95226005d9c5ef2c3d56aa669c244ef214a9e16fafa8471c35f951ed3.png",
+        "hiddenFlag": 0,
+        "extra": {}
+      }
+    },
+    {
+      "latlng": { "lat": 448.66660666565, "lng": -4814.8335721217 },
+      "icon_options": { "teleport": false },
+      "data": {
+        "id": 1193,
+        "markerTitle": "击败魔物",
+        "position": "448.66660666565,-4814.8335721217",
+        "content": "在此处击败【丘丘人】解锁【精致的宝箱】\n内有【原石×2、风之印×4】、【冒险阅历+30】",
+        "picture": "https://oss.yuanshen.site/kyjg/2024-12-11/0d07044e3b230ba855e92a2c929365df93f705b6c44bb4fff80ab950624ac2f1.png",
+        "hiddenFlag": 0,
+        "extra": {}
+      }
+    },
+    {
+      "latlng": { "lat": 139.66779351627, "lng": -4743.4996341909 },
+      "icon_options": { "teleport": false },
+      "data": {
+        "id": 1156,
+        "markerTitle": "击败魔物",
+        "position": "139.66779351627,-4743.4996341909",
+        "content": "在此处击败【丘丘人】解锁【精致的宝箱】\n内有【原石×2、风之印×4】、【冒险阅历+30】",
+        "picture": "https://oss.yuanshen.site/kyjg/2024-12-11/3e852b87eff1671487026695de1c0ce06bc464472e6158c9cb6b23b1289e1817.png",
+        "hiddenFlag": 0,
+        "extra": {}
+      }
+    },
+    {
+      "latlng": { "lat": 209.00029496325, "lng": -2310.9990854773 },
+      "icon_options": { "teleport": false },
+      "data": {
+        "id": 2626,
+        "markerTitle": "挖掘出现",
+        "position": "209.00029496325,-2310.9990854773",
+        "content": "在此处【挖掘】出现【精致的宝箱】\n内有【原石×2、岩之印×3】、【冒险阅历+30】",
+        "picture": "https://yuanshen.site/comment_png/1679383366757.jpg",
+        "hiddenFlag": 0,
+        "extra": {}
+      }
+    },
+    {
+      "latlng": { "lat": 3155.3337686022, "lng": -2710.3342884866 },
+      "icon_options": { "teleport": false },
+      "data": {
+        "id": 1546,
+        "markerTitle": "击败魔物",
+        "position": "3155.3337686022,-2710.3342884866",
+        "content": "在此处击败【丘丘人】解锁【精致的宝箱】\n内有【原石×2、风之印×3】、【冒险阅历+30】",
+        "picture": "https://oss.yuanshen.site/kyjg/2024-12-19/e71ba5caaf4e148ef20e063a5ca41110619cd1e41e7e534ca8d163dcd69cc0a3.png",
+        "hiddenFlag": 0,
+        "extra": {}
+      }
+    },
+    {
+      "latlng": { "lat": -893.33087015362, "lng": -1786.6686074796 },
+      "icon_options": { "teleport": false },
+      "data": {
+        "id": 1953,
+        "markerTitle": "元素方碑",
+        "position": "-893.33087015362,-1786.6686074796",
+        "content": "在此处【短时间内】激活【3个火元素方碑】出现【精致的宝箱】\n内有【原石×2、岩之印×4】、【冒险阅历+30】",
+        "picture": "https://yuanshen.site/comment_png/27_427.jpg",
+        "hiddenFlag": 0,
+        "extra": {}
+      }
+    }
+  ]
+}

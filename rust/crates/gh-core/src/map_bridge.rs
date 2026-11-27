@@ -4840,6 +4840,344 @@ mod tests {
     }
 
     #[test]
+    fn piecewise_calibration_icp_rejects_gross_and_moderate_outliers() {
+        // Use a non-seed provider so calibration must run zero-seed RANSAC + 6-round progressive ICP.
+        let sx = 0.00012_f64;
+        let sy = -0.00012_f64;
+        let bx = 0.45_f64;
+        let dy = 0.25_f64;
+
+        let mut canonical = Vec::new();
+        let mut provider = Vec::new();
+        let mut json_anchors = Vec::new();
+
+        // 20 clean inliers (alternating Statues label_id=2 and Waypoints label_id=3).
+        for i in 0..20 {
+            let cx = -6000.0 + (i as f64) * 550.0;
+            let cy = -3500.0 + ((i % 5) as f64) * 1650.0;
+            let is_statue = i % 2 == 0;
+            canonical.push(CanonicalAnchor {
+                x: cx,
+                y: cy,
+                label_id: if is_statue { 2 } else { 3 },
+                area_id: 1,
+            });
+            let px = sx * cx + bx;
+            let py = sy * cy + dy;
+            provider.push(ProviderAnchor {
+                x: px,
+                y: py,
+                is_statue,
+            });
+            json_anchors.push(json!({
+                "x": px,
+                "y": py,
+                "category": if is_statue { "Statue of The Seven" } else { "Waypoint" },
+            }));
+        }
+
+        // 2 moderate outliers shifted by 20u canonical (admitted by early 65u/35u ICP passes,
+        // then rejected by progressive 15u/6u/3u passes).
+        for (idx, &(cx, cy)) in [(7500.0, -2000.0), (8200.0, 2100.0)].iter().enumerate() {
+            canonical.push(CanonicalAnchor {
+                x: cx,
+                y: cy,
+                label_id: 3,
+                area_id: 20 + idx as i32,
+            });
+            let px = sx * (cx + 20.0) + bx;
+            let py = sy * (cy - 18.0) + dy;
+            provider.push(ProviderAnchor {
+                x: px,
+                y: py,
+                is_statue: false,
+            });
+            json_anchors.push(json!({ "lng": px, "lat": py, "is_statue": false }));
+        }
+
+        // 2 gross outliers shifted by 450u+ canonical plus 3 stray provider points.
+        for (idx, &(cx, cy)) in [(9000.0, -1000.0), (9600.0, 1500.0)].iter().enumerate() {
+            canonical.push(CanonicalAnchor {
+                x: cx,
+                y: cy,
+                label_id: 3,
+                area_id: 30 + idx as i32,
+            });
+            let px = sx * (cx + 520.0) + bx;
+            let py = sy * (cy - 480.0) + dy;
+            provider.push(ProviderAnchor {
+                x: px,
+                y: py,
+                is_statue: false,
+            });
+            json_anchors.push(json!({ "x": px, "y": py, "is_statue": false }));
+        }
+        for &(stray_x, stray_y) in &[(9.5, -4.2), (-7.1, 8.3), (3.3, 3.3)] {
+            provider.push(ProviderAnchor {
+                x: stray_x,
+                y: stray_y,
+                is_statue: true,
+            });
+            json_anchors.push(json!({ "x": stray_x, "y": stray_y, "is_statue": true }));
+        }
+
+        let tf = calibrate_piecewise_from_anchors(
+            "custom_icp",
+            2,
+            &canonical,
+            &provider,
+            Some(true),
+            false,
+            None,
+        )
+        .expect("progressive ICP calibration must recover base affine");
+        assert_eq!(tf.matched_anchors, 20);
+        assert!(tf.rmse_canonical < 0.5, "rmse={}", tf.rmse_canonical);
+        assert!(tf.zones.is_empty());
+        assert!((tf.base.ax - sx).abs() < 1e-8);
+        assert!((tf.base.bx - bx).abs() < 1e-5);
+        assert!((tf.base.cy - sy).abs() < 1e-8);
+        assert!((tf.base.dy - dy).abs() < 1e-5);
+
+        // Verify the JSON entrypoint produces the same accurate recovery.
+        let res = execute_provider_calibration(
+            &json!({
+                "provider_id": "custom_icp",
+                "map_id": 2,
+                "expected_y_flip": true,
+                "anchors": json_anchors,
+            }),
+            &canonical,
+        )
+        .expect("execute_provider_calibration must succeed");
+        assert_eq!(res["ok"], true);
+        let tf_json: PiecewiseMapTransform =
+            serde_json::from_value(res["transform"].clone()).expect("deserialize transform");
+        assert_eq!(tf_json.matched_anchors, 20);
+        assert!(tf_json.rmse_canonical < 0.5, "json rmse={}", tf_json.rmse_canonical);
+        assert!((tf_json.base.ax - sx).abs() < 1e-8);
+        assert!((tf_json.base.bx - bx).abs() < 1e-5);
+    }
+
+    #[test]
+    fn piecewise_calibration_discovers_multi_zones_and_rejects_noisy_or_small_clusters() {
+        let sx = 8.58625e-5_f64;
+        let sy = -8.58625e-5_f64;
+        let bx_main = 0.52269_f64;
+        let dy_main = 0.19946_f64;
+        let bx_inazuma = bx_main - 2203.6 * sx;
+        let bx_easybreeze = bx_main + 2000.0 * sx;
+
+        let mut canonical = Vec::new();
+        let mut provider = Vec::new();
+
+        // Mainland (area_1): 16 clean anchors.
+        for i in 0..16 {
+            let cx = -8000.0 + (i as f64) * 600.0;
+            let cy = -4000.0 + ((i % 4) as f64) * 1700.0;
+            let is_statue = i % 2 == 0;
+            canonical.push(CanonicalAnchor {
+                x: cx,
+                y: cy,
+                label_id: if is_statue { 2 } else { 3 },
+                area_id: 1,
+            });
+            provider.push(ProviderAnchor {
+                x: sx * cx + bx_main,
+                y: sy * cy + dy_main,
+                is_statue,
+            });
+        }
+
+        // Valid shifted zone 1: Inazuma (area_3), 6 anchors.
+        for i in 0..6 {
+            let cx = 1200.0 + (i as f64) * 350.0;
+            let cy = 5000.0 + ((i % 3) as f64) * 900.0;
+            canonical.push(CanonicalAnchor {
+                x: cx,
+                y: cy,
+                label_id: if i % 2 == 0 { 2 } else { 3 },
+                area_id: 3,
+            });
+            provider.push(ProviderAnchor {
+                x: sx * cx + bx_inazuma,
+                y: sy * cy + dy_main,
+                is_statue: i % 2 == 0,
+            });
+        }
+
+        // Valid shifted zone 2: Easybreeze West (area_11), 6 anchors.
+        for i in 0..6 {
+            let cx = -15600.0 + (i as f64) * 260.0;
+            let cy = 900.0 + ((i % 3) as f64) * 700.0;
+            canonical.push(CanonicalAnchor {
+                x: cx,
+                y: cy,
+                label_id: if i % 2 == 0 { 2 } else { 3 },
+                area_id: 11,
+            });
+            provider.push(ProviderAnchor {
+                x: sx * cx + bx_easybreeze,
+                y: sy * cy + dy_main,
+                is_statue: i % 2 == 0,
+            });
+        }
+
+        // Undersized shifted cluster (area_99): only 3 anchors (< 4 minimum) -> must be rejected.
+        for i in 0..3 {
+            let cx = 6500.0 + (i as f64) * 300.0;
+            let cy = -6500.0 + (i as f64) * 250.0;
+            canonical.push(CanonicalAnchor {
+                x: cx,
+                y: cy,
+                label_id: 3,
+                area_id: 99,
+            });
+            provider.push(ProviderAnchor {
+                x: sx * (cx + 900.0) + bx_main,
+                y: sy * cy + dy_main,
+                is_statue: false,
+            });
+        }
+
+        // Noisy cluster (area_98): 5 anchors with inconsistent shifts so RMSE exceeds 15u
+        // (anchored around +600u with +/-18u residuals inside the 20u voting gate -> RMSE > 15u).
+        let noisy_dx = [0.0, 18.0, -18.0, 18.5, -18.5];
+        for (i, &jitter) in noisy_dx.iter().enumerate() {
+            let cx = -12000.0 + (i as f64) * 400.0;
+            let cy = -7000.0 + ((i % 2) as f64) * 500.0;
+            canonical.push(CanonicalAnchor {
+                x: cx,
+                y: cy,
+                label_id: 3,
+                area_id: 98,
+            });
+            provider.push(ProviderAnchor {
+                x: sx * (cx + 600.0 + jitter) + bx_main,
+                y: sy * cy + dy_main,
+                is_statue: false,
+            });
+        }
+
+        let tf = calibrate_piecewise_from_anchors(
+            "appsample",
+            2,
+            &canonical,
+            &provider,
+            Some(true),
+            false,
+            None,
+        )
+        .expect("multi-zone calibration must succeed");
+
+        let zone_ids: Vec<&str> = tf.zones.iter().map(|z| z.id.as_str()).collect();
+        assert_eq!(zone_ids, vec!["area_3", "area_11"]);
+        assert_eq!(tf.matched_anchors, 28);
+        assert!(tf.rmse_canonical < 0.05, "rmse={}", tf.rmse_canonical);
+
+        // Forward <-> inverse round-trip holds in mainland, area_3, and area_11.
+        for &(cx, cy) in &[(-2500.0, 500.0), (2000.0, 6200.0), (-15000.0, 1500.0)] {
+            let (lat, lng) = tf.to_leaflet_latlng(cx, cy);
+            let (rcx, rcy) = tf.from_leaflet_latlng(lat, lng).unwrap();
+            assert!((rcx - cx).abs() < 1e-4 && (rcy - cy).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn execute_provider_calibration_swap_lat_lng_defaults_overrides_and_leaflet_roundtrip() {
+        let sx = 1.335_f64;
+        let sy = 1.335_f64;
+        let bx = 1520.0_f64;
+        let dy = -3930.0_f64;
+
+        let mut canonical = Vec::new();
+        let mut ky_anchors = Vec::new();
+        let mut as_anchors = Vec::new();
+        let as_sx = 8.58625e-5_f64;
+        let as_sy = -8.58625e-5_f64;
+        let as_bx = 0.52269_f64;
+        let as_dy = 0.19946_f64;
+
+        for i in 0..8 {
+            let cx = -3000.0 + (i as f64) * 900.0;
+            let cy = -2000.0 + ((i % 4) as f64) * 1400.0;
+            let is_statue = i % 2 == 0;
+            canonical.push(CanonicalAnchor {
+                x: cx,
+                y: cy,
+                label_id: if is_statue { 2 } else { 3 },
+                area_id: 1,
+            });
+            ky_anchors.push(json!({
+                "x": sx * cx + bx,
+                "y": sy * cy + dy,
+                "is_statue": is_statue,
+            }));
+            as_anchors.push(json!({
+                "x": as_sx * cx + as_bx,
+                "y": as_sy * cy + as_dy,
+                "is_statue": is_statue,
+            }));
+        }
+
+        // Defaults: kongying -> swap_lat_lng=true, appsample -> swap_lat_lng=false.
+        let ky_def = execute_provider_calibration(
+            &json!({"provider_id": "kongying", "map_id": 2, "anchors": ky_anchors}),
+            &canonical,
+        )
+        .unwrap();
+        let ky_tf: PiecewiseMapTransform =
+            serde_json::from_value(ky_def["transform"].clone()).unwrap();
+        assert!(ky_tf.swap_lat_lng);
+        let (px, py) = ky_tf.forward(1000.0, -500.0);
+        let (lat, lng) = ky_tf.to_leaflet_latlng(1000.0, -500.0);
+        assert!((lat - px).abs() < 1e-6 && (lng - py).abs() < 1e-6);
+        let (rcx, rcy) = ky_tf.from_leaflet_latlng(lat, lng).unwrap();
+        assert!((rcx - 1000.0).abs() < 1e-4 && (rcy - (-500.0)).abs() < 1e-4);
+
+        let as_def = execute_provider_calibration(
+            &json!({"provider_id": "appsample", "map_id": 2, "anchors": as_anchors}),
+            &canonical,
+        )
+        .unwrap();
+        let as_tf: PiecewiseMapTransform =
+            serde_json::from_value(as_def["transform"].clone()).unwrap();
+        assert!(!as_tf.swap_lat_lng);
+        let (apx, apy) = as_tf.forward(1000.0, -500.0);
+        let (alat, alng) = as_tf.to_leaflet_latlng(1000.0, -500.0);
+        assert!((alat - apy).abs() < 1e-9 && (alng - apx).abs() < 1e-9);
+        let (arcx, arcy) = as_tf.from_leaflet_latlng(alat, alng).unwrap();
+        assert!((arcx - 1000.0).abs() < 1e-4 && (arcy - (-500.0)).abs() < 1e-4);
+
+        // Explicit overrides flip both defaults and preserve Leaflet round-trip.
+        let ky_ovr = execute_provider_calibration(
+            &json!({"provider_id": "kongying", "map_id": 2, "swap_lat_lng": false, "anchors": ky_anchors}),
+            &canonical,
+        )
+        .unwrap();
+        let ky_ovr_tf: PiecewiseMapTransform =
+            serde_json::from_value(ky_ovr["transform"].clone()).unwrap();
+        assert!(!ky_ovr_tf.swap_lat_lng);
+        let (olat, olng) = ky_ovr_tf.to_leaflet_latlng(1000.0, -500.0);
+        assert!((olat - py).abs() < 1e-6 && (olng - px).abs() < 1e-6);
+        let (ocx, ocy) = ky_ovr_tf.from_leaflet_latlng(olat, olng).unwrap();
+        assert!((ocx - 1000.0).abs() < 1e-4 && (ocy - (-500.0)).abs() < 1e-4);
+
+        let as_ovr = execute_provider_calibration(
+            &json!({"provider_id": "appsample", "map_id": 2, "swap_lat_lng": true, "anchors": as_anchors}),
+            &canonical,
+        )
+        .unwrap();
+        let as_ovr_tf: PiecewiseMapTransform =
+            serde_json::from_value(as_ovr["transform"].clone()).unwrap();
+        assert!(as_ovr_tf.swap_lat_lng);
+        let (slat, slng) = as_ovr_tf.to_leaflet_latlng(1000.0, -500.0);
+        assert!((slat - apx).abs() < 1e-9 && (slng - apy).abs() < 1e-9);
+        let (scx, scy) = as_ovr_tf.from_leaflet_latlng(slat, slng).unwrap();
+        assert!((scx - 1000.0).abs() < 1e-4 && (scy - (-500.0)).abs() < 1e-4);
+    }
+
+    #[test]
     fn category_aliases_n_to_1_and_duplicate_rejection() {
         let reg = CategoryRegistry::embedded();
         for lid in [8, 9, 212, 411, 509, 577, 703, 835] {
@@ -5991,5 +6329,134 @@ mod tests {
             GenshinMapGithubAdapter::export(&empty_report, true, Some(1000), Some(&bad_features_neg)),
             Err(CoreError::InvalidData(_))
         ));
+    }
+
+    #[test]
+    fn transform_vectors_fixture_parity() {
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tests/fixtures/multimap/transform_vectors.json");
+        let raw = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", fixture_path.display()));
+        let doc: Value = serde_json::from_str(&raw).expect("valid transform_vectors.json");
+
+        assert_eq!(doc["schema_version"].as_i64(), Some(1));
+        let forward_abs = doc["tolerances"]["forward_abs"]
+            .as_f64()
+            .expect("tolerances.forward_abs");
+        let leaflet_abs = doc["tolerances"]["leaflet_abs"]
+            .as_f64()
+            .expect("tolerances.leaflet_abs");
+        let roundtrip_abs = doc["tolerances"]["roundtrip_canonical_abs"]
+            .as_f64()
+            .expect("tolerances.roundtrip_canonical_abs");
+
+        let vectors = doc["vectors"]
+            .as_array()
+            .expect("vectors array in transform_vectors.json");
+        assert!(!vectors.is_empty(), "vectors must not be empty");
+
+        let mut seen_pairs: HashSet<(String, i64)> = HashSet::new();
+        for v in vectors {
+            let id = v["id"].as_str().expect("vector.id");
+            let provider = v["provider"].as_str().expect("vector.provider");
+            let map_id = v["map_id"].as_i64().expect("vector.map_id");
+            let expected_zone = v["expected_zone"].as_str().expect("vector.expected_zone");
+            let swap_lat_lng = v["swap_lat_lng"].as_bool().expect("vector.swap_lat_lng");
+            let cx = v["canonical"]["x"].as_f64().expect("canonical.x");
+            let cy = v["canonical"]["y"].as_f64().expect("canonical.y");
+            let exp_px = v["expected_provider"]["x"]
+                .as_f64()
+                .expect("expected_provider.x");
+            let exp_py = v["expected_provider"]["y"]
+                .as_f64()
+                .expect("expected_provider.y");
+            let exp_lat = v["expected_leaflet"]["lat"]
+                .as_f64()
+                .expect("expected_leaflet.lat");
+            let exp_lng = v["expected_leaflet"]["lng"]
+                .as_f64()
+                .expect("expected_leaflet.lng");
+
+            seen_pairs.insert((provider.to_owned(), map_id));
+
+            let tf = provider_default_transform(provider, map_id)
+                .unwrap_or_else(|| panic!("{id}: missing seed transform for {provider}:{map_id}"));
+            assert_eq!(
+                tf.swap_lat_lng, swap_lat_lng,
+                "{id}: swap_lat_lng mismatch"
+            );
+
+            let (px, py) = tf.forward(cx, cy);
+            assert!(
+                (px - exp_px).abs() <= forward_abs && (py - exp_py).abs() <= forward_abs,
+                "{id}: forward({cx}, {cy}) = ({px}, {py}) != expected ({exp_px}, {exp_py})"
+            );
+
+            let (zone_px, zone_py) = if expected_zone == "base" {
+                tf.base.transform(cx, cy)
+            } else {
+                let z = tf
+                    .zones
+                    .iter()
+                    .find(|z| z.id == expected_zone)
+                    .unwrap_or_else(|| panic!("{id}: expected_zone {expected_zone:?} not found"));
+                z.affine.transform(cx, cy)
+            };
+            assert!(
+                (px - zone_px).abs() <= forward_abs && (py - zone_py).abs() <= forward_abs,
+                "{id}: expected_zone={expected_zone} mismatch: forward=({px}, {py}) vs zone=({zone_px}, {zone_py})"
+            );
+
+            let (lat, lng) = tf.to_leaflet_latlng(cx, cy);
+            assert!(
+                (lat - exp_lat).abs() <= leaflet_abs && (lng - exp_lng).abs() <= leaflet_abs,
+                "{id}: to_leaflet_latlng({cx}, {cy}) = ({lat}, {lng}) != expected ({exp_lat}, {exp_lng})"
+            );
+
+            let (rcx, rcy) = tf
+                .inverse(px, py)
+                .unwrap_or_else(|e| panic!("{id}: inverse failed: {e}"));
+            assert!(
+                (rcx - cx).abs() <= roundtrip_abs && (rcy - cy).abs() <= roundtrip_abs,
+                "{id}: inverse roundtrip ({rcx}, {rcy}) != ({cx}, {cy})"
+            );
+
+            let (lrcx, lrcy) = tf
+                .from_leaflet_latlng(lat, lng)
+                .unwrap_or_else(|e| panic!("{id}: from_leaflet_latlng failed: {e}"));
+            assert!(
+                (lrcx - cx).abs() <= roundtrip_abs && (lrcy - cy).abs() <= roundtrip_abs,
+                "{id}: from_leaflet_latlng roundtrip ({lrcx}, {lrcy}) != ({cx}, {cy})"
+            );
+        }
+
+        let required_pairs = [
+            ("hoyolab", 2_i64),
+            ("kongying", 2),
+            ("appsample", 2),
+            ("appsample", 7),
+            ("appsample", 9),
+            ("appsample", 34),
+            ("appsample", 36),
+            ("appsample", 37),
+            ("appsample", 40),
+        ];
+        for (provider, map_id) in required_pairs {
+            assert!(
+                seen_pairs.contains(&(provider.to_owned(), map_id)),
+                "transform_vectors.json missing required seeded pair {provider}:{map_id}"
+            );
+        }
+
+        // Verify forward-only base fallback on non-invertible ocean fold-over sides just outside 350u pad.
+        let as2 = provider_default_transform("appsample", 2).expect("appsample map 2");
+        for (cx, cy) in [(-569.0, 6000.0), (-13939.4, 1500.0)] {
+            let (px, py) = as2.forward(cx, cy);
+            let (bx, by) = as2.base.transform(cx, cy);
+            assert!(
+                (px - bx).abs() <= forward_abs && (py - by).abs() <= forward_abs,
+                "appsample map 2 ({cx}, {cy}) did not fall back to base"
+            );
+        }
     }
 }

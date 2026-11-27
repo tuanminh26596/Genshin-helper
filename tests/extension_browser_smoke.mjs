@@ -82,7 +82,8 @@ class Cdp {
       this.ws.onerror = () => { clearTimeout(timer); j(new Error('CDP socket error')); };
     });
   }
-  send(method, params = {}, timeoutMs = CDP_CALL_TIMEOUT_MS) {
+  // sessionId targets a session attached with Target.setAutoAttach({ flatten: true }).
+  send(method, params = {}, timeoutMs = CDP_CALL_TIMEOUT_MS, sessionId = undefined) {
     return new Promise((resolveSend, rejectSend) => {
       const id = ++this.id;
       const timer = setTimeout(() => {
@@ -91,7 +92,7 @@ class Cdp {
       }, timeoutMs);
       this.pending.set(id, { resolve: resolveSend, reject: rejectSend, timer, method });
       try {
-        this.ws.send(JSON.stringify({ id, method, params }));
+        this.ws.send(JSON.stringify(sessionId ? { id, method, params, sessionId } : { id, method, params }));
       } catch (e) {
         this.pending.delete(id);
         clearTimeout(timer);
@@ -141,32 +142,65 @@ async function main() {
     if (!port) throw new Error('Chromium did not expose a DevTools port');
     const http = (p, method = 'GET') => fetch(`http://127.0.0.1:${port}${p}`, { method, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) }).then((r) => r.json());
 
-    let swTarget = null;
-    for (let i = 0; i < 50 && !swTarget; i++) {
-      swTarget = (await http('/json/list')).find((t) => t.type === 'service_worker' && t.url.includes(EXT_ID));
-      if (!swTarget) await sleep(200);
-    }
-    if (!swTarget) throw new Error('extension service worker not found (extension failed to load?)');
-    const sw = new Cdp(swTarget.webSocketDebuggerUrl);
-    sessions.push(sw);
-    await sw.ready;
-
-    // Mock desktop app (language vi) inside the service worker.
-    sw.handlers.push((m) => {
-      if (m.method !== 'Fetch.requestPaused') return;
-      const path = new URL(m.params.request.url).pathname;
-      const body = path === '/status'
-        ? { ok: true, language: 'vi', engine_active: true, latest_seq: 0 }
-        : path === '/poll' ? { events: [], latest_seq: 0 } : { ok: true };
-      sw.send('Fetch.fulfillRequest', {
-        requestId: m.params.requestId,
-        responseCode: 200,
-        responseHeaders: [{ name: 'Content-Type', value: 'application/json' }, { name: 'Access-Control-Allow-Origin', value: '*' }],
-        body: Buffer.from(JSON.stringify(body)).toString('base64'),
-      });
+    // Mock desktop app (language vi) inside the extension service worker. Chromium stops an idle
+    // MV3 service worker even with a DevTools session attached (seen in ~1 of 4 runs right after
+    // install), and a session on a stopped worker never answers. So the mock does not hold one
+    // worker session: a browser-level auto-attach pauses every (re)started extension worker,
+    // enables Fetch interception on it, then lets it run, so no app request ever escapes the mock.
+    const browserTarget = await http('/json/version');
+    const browser = new Cdp(browserTarget.webSocketDebuggerUrl);
+    sessions.push(browser);
+    await browser.ready;
+    const swSessions = new Set();
+    let swStarts = 0;
+    browser.handlers.push((m) => {
+      if (m.method === 'Target.attachedToTarget') {
+        const { sessionId, targetInfo, waitingForDebugger } = m.params;
+        const isExtWorker = targetInfo.type === 'service_worker' && targetInfo.url.includes(EXT_ID);
+        (async () => {
+          if (isExtWorker) {
+            swSessions.add(sessionId);
+            swStarts++;
+            await browser.send('Fetch.enable', { patterns: [{ urlPattern: `${APP_ORIGIN}/*` }] }, CDP_CALL_TIMEOUT_MS, sessionId);
+          }
+          if (waitingForDebugger) await browser.send('Runtime.runIfWaitingForDebugger', {}, CDP_CALL_TIMEOUT_MS, sessionId);
+          if (!isExtWorker) await browser.send('Target.detachFromTarget', { sessionId });
+        })().catch((e) => console.log(`[warn] auto-attach ${targetInfo.type} ${targetInfo.url}: ${e.message}`));
+      } else if (m.method === 'Target.detachedFromTarget') {
+        swSessions.delete(m.params.sessionId);
+      } else if (m.method === 'Fetch.requestPaused' && swSessions.has(m.sessionId)) {
+        const path = new URL(m.params.request.url).pathname;
+        const body = path === '/status'
+          ? { ok: true, language: 'vi', engine_active: true, latest_seq: 0 }
+          : path === '/poll' ? { events: [], latest_seq: 0 } : { ok: true };
+        browser.send('Fetch.fulfillRequest', {
+          requestId: m.params.requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }, { name: 'Access-Control-Allow-Origin', value: '*' }],
+          body: Buffer.from(JSON.stringify(body)).toString('base64'),
+        }, CDP_CALL_TIMEOUT_MS, m.sessionId).catch(() => {});
+      }
     });
-    await sw.send('Fetch.enable', { patterns: [{ urlPattern: `${APP_ORIGIN}/*` }] });
-    const setChoice = (lang) => sw.eval(`new Promise((r) => chrome.storage.local.${lang ? `set({ gh_lang: '${lang}' }` : `remove('gh_lang'`}, () => r(true)))`);
+    await browser.send('Target.setAutoAttach', {
+      autoAttach: true, waitForDebuggerOnStart: true, flatten: true,
+      filter: [{ type: 'service_worker', exclude: false }, { exclude: true }],
+    });
+    for (let i = 0; i < 50 && swStarts === 0; i++) await sleep(200);
+    if (swStarts === 0) throw new Error('extension service worker not found (extension failed to load?)');
+
+    // The user's language choice lives in chrome.storage. Write it from an extension-origin page,
+    // which has chrome.storage whether or not the service worker is running right now.
+    const extTarget = await http(`/json/new?chrome-extension://${EXT_ID}/manifest.json`, 'PUT');
+    const ext = new Cdp(extTarget.webSocketDebuggerUrl);
+    sessions.push(ext);
+    await ext.ready;
+    let extReady = null;
+    for (let i = 0; i < 50 && extReady !== 'object'; i++) {
+      extReady = await ext.eval('typeof (window.chrome && chrome.storage)').catch(() => null);
+      if (extReady !== 'object') await sleep(200);
+    }
+    if (extReady !== 'object') throw new Error('chrome.storage not available on the extension page');
+    const setChoice = (lang) => ext.eval(`new Promise((r) => chrome.storage.local.${lang ? `set({ gh_lang: '${lang}' }` : `remove('gh_lang'`}, () => r(true)))`);
 
     const pageTarget = await http(`/json/new?${encodeURI(MAP_URL)}`, 'PUT');
     const page = new Cdp(pageTarget.webSocketDebuggerUrl);
@@ -246,6 +280,8 @@ async function main() {
     await setChoice('vi');
     s = await waitFor((x) => x.lang === 'vi' && x.recenter === 'Bám lại vị trí', 8000);
     check('live switch re-renders the re-center button', s && s.lang === 'vi' && s.recenter === 'Bám lại vị trí', s);
+    // Informational: >1 means Chromium stopped and restarted the worker during the run.
+    console.log(`[info] extension service worker started ${swStarts} time(s); app mock attached each time`);
   } finally {
     for (const c of sessions) c.close();
     proc.kill();
