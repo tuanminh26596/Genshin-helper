@@ -3,6 +3,7 @@
 use clap::{Parser, Subcommand};
 use gh_sim::compact::{CompactOptions, CompactProfile, run_compact};
 use gh_sim::import_diag::{ImportDiagArgs, import_diagnostic_bundle};
+use gh_sim::qa::{QaOptions, QaThresholdOverrides, run_qa};
 use gh_sim::replay::{DEFAULT_DRIFT_THRESHOLD_W, ReplayOptions, run_replay};
 use std::path::PathBuf;
 
@@ -143,6 +144,77 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+
+    /// Run sequential offline QA regression checks across all recorded sessions against blessed poses.
+    Qa {
+        /// Directory containing recorded QA sessions (default: scratch/qa_sessions).
+        #[arg(long, default_value = "scratch/qa_sessions")]
+        sessions: PathBuf,
+
+        /// Path to map datasets directory containing multimap_v4.json & terrain_n2_v4.npz.
+        #[arg(long, default_value = "data")]
+        data_dir: PathBuf,
+
+        /// Explicit absolute path to ffmpeg.exe (required for video sessions; never resolved via PATH).
+        #[arg(long)]
+        ffmpeg: Option<PathBuf>,
+
+        /// Path to git-tracked QA baseline JSON (default: tests/qa_baseline.json).
+        #[arg(long, default_value = "tests/qa_baseline.json")]
+        baseline: PathBuf,
+
+        /// Path to git-tracked verified_gt.json.
+        #[arg(long, default_value = "tests/verified_gt.json")]
+        gt_file: PathBuf,
+
+        /// Optional session name filter (repeatable: --only sess_A --only sess_B).
+        #[arg(long)]
+        only: Vec<String>,
+
+        /// Optional output directory where qa_report.json will be written.
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Record fresh blessed_poses.jsonl and update tests/qa_baseline.json (requires explicit user approval).
+        #[arg(long)]
+        bless: bool,
+
+        /// Optional CLI override for per-frame position drift threshold (world units).
+        #[arg(long)]
+        pos_threshold_w: Option<f64>,
+
+        /// Optional CLI override for max frames allowed above pos-threshold-w.
+        #[arg(long)]
+        max_over_threshold: Option<usize>,
+
+        /// Optional CLI override for max map_id mismatches vs blessed.
+        #[arg(long)]
+        max_map_mismatches: Option<usize>,
+
+        /// Optional CLI override for max frames that lost tracking vs blessed.
+        #[arg(long)]
+        max_lost_pos_frames: Option<usize>,
+
+        /// Optional CLI override for max drop in map_m_synced_count vs baseline.
+        #[arg(long)]
+        max_map_m_synced_drop: Option<usize>,
+
+        /// Optional CLI override for max drop in mmap_view_acquired vs baseline.
+        #[arg(long)]
+        max_mmap_view_drop: Option<usize>,
+
+        /// Optional CLI stricter floor for mmap_view_acquired per session.
+        #[arg(long)]
+        min_mmap_view_acquired: Option<usize>,
+
+        /// Optional CLI stricter ceiling for p95 position delta vs blessed (world units).
+        #[arg(long)]
+        max_p95_pos_delta_w: Option<f64>,
+
+        /// Optional CLI stricter ceiling for max position delta vs blessed (world units).
+        #[arg(long)]
+        max_pos_delta_w: Option<f64>,
+    },
 }
 
 fn main() {
@@ -277,6 +349,58 @@ fn main() {
                 }
                 Err(err) => {
                     eprintln!("[gh-sim compact] ERROR: {err}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Cmd::Qa {
+            sessions,
+            data_dir,
+            ffmpeg,
+            baseline,
+            gt_file,
+            only,
+            out,
+            bless,
+            pos_threshold_w,
+            max_over_threshold,
+            max_map_mismatches,
+            max_lost_pos_frames,
+            max_map_m_synced_drop,
+            max_mmap_view_drop,
+            min_mmap_view_acquired,
+            max_p95_pos_delta_w,
+            max_pos_delta_w,
+        } => {
+            let res = run_qa(&QaOptions {
+                sessions_dir: sessions,
+                data_dir,
+                ffmpeg_path: ffmpeg,
+                baseline_path: baseline,
+                gt_file,
+                only,
+                out_dir: out,
+                bless,
+                overrides: QaThresholdOverrides {
+                    pos_threshold_w,
+                    max_over_threshold_frames: max_over_threshold,
+                    max_map_mismatches,
+                    max_lost_pos_frames,
+                    max_map_m_synced_drop,
+                    max_mmap_view_drop,
+                    min_mmap_view_acquired,
+                    max_p95_pos_delta_w,
+                    max_pos_delta_w,
+                },
+            });
+            match res {
+                Ok(report) => {
+                    if !report.passed {
+                        std::process::exit(1);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("[gh-sim qa] ERROR: {err}");
                     std::process::exit(2);
                 }
             }

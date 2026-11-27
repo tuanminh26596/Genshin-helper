@@ -1,0 +1,112 @@
+{
+    "policy": "Agent KHÔNG được chạy --bless, sửa baseline hay nới ngưỡng khi chưa có người dùng đồng ý. / Agents MUST NOT run --bless, modify this baseline, or relax thresholds without explicit user approval.",
+    "schema_version": 1,
+    "sessions": {
+        "sess_20261127_005004": {
+            "blessed_poses_sha256": "cb621e5429ab960bc2ba69255337f173ca6cd984d4d05f279d5095559bbc02f0",
+            "codec": "libx265",
+            "color_safe": false,
+            "frames": 1340,
+            "map_m_synced_count": 6,
+            "meta_ref_max_pos_delta_w": 6.736,
+            "meta_ref_over_threshold": 0,
+            "meta_ref_p95_pos_delta_w": 0.776,
+            "mmap_view_acquired": 188,
+            "mmap_view_drawer_open": 20,
+            "mmap_view_frames": 204,
+            "tracking_frames": 1135
+        },
+        "sess_20261127_011306": {
+            "blessed_poses_sha256": "bd55f10e4608b025b313dec60abe4b65069ef79ad7ee838a03387707e43d24e1",
+            "codec": "libx265",
+            "color_safe": false,
+            "frames": 1341,
+            "map_m_synced_count": 8,
+            "meta_ref_max_pos_delta_w": 17.247,
+            "meta_ref_over_threshold": 1,
+            "meta_ref_p95_pos_delta_w": 0.677,
+            "mmap_view_acquired": 133,
+            "mmap_view_drawer_open": 33,
+            "mmap_view_frames": 192,
+            "tracking_frames": 1149
+        },
+        "sess_20261127_011544": {
+            "blessed_poses_sha256": "00071b83cc8bfd253bf6338e75890b96774e81cc088aa1c71cb78ea769974a16",
+            "codec": "libx265",
+            "color_safe": false,
+            "frames": 832,
+            "map_m_synced_count": 6,
+            "meta_ref_max_pos_delta_w": 14292.841,
+            "meta_ref_over_threshold": 257,
+            "meta_ref_p95_pos_delta_w": 14275.845,
+            "mmap_view_acquired": 130,
+            "mmap_view_drawer_open": 12,
+            "mmap_view_frames": 160,
+            "tracking_frames": 617
+        },
+        "sess_20261127_011805": {
+            "blessed_poses_sha256": "455fddfc668523aee746e0a6e6787b317810753e8bb5c39c8593ef2775fafea5",
+            "codec": "libx265",
+            "color_safe": false,
+            "frames": 893,
+            "map_m_synced_count": 5,
+            "meta_ref_max_pos_delta_w": 1.49,
+            "meta_ref_over_threshold": 0,
+            "meta_ref_p95_pos_delta_w": 0.633,
+            "mmap_view_acquired": 115,
+            "mmap_view_drawer_open": 35,
+            "mmap_view_frames": 128,
+            "tracking_frames": 658
+        },
+        "sess_20261127_012040": {
+            "blessed_poses_sha256": "1835ceca32b8c684134125798e60b768eaa669a1e6f2d79a3df42abd03e5eb49",
+            "codec": "libx264rgb",
+            "color_safe": true,
+            "frames": 1244,
+            "map_m_synced_count": 7,
+            "meta_ref_max_pos_delta_w": 40.131,
+            "meta_ref_over_threshold": 4,
+            "meta_ref_p95_pos_delta_w": 1.546,
+            "mmap_view_acquired": 164,
+            "mmap_view_drawer_open": 0,
+            "mmap_view_frames": 173,
+            "tracking_frames": 1068
+        },
+        "sess_20261127_012254": {
+            "blessed_poses_sha256": "7c8c888f26de244494d5fc2b1d071f3fe883defd5347c271676c87dab7b61e1a",
+            "codec": "libx264rgb",
+            "color_safe": true,
+            "frames": 1185,
+            "map_m_synced_count": 9,
+            "meta_ref_max_pos_delta_w": 39.314,
+            "meta_ref_over_threshold": 31,
+            "meta_ref_p95_pos_delta_w": 2.25,
+            "mmap_view_acquired": 198,
+            "mmap_view_drawer_open": 0,
+            "mmap_view_frames": 212,
+            "tracking_frames": 930
+        },
+        "sess_20261127_012515": {
+            "blessed_poses_sha256": "c1aac03731cecd60a327b08ce9b923f78c9b4331b612e155bf07f1106be30b6e",
+            "codec": "libx264rgb",
+            "color_safe": true,
+            "frames": 836,
+            "map_m_synced_count": 5,
+            "meta_ref_max_pos_delta_w": 2.24,
+            "meta_ref_over_threshold": 0,
+            "meta_ref_p95_pos_delta_w": 0.553,
+            "mmap_view_acquired": 149,
+            "mmap_view_drawer_open": 0,
+            "mmap_view_frames": 180,
+            "tracking_frames": 655
+        }
+    },
+    "thresholds": {
+        "max_lost_pos_frames": 0,
+        "max_map_m_synced_drop": 0,
+        "max_map_mismatches": 0,
+        "max_mmap_view_drop": 2,
+        "max_over_threshold_frames": 0,
+        "pos_threshold_w": 15.0
+    }
+}

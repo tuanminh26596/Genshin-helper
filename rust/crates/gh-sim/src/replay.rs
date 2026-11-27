@@ -222,17 +222,17 @@ struct MetaRecord {
     base_heading: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
-struct ObservedFrame {
-    idx: usize,
-    ts: f64,
-    state: String,
-    match_method: String,
-    map_id: Option<i32>,
-    world_x: Option<f64>,
-    world_y: Option<f64>,
-    heading: Option<f64>,
-    is_underground: bool,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObservedFrame {
+    pub idx: usize,
+    pub ts: f64,
+    pub state: String,
+    pub match_method: String,
+    pub map_id: Option<i32>,
+    pub world_x: Option<f64>,
+    pub world_y: Option<f64>,
+    pub heading: Option<f64>,
+    pub is_underground: bool,
 }
 
 struct TempSandboxDir(PathBuf);
@@ -461,7 +461,7 @@ impl Drop for VideoPipeDecoder {
     }
 }
 
-fn percentile(vals: &[f64], q: f64) -> Option<f64> {
+pub(crate) fn percentile(vals: &[f64], q: f64) -> Option<f64> {
     let mut clean: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
     if clean.is_empty() {
         return None;
@@ -471,11 +471,11 @@ fn percentile(vals: &[f64], q: f64) -> Option<f64> {
     Some(clean[idx.min(clean.len() - 1)])
 }
 
-fn angle_diff_deg(a: f64, b: f64) -> f64 {
+pub(crate) fn angle_diff_deg(a: f64, b: f64) -> f64 {
     (((a - b + 180.0).rem_euclid(360.0)) - 180.0).abs()
 }
 
-fn round3(v: f64) -> f64 {
+pub(crate) fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0
 }
 
@@ -904,6 +904,12 @@ fn compute_regression(
 }
 
 pub fn run_replay(opts: &ReplayOptions) -> Result<ReplayReport, String> {
+    run_replay_with_poses(opts).map(|(report, _)| report)
+}
+
+pub fn run_replay_with_poses(
+    opts: &ReplayOptions,
+) -> Result<(ReplayReport, Vec<ObservedFrame>), String> {
     let kind = detect_session_kind(&opts.source_dir)?;
     let session_name = opts
         .source_dir
@@ -1339,7 +1345,7 @@ pub fn run_replay(opts: &ReplayOptions) -> Result<ReplayReport, String> {
             .map_err(|e| format!("failed to write {}: {e}", out_path.display()))?;
     }
 
-    Ok(report)
+    Ok((report, observed))
 }
 
 fn apply_pose_to_obs(pose: &MinimapPose, obs: &mut ObservedFrame) {
