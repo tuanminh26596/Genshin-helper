@@ -282,7 +282,7 @@ pub fn icon_anchor_offset_px(label_id: i32, scale_ui: f64) -> (f64, f64) {
 const fn map_base_scale_cfg(map_id: i32) -> f64 {
     match map_id {
         2 => 1.12,
-        7 => 0.49,
+        7 => 0.80,
         9 => 0.75,
         34 => 0.60,
         36 => 0.80,
@@ -2770,29 +2770,76 @@ impl MapLocator {
         let q = resize_u8(crop, cw, ch, Interpolation::Area).ok()?;
         let x0_f = ((rx0 as f64 * scale + tx) + orig_x) * pow2z - tx0 * 256.0;
         let y0_f = ((ry0 as f64 * scale + ty) + orig_y) * pow2z - ty0 * 256.0;
+        if !x0_f.is_finite()
+            || !y0_f.is_finite()
+            || x0_f >= ch_w as f64
+            || y0_f >= ch_h as f64
+            || x0_f + cw as f64 <= 0.0
+            || y0_f + ch as f64 <= 0.0
+        {
+            return None;
+        }
         let x0 = x0_f.round_ties_even() as isize;
         let y0 = y0_f.round_ties_even() as isize;
         let pad = search_pad as isize;
 
-        let rx_a = (x0 - pad).max(0) as usize;
-        let ry_a = (y0 - pad).max(0) as usize;
-        let rx_b = (x0 + cw as isize + pad).min(ch_w as isize).max(0) as usize;
-        let ry_b = (y0 + ch as isize + pad).min(ch_h as isize).max(0) as usize;
-        if rx_b.saturating_sub(rx_a) < cw || ry_b.saturating_sub(ry_a) < ch {
+        let qx0 = if x0 < 0 {
+            (pad - x0).clamp(0, cw as isize) as usize
+        } else {
+            0
+        };
+        let qy0 = if y0 < 0 {
+            (pad - y0).clamp(0, ch as isize) as usize
+        } else {
+            0
+        };
+        let qx1 = if x0 + cw as isize > ch_w as isize {
+            (ch_w as isize - pad - x0).clamp(0, cw as isize) as usize
+        } else {
+            cw
+        };
+        let qy1 = if y0 + ch as isize > ch_h as isize {
+            (ch_h as isize - pad - y0).clamp(0, ch as isize) as usize
+        } else {
+            ch
+        };
+        if qx1 <= qx0 || qy1 <= qy0 {
+            return None;
+        }
+        let sub_cw = qx1 - qx0;
+        let sub_ch = qy1 - qy0;
+        if sub_cw < 24
+            || sub_ch < 24
+            || sub_cw * 2 < cw
+            || sub_ch * 2 < ch
+            || (sub_cw as u64) * (sub_ch as u64) * 2 < (cw as u64) * (ch as u64)
+        {
+            return None;
+        }
+        let sub_x0 = x0 + qx0 as isize;
+        let sub_y0 = y0 + qy0 as isize;
+        let sub_x0_f = x0_f + qx0 as f64;
+        let sub_y0_f = y0_f + qy0 as f64;
+        let rx_a = (sub_x0 - pad).max(0) as usize;
+        let ry_a = (sub_y0 - pad).max(0) as usize;
+        let rx_b = (sub_x0 + sub_cw as isize + pad).min(ch_w as isize).max(0) as usize;
+        let ry_b = (sub_y0 + sub_ch as isize + pad).min(ch_h as isize).max(0) as usize;
+        if rx_b.saturating_sub(rx_a) < sub_cw || ry_b.saturating_sub(ry_a) < sub_ch {
             return None;
         }
 
+        let q_sub = q.slice(s![qy0..qy1, qx0..qx1]);
         let roi = raster.gray.slice(s![ry_a..ry_b, rx_a..rx_b]);
         let nz_cnt = roi.iter().filter(|&&v| v > 2).count();
         let nz_mean = nz_cnt as f64 / roi.len() as f64;
-        if nz_mean < 0.40 || array_std_u8(roi) < 6.0 || array_std_u8(q.view()) < 6.0 {
+        if nz_mean < 0.40 || array_std_u8(roi) < 6.0 || array_std_u8(q_sub) < 6.0 {
             return None;
         }
 
-        let qg = sobel_magnitude_u8_f32(q.view()).ok()?;
+        let qg = sobel_magnitude_u8_f32(q_sub).ok()?;
         let rg = sobel_magnitude_u8_f32(roi).ok()?;
         let res = fast_match_template_ccoeff_f32(rg.view(), qg.view())?;
-        Some((res, x0_f, y0_f, rx_a, ry_a, pow2z))
+        Some((res, sub_x0_f, sub_y0_f, rx_a, ry_a, pow2z))
     }
 
     pub fn score_terrain_alignment(
@@ -6609,6 +6656,223 @@ mod tests {
                 "missed waypoint ({tx},{ty}) on cyan-flooded frame (best_d={best_d:.1}, cands={cands:?})"
             );
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn map7_zoomed_in_locate_uses_calibrated_slider_scale_for_multi_inlier_lock() {
+        let base = make_temp_dir("map7_scale_lock");
+        let mm_path = base.join("multimap.json");
+        // 5 true Map 7 waypoints visible at scale 0.625 centered on (-500.0, 100.0),
+        // plus 2 decoy waypoints spaced at old wrong scale 0.5138 around (300.0, -400.0).
+        std::fs::write(
+            &mm_path,
+            r#"{
+                "version": "4.0.0",
+                "maps": {
+                    "7": {
+                        "id": 7,
+                        "name": "Enkanomiya",
+                        "waypoints": [
+                            {"id": 1, "label_id": 3, "is_primary": true, "x_pos": -800.0, "y_pos": -100.0, "area_id": 5},
+                            {"id": 2, "label_id": 3, "is_primary": true, "x_pos": -275.0, "y_pos": -125.0, "area_id": 5},
+                            {"id": 3, "label_id": 3, "is_primary": true, "x_pos": -175.0, "y_pos": 225.0, "area_id": 5},
+                            {"id": 4, "label_id": 3, "is_primary": true, "x_pos": -725.0, "y_pos": 300.0, "area_id": 5},
+                            {"id": 5, "label_id": 3, "is_primary": true, "x_pos": -900.0, "y_pos": 112.5, "area_id": 5},
+                            {"id": 101, "label_id": 3, "is_primary": true, "x_pos": 80.0, "y_pos": -400.0, "area_id": 5},
+                            {"id": 102, "label_id": 3, "is_primary": true, "x_pos": 511.592, "y_pos": -420.552, "area_id": 5}
+                        ]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let loc = MapLocator::with_paths(
+            LocatorPaths {
+                db_path: Some(mm_path),
+                terrain_npz_path: Some(base.join("absent_t.npz")),
+                cave_masks_npz_path: Some(base.join("absent_c.npz")),
+                ui_anchors_npz_path: Some(base.join("absent_u.npz")),
+                legacy_underground_db_path: None,
+            },
+            Some(Arc::new(FixedOcrProvider("Enkanomiya"))),
+        );
+
+        let true_scale = 0.625;
+        let true_wx = -500.0;
+        let true_wy = 100.0;
+        let true_tx = true_wx - true_scale * 1280.0;
+        let true_ty = true_wy - true_scale * 720.0;
+
+        // Mid-tone ocean backdrop BGR [95, 85, 70] avoids both cyan terrain flood and dark-disc rejection.
+        let mut frame = Array3::<u8>::zeros((1440, 2560, 3));
+        for y in 0..1440 {
+            for x in 0..2560 {
+                frame[[y, x, 0]] = 95;
+                frame[[y, x, 1]] = 85;
+                frame[[y, x, 2]] = 70;
+            }
+        }
+        paint_player_arrow_bgr(&mut frame, 1280.0, 720.0, 27.0);
+
+        for (wx, wy) in [
+            (-800.0, -100.0),
+            (-275.0, -125.0),
+            (-175.0, 225.0),
+            (-725.0, 300.0),
+            (-900.0, 112.5),
+        ] {
+            let sx = (wx - true_tx) / true_scale;
+            let sy = (wy - true_ty) / true_scale - 5.0; // compensate label 3 anchor +5y
+            paint_cyan_white_waypoint(&mut frame, sx, sy);
+        }
+
+        let slider = ZoomSliderResult {
+            success: true,
+            found: true,
+            ratio_t: 0.682_292,
+            rho: crate::zoom_slider::RHO_MIN + 0.682_292 * crate::zoom_slider::RHO_SPAN,
+            scale: 0.0,
+            match_score: 0.99,
+            score: 0.99,
+            ccoeff: 0.99,
+            box_coords: [0; 4],
+            x_track: 0.0,
+            y_thumb_global: 0.0,
+            total_span: 256.0,
+        };
+        let res = loc
+            .locate_player(frame.view(), true, Some(&slider))
+            .expect("locate_player result");
+        assert!(res.has_world_coords && res.map_id == Some(7), "{res:?}");
+        assert!(
+            res.inliers_count.unwrap_or(0) >= 4,
+            "expected >= 4 inliers on Map 7, got {:?} at ({:?}, {:?}) scale={:?}",
+            res.inliers_count,
+            res.world_x,
+            res.world_y,
+            res.scale
+        );
+        let got_scale = res.scale.expect("scale");
+        assert!(
+            (got_scale - true_scale).abs() / true_scale <= 0.02,
+            "unexpected scale {got_scale:.5} (expected {true_scale:.5})"
+        );
+        let err = (res.world_x.unwrap() - true_wx).hypot(res.world_y.unwrap() - true_wy);
+        assert!(
+            err < 15.0,
+            "Map 7 locate error {err:.2}w >= 15.0w (got ({:?}, {:?}), expected ({true_wx}, {true_wy}))",
+            res.world_x,
+            res.world_y
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn match_terrain_patch_clips_border_overhang_for_edge_views() {
+        let base = make_temp_dir("terrain_border_clip");
+        let mm_path = base.join("multimap.json");
+        std::fs::write(
+            &mm_path,
+            r#"{
+                "version": "4.0.0",
+                "maps": {
+                    "7": {
+                        "id": 7,
+                        "name": "Enkanomiya",
+                        "waypoints": [
+                            {"id": 1, "label_id": 3, "is_primary": true, "x_pos": 200.0, "y_pos": 300.0, "area_id": 5},
+                            {"id": 2, "label_id": 3, "is_primary": true, "x_pos": 502.0, "y_pos": 300.0, "area_id": 5},
+                            {"id": 3, "label_id": 3, "is_primary": true, "x_pos": 2200.0, "y_pos": 300.0, "area_id": 5},
+                            {"id": 4, "label_id": 3, "is_primary": true, "x_pos": 2500.0, "y_pos": 300.0, "area_id": 5}
+                        ]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut loc = MapLocator::with_paths(
+            LocatorPaths {
+                db_path: Some(mm_path),
+                terrain_npz_path: Some(base.join("absent_t.npz")),
+                cave_masks_npz_path: Some(base.join("absent_c.npz")),
+                ui_anchors_npz_path: Some(base.join("absent_u.npz")),
+                legacy_underground_db_path: None,
+            },
+            None,
+        );
+        let raster = Arc::new(build_synthetic_terrain_raster(800, 1800));
+        let mut tmap = BTreeMap::new();
+        tmap.insert(7, Arc::clone(&raster));
+        loc.set_terrain_data(tmap);
+
+        // True edge view: scale=1.0, tx=-290.0, ty=0.0 on 1280x720.
+        // At rx0=204..1075, cw=436 and x0_f=(204-290)*0.5=-43.0 (~90% overlap, left overhang).
+        let mut frame_gray = render_frame_gray_from_terrain(&raster, 1280, 720, 1.0, -290.0, 0.0, 0.0);
+        for y in 0..720 {
+            for x in 0..290 {
+                frame_gray[[y, x]] = 15;
+            }
+        }
+
+        let sc_edge = loc.score_terrain_alignment(Some(frame_gray.view()), 7, 1.0, -290.0, 0.0, 8);
+        assert!(
+            sc_edge > 0.65,
+            "expected strong Sobel score on 90%-overlapping edge view, got {sc_edge:.4}"
+        );
+
+        let (tx_ref, ty_ref, ok) = loc.refine_transform_with_terrain(
+            Some(frame_gray.view()),
+            7,
+            1.0,
+            -294.0,
+            3.0,
+            12,
+            false,
+        );
+        assert!(ok, "expected terrain refinement to succeed near map border");
+        assert!(
+            (tx_ref - (-290.0)).hypot(ty_ref - 0.0) < 1.5,
+            "refined transform ({tx_ref:.2}, {ty_ref:.2}) drifted from (-290.0, 0.0)"
+        );
+
+        // Far off-map hypothesis (< 50% overlap) must still be rejected.
+        let sc_far = loc.score_terrain_alignment(Some(frame_gray.view()), 7, 1.0, -1000.0, 0.0, 8);
+        assert_eq!(
+            sc_far, 0.0,
+            "expected far off-map hypothesis to return 0.0, got {sc_far:.4}"
+        );
+
+        // End-to-end 2-point selection must prefer the true overhanging edge pair over the decoy.
+        let m7 = loc.map_meta(7).unwrap();
+        let all_idx: Vec<usize> = (0..m7.waypoints.len()).collect();
+        let cands = [(490.0, 300.0, 400), (790.0, 300.0, 400)];
+        let (_, _, t_vec, _) = loc
+            .match_single_map(
+                &cands,
+                7,
+                &m7.waypoints,
+                &all_idx,
+                12,
+                1280,
+                0.80,
+                None,
+                Some((640.0, 360.0)),
+                true,
+                Some(1.0),
+                Some(frame_gray.view()),
+            )
+            .expect("2-point fallback match");
+        assert!(
+            (t_vec[0] - (-290.0)).abs() < 20.0 && t_vec[1].abs() < 20.0,
+            "expected overhanging edge pair near (-290, 0), got ({:.1}, {:.1})",
+            t_vec[0],
+            t_vec[1]
+        );
+
         let _ = std::fs::remove_dir_all(&base);
     }
 }

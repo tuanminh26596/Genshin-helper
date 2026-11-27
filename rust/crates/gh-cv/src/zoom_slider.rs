@@ -41,6 +41,21 @@ pub const MAP40_SCALE_SLOPE_1440P: f64 = 1.474;
 pub const MAP40_SCALE_MIN_1440P: f64 = 0.18;
 pub const MAP40_SCALE_MAX_1440P: f64 = 1.66;
 
+/// Map 7 (Enkanomiya) linear scale law @2560x1440 (`s_7(t) = MID - SLOPE * (t - 0.50)`).
+/// Calibrated via OLS across 7 distinct zoom levels (14 frames from `sess_20261127_210209`,
+/// `sess_20261127_011306`, and `sess_20261127_082307`, verified by both isometric waypoint LSQ
+/// and full-resolution Sobel terrain correlation peaks):
+///   t=0.2760 -> 1.0182 (old 0.9182, -9.8%),  t=0.3229 -> 0.9698 (-10.1%),
+///   t=0.3333 -> 0.9620 (-10.5%),             t=0.4323 -> 0.8666 (-12.0%),
+///   t=0.5000 -> 0.8028 (-13.4%),             t=0.5833 -> 0.7216 (-15.1%),
+///   t=0.6823 -> 0.6248 (-17.8%).
+/// At t=1.0 (max zoom-in) s_7(1.0) = 0.3196, matching Map 2's SCALE_T1_1440P (0.3186).
+/// Max relative residual across t in [0.276, 0.682]: 0.22%.
+pub const MAP7_SCALE_MID_1440P: f64 = 0.8013;
+pub const MAP7_SCALE_SLOPE_1440P: f64 = 0.9635;
+pub const MAP7_SCALE_MIN_1440P: f64 = 0.25;
+pub const MAP7_SCALE_MAX_1440P: f64 = 1.35;
+
 const ZOOM_THUMB_TEMPLATE_PNG: &[u8] = include_bytes!("../../../../assets/zoom_thumb_template.png");
 
 /// Per-map scale multipliers relative to Map 2 (Teyvat) at the same zoom slider ratio `t`
@@ -52,7 +67,7 @@ pub const fn map_scale_multiplier(map_id: i32) -> f64 {
         36 => 0.728,
         34 => 0.713,
         9 => 0.762,
-        7 => 0.620,
+        7 => 0.715,
         37 => 0.713,
         _ => 0.75,
     }
@@ -363,6 +378,11 @@ impl ZoomSliderDetector {
                 .clamp(MAP40_SCALE_MIN_1440P, MAP40_SCALE_MAX_1440P);
             return Some(s_40 * fw_ratio);
         }
+        if map_id == 7 {
+            let s_7 = (MAP7_SCALE_MID_1440P - MAP7_SCALE_SLOPE_1440P * (t - 0.50))
+                .clamp(MAP7_SCALE_MIN_1440P, MAP7_SCALE_MAX_1440P);
+            return Some(s_7 * fw_ratio);
+        }
         let s_m2 = (SCALE_T0_1440P + (SCALE_T1_1440P - SCALE_T0_1440P) * t) * fw_ratio;
         Some(s_m2 * map_scale_multiplier(map_id))
     }
@@ -477,5 +497,56 @@ mod tests {
                 rel_err * 100.0
             );
         }
+    }
+
+    #[test]
+    fn map7_scale_matches_measured_calibration_points() {
+        // 7 distinct Map 7 (Enkanomiya) zoom levels @2560x1440 verified via waypoint LSQ &
+        // full-res Sobel terrain peaks across sess_20261127_210209, 011306, and 082307:
+        let measured = [
+            (0.276_042, 1.018_19),
+            (0.322_917, 0.969_79),
+            (0.333_333, 0.961_99),
+            (0.432_292, 0.866_56),
+            (0.500_000, 0.802_80),
+            (0.583_333, 0.721_56),
+            (0.682_292, 0.624_75),
+        ];
+        let make_res = |t: f64| ZoomSliderResult {
+            success: true,
+            found: true,
+            ratio_t: t,
+            rho: RHO_MIN + t * RHO_SPAN,
+            scale: 0.0,
+            match_score: 1.0,
+            score: 1.0,
+            ccoeff: 1.0,
+            box_coords: [0; 4],
+            x_track: 0.0,
+            y_thumb_global: 0.0,
+            total_span: 256.0,
+        };
+        for (t, exp_s) in measured {
+            let res = make_res(t);
+            let got = ZoomSliderDetector::get_map_scale(Some(&res), 7, 2560)
+                .expect("map 7 scale");
+            let rel_err = (got - exp_s).abs() / exp_s;
+            assert!(
+                rel_err <= 0.005,
+                "t={t:.6}: got={got:.5}, expected={exp_s:.5} (rel_err={:.3}%)",
+                rel_err * 100.0
+            );
+        }
+
+        // 1080p width scaling (2560 / 1920 = 4/3) at t=0.5
+        let r_mid = make_res(0.5);
+        let s_1440 = ZoomSliderDetector::get_map_scale(Some(&r_mid), 7, 2560).unwrap();
+        let s_1080 = ZoomSliderDetector::get_map_scale(Some(&r_mid), 7, 1920).unwrap();
+        assert!((s_1080 / s_1440 - 2560.0 / 1920.0).abs() < 1e-6);
+        let exp_1080 = 0.802_80 * (2560.0 / 1920.0);
+        assert!(
+            (s_1080 - exp_1080).abs() / exp_1080 <= 0.005,
+            "1080p scale mismatch: got={s_1080:.5}, expected={exp_1080:.5}"
+        );
     }
 }
