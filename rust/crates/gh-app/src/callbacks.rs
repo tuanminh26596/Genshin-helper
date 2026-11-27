@@ -153,6 +153,20 @@ impl ServerCallbacks for AppServerCallbacks {
         let req = payload.as_object().cloned().unwrap_or_default();
         let event_type = json_str_trimmed(req.get("event_type")).to_ascii_uppercase();
         let status = json_str_trimmed(req.get("status")).to_ascii_lowercase();
+        let seq = req
+            .get("seq")
+            .and_then(|v| {
+                v.as_u64()
+                    .or_else(|| json_i64(Some(v)).and_then(|n| u64::try_from(n).ok()))
+            })
+            .unwrap_or(0);
+        self.state.record_session_event_with("web_feedback", || {
+            json!({
+                "event_type": event_type,
+                "status": status,
+                "seq": seq,
+            })
+        });
         let action = json_str_trimmed(req.get("action")).to_ascii_lowercase();
         let pin_id = json_str_trimmed(req.get("pin_id"));
         let title_raw = json_str_trimmed(req.get("title"));
@@ -1312,6 +1326,83 @@ mod tests {
         let meta_mark = state.nav_hud.last_render_meta();
         assert_eq!(meta_mark.subtitle, want_mark);
         assert_eq!(meta_mark.palette, gh_hud::nav_hud::HudPalette::Warning);
+
+        state.nav_hud.close();
+        state.hud_toast.close();
+        state.guide_fetcher.stop();
+        state.audio.close();
+        state.capturer.close();
+        let _ = std::fs::remove_dir_all(&tmp_root);
+    }
+
+    #[test]
+    fn on_action_feedback_records_web_feedback_event_only_when_recorder_active() {
+        let seq_id = CB_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp_root = std::env::temp_dir().join(format!(
+            "gh_app_cb_fb_ev_{}_{seq_id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_root);
+        std::fs::create_dir_all(&tmp_root).unwrap();
+
+        let state = make_test_state(&tmp_root);
+        let cb = AppServerCallbacks::new(Arc::clone(&state));
+        let rec = crate::session_recorder::SessionRecorder::new(
+            crate::session_recorder::SessionRecorderConfig {
+                seconds: 0.0,
+                fps: crate::session_recorder::DEFAULT_SESSION_FPS,
+                codec: crate::session_recorder::SessionCodec::Libx264Rgb,
+                ffmpeg_path: std::env::current_exe().unwrap(),
+                out_root: tmp_root.join("out"),
+                tiles_dir: tmp_root.join("tiles"),
+                ug_overlays_dir: tmp_root.join("ug"),
+                paimon_cache_path: tmp_root.join("paimon.npz"),
+                maps_db: Arc::clone(&state.maps_db),
+                max_queue: 16,
+            },
+            None,
+        )
+        .unwrap();
+
+        // Active recorder receives events for every feedback, including missing seq -> 0
+        *state.session_recorder.lock().unwrap() = Some(Arc::clone(&rec));
+        let _ = cb
+            .on_action_feedback(&json!({
+                "event_type": "sync_position_only",
+                "status": "Synced",
+                "seq": 42
+            }))
+            .unwrap();
+        let _ = cb
+            .on_action_feedback(&json!({
+                "event_type": "NAV_MARK",
+                "status": "marked"
+            }))
+            .unwrap();
+
+        let evs = rec.take_pending_events_for_test();
+        assert_eq!(evs.len(), 2);
+        assert_eq!(evs[0]["kind"], "web_feedback");
+        assert_eq!(evs[0]["event_type"], "SYNC_POSITION_ONLY");
+        assert_eq!(evs[0]["status"], "synced");
+        assert_eq!(evs[0]["seq"], 42);
+        assert!(evs[0]["ts"].as_f64().is_some());
+
+        assert_eq!(evs[1]["kind"], "web_feedback");
+        assert_eq!(evs[1]["event_type"], "NAV_MARK");
+        assert_eq!(evs[1]["status"], "marked");
+        assert_eq!(evs[1]["seq"], 0);
+
+        // Finished recorder records nothing
+        rec.finish();
+        let _ = cb
+            .on_action_feedback(&json!({
+                "event_type": "SYNC_POSITION_ONLY",
+                "status": "synced",
+                "seq": 43
+            }))
+            .unwrap();
+        assert!(rec.take_pending_events_for_test().is_empty());
 
         state.nav_hud.close();
         state.hud_toast.close();

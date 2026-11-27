@@ -115,6 +115,7 @@ struct RecorderShared {
     write_errors: usize,
     capture_paths_seen: BTreeSet<String>,
     pending_hotkeys: Vec<Value>,
+    pending_events: Vec<Value>,
     visited_coords: Vec<(i32, f64, f64)>,
     visited_floors: HashSet<(i32, i32)>,
 }
@@ -196,6 +197,7 @@ impl SessionRecorder {
                     write_errors: 0,
                     capture_paths_seen: BTreeSet::new(),
                     pending_hotkeys: Vec::new(),
+                    pending_events: Vec::new(),
                     visited_coords: Vec::new(),
                     visited_floors: HashSet::new(),
                 }),
@@ -237,6 +239,32 @@ impl SessionRecorder {
         }));
     }
 
+    /// Queues a generic app event attached to the next recorded frame's `events` array.
+    /// No-op when the recorder is inactive.
+    pub fn record_event(&self, ts: f64, kind: &str, fields: Value) {
+        if !self.active() {
+            return;
+        }
+        let entry = format_event_entry(ts, kind, fields);
+        let (lock, _) = &*self.shared;
+        let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+        sh.pending_events.push(entry);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_pending_events_for_test(&self) -> Vec<Value> {
+        let (lock, _) = &*self.shared;
+        let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut sh.pending_events)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_pending_hotkeys_for_test(&self) -> Vec<Value> {
+        let (lock, _) = &*self.shared;
+        let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut sh.pending_hotkeys)
+    }
+
     /// Returns `true` if enough time elapsed since the last captured session frame to take a new one.
     pub fn should_capture_at(&self, ts: f64) -> bool {
         let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -258,7 +286,7 @@ impl SessionRecorder {
             None => return,
         };
 
-        let (idx, reached_target, dropped_so_far, hotkeys) = {
+        let (idx, reached_target, dropped_so_far, hotkeys, events) = {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.finished {
                 return;
@@ -309,47 +337,14 @@ impl SessionRecorder {
             }
 
             let hotkeys = std::mem::take(&mut sh.pending_hotkeys);
+            let events = std::mem::take(&mut sh.pending_events);
             sh.frames += 1;
             let idx = sh.frames;
             let dropped = sh.dropped_queue + sh.dropped_resize;
-            (idx, reached_target, dropped, hotkeys)
+            (idx, reached_target, dropped, hotkeys, events)
         };
 
-        let mut rec = Map::new();
-        rec.insert("i".to_owned(), json!(idx));
-        rec.insert(
-            "ts".to_owned(),
-            json!(((ts * 10_000.0).round()) / 10_000.0),
-        );
-        rec.insert("frame_w".to_owned(), json!(fmeta.client_rect.width));
-        rec.insert("frame_h".to_owned(), json!(fmeta.client_rect.height));
-        rec.insert(
-            "client_rect".to_owned(),
-            json!([
-                fmeta.client_rect.x,
-                fmeta.client_rect.y,
-                fmeta.client_rect.width,
-                fmeta.client_rect.height
-            ]),
-        );
-        rec.insert(
-            "cursor_client_pos".to_owned(),
-            match fmeta.cursor_client_pos {
-                Some((cx, cy)) => json!([
-                    ((cx * 10.0).round()) / 10.0,
-                    ((cy * 10.0).round()) / 10.0
-                ]),
-                None => Value::Null,
-            },
-        );
-        rec.insert("capture_path".to_owned(), Value::String(fmeta.capture_path));
-        rec.insert("dropped_so_far".to_owned(), json!(dropped_so_far));
-        if !hotkeys.is_empty() {
-            rec.insert("hotkeys".to_owned(), Value::Array(hotkeys));
-        }
-        for (k, v) in fmeta.extra {
-            rec.insert(k, v);
-        }
+        let meta = build_frame_meta_record(idx, ts, fmeta, dropped_so_far, hotkeys, events);
 
         {
             let (lock, cv) = &*self.shared;
@@ -357,11 +352,7 @@ impl SessionRecorder {
             if sh.queue.len() >= sh.max_queue {
                 sh.dropped_queue += 1;
             } else {
-                sh.queue.push_back(RecItem {
-                    idx,
-                    bgr,
-                    meta: Value::Object(rec),
-                });
+                sh.queue.push_back(RecItem { idx, bgr, meta });
                 cv.notify_one();
             }
         }
@@ -580,6 +571,73 @@ impl SessionRecorder {
             let _ = handle.join();
         }
     }
+}
+
+fn format_event_entry(ts: f64, kind: &str, fields: Value) -> Value {
+    let mut obj = match fields {
+        Value::Object(m) => m,
+        Value::Null => Map::new(),
+        other => {
+            let mut m = Map::new();
+            m.insert("value".to_owned(), other);
+            m
+        }
+    };
+    obj.insert(
+        "ts".to_owned(),
+        json!(((ts * 10_000.0).round()) / 10_000.0),
+    );
+    obj.insert("kind".to_owned(), Value::String(kind.to_owned()));
+    Value::Object(obj)
+}
+
+fn build_frame_meta_record(
+    idx: usize,
+    ts: f64,
+    fmeta: SessionFrameMeta,
+    dropped_so_far: usize,
+    hotkeys: Vec<Value>,
+    events: Vec<Value>,
+) -> Value {
+    let mut rec = Map::new();
+    rec.insert("i".to_owned(), json!(idx));
+    rec.insert(
+        "ts".to_owned(),
+        json!(((ts * 10_000.0).round()) / 10_000.0),
+    );
+    rec.insert("frame_w".to_owned(), json!(fmeta.client_rect.width));
+    rec.insert("frame_h".to_owned(), json!(fmeta.client_rect.height));
+    rec.insert(
+        "client_rect".to_owned(),
+        json!([
+            fmeta.client_rect.x,
+            fmeta.client_rect.y,
+            fmeta.client_rect.width,
+            fmeta.client_rect.height
+        ]),
+    );
+    rec.insert(
+        "cursor_client_pos".to_owned(),
+        match fmeta.cursor_client_pos {
+            Some((cx, cy)) => json!([
+                ((cx * 10.0).round()) / 10.0,
+                ((cy * 10.0).round()) / 10.0
+            ]),
+            None => Value::Null,
+        },
+    );
+    rec.insert("capture_path".to_owned(), Value::String(fmeta.capture_path));
+    rec.insert("dropped_so_far".to_owned(), json!(dropped_so_far));
+    if !hotkeys.is_empty() {
+        rec.insert("hotkeys".to_owned(), Value::Array(hotkeys));
+    }
+    if !events.is_empty() {
+        rec.insert("events".to_owned(), Value::Array(events));
+    }
+    for (k, v) in fmeta.extra {
+        rec.insert(k, v);
+    }
+    Value::Object(rec)
 }
 
 fn ensure_bgr24(frame: &FrameBuf) -> Option<FrameBuf> {
@@ -897,6 +955,126 @@ mod tests {
         assert!(dst_cache.join("tiles").join("2").join("0").join("94_64.webp").is_file());
         assert!(dst_cache.join("ug_overlays").join("2_g10_f77.png").is_file());
         assert!(dst_cache.join("paimon_tpl.npz").is_file());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn record_event_queues_into_next_frame_meta_and_is_noop_when_inactive() {
+        let root = std::env::temp_dir().join(format!(
+            "gh_sess_events_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let db_path = root.join("multimap.json");
+        write_json_atomic(&db_path, &json!({"version": "4.0.0", "maps": {}})).unwrap();
+        let db = Arc::new(load_multimap_db(&db_path).unwrap());
+
+        let rec = SessionRecorder::new(
+            SessionRecorderConfig {
+                seconds: 0.0,
+                fps: DEFAULT_SESSION_FPS,
+                codec: SessionCodec::Libx264Rgb,
+                ffmpeg_path: std::env::current_exe().unwrap(),
+                out_root: root.join("out"),
+                tiles_dir: root.join("tiles"),
+                ug_overlays_dir: root.join("ug"),
+                paimon_cache_path: root.join("paimon.npz"),
+                maps_db: db,
+                max_queue: 16,
+            },
+            None,
+        )
+        .unwrap();
+
+        assert!(rec.active());
+        rec.record_hotkey_event(12.34567, "sync");
+        rec.record_event(
+            12.50004,
+            "sync_broadcast",
+            json!({"seq": 7u64, "msg_type": "SYNC_POSITION_ONLY", "map_id": 40}),
+        );
+        rec.record_event(
+            13.25,
+            "web_feedback",
+            json!({"event_type": "SYNC_POSITION_ONLY", "status": "synced", "seq": 7u64}),
+        );
+
+        let hotkeys = rec.take_pending_hotkeys_for_test();
+        let events = rec.take_pending_events_for_test();
+        assert_eq!(hotkeys.len(), 1);
+        assert_eq!(events.len(), 2);
+
+        let frame_meta = build_frame_meta_record(
+            1,
+            13.3,
+            SessionFrameMeta {
+                client_rect: RectI32 {
+                    x: 0,
+                    y: 0,
+                    width: 2560,
+                    height: 1440,
+                },
+                cursor_client_pos: None,
+                capture_path: "gdi".to_owned(),
+                extra: Map::new(),
+            },
+            0,
+            hotkeys,
+            events,
+        );
+
+        // hotkeys preserved intact
+        assert_eq!(frame_meta["hotkeys"][0]["action"], "sync");
+        assert_eq!(frame_meta["hotkeys"][0]["ts"], 12.3457);
+
+        // events attached with ts, kind, and fields
+        let evs = frame_meta["events"].as_array().expect("events array");
+        assert_eq!(evs.len(), 2);
+        assert_eq!(evs[0]["ts"], 12.5);
+        assert_eq!(evs[0]["kind"], "sync_broadcast");
+        assert_eq!(evs[0]["seq"], 7);
+        assert_eq!(evs[0]["msg_type"], "SYNC_POSITION_ONLY");
+        assert_eq!(evs[0]["map_id"], 40);
+        assert_eq!(evs[1]["ts"], 13.25);
+        assert_eq!(evs[1]["kind"], "web_feedback");
+        assert_eq!(evs[1]["event_type"], "SYNC_POSITION_ONLY");
+        assert_eq!(evs[1]["status"], "synced");
+        assert_eq!(evs[1]["seq"], 7);
+
+        // Next frame with no queued events omits `events` key
+        let frame_meta_empty = build_frame_meta_record(
+            2,
+            13.35,
+            SessionFrameMeta {
+                client_rect: RectI32 {
+                    x: 0,
+                    y: 0,
+                    width: 2560,
+                    height: 1440,
+                },
+                cursor_client_pos: None,
+                capture_path: "gdi".to_owned(),
+                extra: Map::new(),
+            },
+            0,
+            rec.take_pending_hotkeys_for_test(),
+            rec.take_pending_events_for_test(),
+        );
+        assert!(frame_meta_empty.get("events").is_none());
+        assert!(frame_meta_empty.get("hotkeys").is_none());
+
+        // Once finished/inactive, record_event is a strict no-op
+        rec.finish();
+        assert!(!rec.active());
+        rec.record_event(
+            14.0,
+            "web_feedback",
+            json!({"event_type": "SYNC_POSITION_ONLY", "status": "synced", "seq": 8u64}),
+        );
+        assert!(rec.take_pending_events_for_test().is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
     }
