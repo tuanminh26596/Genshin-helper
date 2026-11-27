@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "name": "nav_next_cycles_target",
+  "session": "sess_20261127_011805",
+  "description": "Control scenario: deliver 3 map-2 pins along the player path, verify initial nearest selection, then press Alt+E (nav_next) and verify target cycles to the second pin.",
+  "inputs": [
+    {
+      "frame": 355,
+      "web_input": {
+        "callback": "on_nearby_pins",
+        "payload": {
+          "map_id": 2,
+          "pins": [
+            {
+              "id": "scenario:pin_near",
+              "lng": -9433.5,
+              "lat": 4383.5,
+              "name": "Scenario Pin Near"
+            },
+            {
+              "id": "scenario:pin_mid",
+              "lng": -9484.0,
+              "lat": 4387.0,
+              "name": "Scenario Pin Mid"
+            },
+            {
+              "id": "scenario:pin_far",
+              "lng": -9530.0,
+              "lat": 4424.5,
+              "name": "Scenario Pin Far"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "frame": 358,
+      "hotkey": "nav_next"
+    }
+  ],
+  "expect": [
+    {
+      "frame": 356,
+      "nav": {
+        "target_id": "scenario:pin_near",
+        "locked_target_id": null,
+        "user_locked_id": null,
+        "state": "tracking"
+      }
+    },
+    {
+      "frame": 358,
+      "nav": {
+        "target_id": "scenario:pin_mid",
+        "locked_target_id": null,
+        "user_locked_id": "scenario:pin_mid",
+        "state": "tracking"
+      }
+    }
+  ]
+}

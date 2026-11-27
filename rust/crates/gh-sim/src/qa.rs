@@ -9,6 +9,10 @@ use crate::replay::{
     DEFAULT_DRIFT_THRESHOLD_W, ObservedFrame, RecordingFidelityReport, ReplayOptions, ReplayReport,
     angle_diff_deg, percentile, round3, run_replay_with_poses,
 };
+use crate::scenario::{
+    DEFAULT_SCENARIOS_DIR, ScenarioResult, ScenarioSummary, format_scenario_line,
+    load_scenarios_from_dir, run_scenario,
+};
 use crate::timeline::InputReplayReport;
 use gh_app::BUILD_GIT_COMMIT;
 use gh_core::atomic_io::{write_bytes_atomic, write_json_atomic};
@@ -223,6 +227,7 @@ pub struct QaOptions {
     pub ffmpeg_path: Option<PathBuf>,
     pub baseline_path: PathBuf,
     pub gt_file: PathBuf,
+    pub scenarios_dir: Option<PathBuf>,
     pub only: Vec<String>,
     pub out_dir: Option<PathBuf>,
     pub bless: bool,
@@ -380,6 +385,10 @@ pub struct QaReport {
     pub effective_thresholds: QaThresholds,
     pub cli_overrides: QaThresholdOverrides,
     pub sessions: Vec<QaSessionResult>,
+    #[serde(default)]
+    pub scenario_summary: ScenarioSummary,
+    #[serde(default)]
+    pub scenarios: Vec<ScenarioResult>,
 }
 
 /// Returns whether a recorded video codec preserves RGB channels without YUV chroma/range shift.
@@ -1380,6 +1389,14 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
     }
 
     let eff_thresholds = opts.overrides.apply_to(&baseline.thresholds)?;
+    let loaded_scenarios = if opts.bless {
+        Vec::new()
+    } else {
+        match opts.scenarios_dir.as_deref() {
+            Some(dir) => load_scenarios_from_dir(dir, true)?,
+            None => load_scenarios_from_dir(Path::new(DEFAULT_SCENARIOS_DIR), false)?,
+        }
+    };
     let total_t0 = Instant::now();
 
     let header = format_qa_header();
@@ -1652,13 +1669,46 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
         baseline.save_atomic(&opts.baseline_path)?;
     }
 
-    let total_wall_elapsed_s = round3(total_t0.elapsed().as_secs_f64());
     let passed_sessions = results.iter().filter(|r| r.passed).count();
     let total_sessions = results.len();
     let failed_sessions = total_sessions.saturating_sub(passed_sessions);
-    let all_passed = failed_sessions == 0;
+
+    let mut scenario_results = Vec::new();
+    if !opts.bless {
+        let session_dirs_by_name: BTreeMap<String, PathBuf> = session_dirs
+            .iter()
+            .filter_map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|name| (name.to_owned(), p.clone()))
+            })
+            .collect();
+        let selected_scenarios: Vec<_> = loaded_scenarios
+            .iter()
+            .filter(|sc| session_dirs_by_name.contains_key(&sc.session))
+            .collect();
+        for sc in selected_scenarios {
+            let sdir = &session_dirs_by_name[&sc.session];
+            let sc_res = run_scenario(
+                sc,
+                sdir,
+                &opts.data_dir,
+                &opts.gt_file,
+                opts.ffmpeg_path.as_deref(),
+            )?;
+            println!("{}", format_scenario_line(&sc_res));
+            let _ = std::io::stdout().flush();
+            scenario_results.push(sc_res);
+        }
+    }
+    let scenario_summary = ScenarioSummary::from_results(&scenario_results);
+    let total_wall_elapsed_s = round3(total_t0.elapsed().as_secs_f64());
+    let all_passed = failed_sessions == 0 && scenario_summary.fail == 0;
 
     println!("{sep}");
+    if !opts.bless {
+        println!("{}", scenario_summary.format_line());
+    }
     println!(
         "Tổng: {passed_sessions}/{total_sessions} {} | thời gian: {total_wall_elapsed_s:.1}s | baseline: {}",
         if opts.bless { "BLESSED" } else { "ĐẠT" },
@@ -1681,6 +1731,8 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
         effective_thresholds: eff_thresholds,
         cli_overrides: opts.overrides.clone(),
         sessions: results,
+        scenario_summary,
+        scenarios: scenario_results,
     };
 
     if let Some(ref out_dir) = opts.out_dir {
@@ -1943,6 +1995,7 @@ mod tests {
             ffmpeg_path: None,
             baseline_path: baseline_path.clone(),
             gt_file: gt_file.clone(),
+            scenarios_dir: None,
             only: vec![],
             out_dir: Some(out_dir.clone()),
             bless: true,
@@ -1978,6 +2031,7 @@ mod tests {
             ffmpeg_path: None,
             baseline_path: baseline_path.clone(),
             gt_file: gt_file.clone(),
+            scenarios_dir: None,
             only: vec![],
             out_dir: Some(out_dir.clone()),
             bless: false,
@@ -2003,6 +2057,7 @@ mod tests {
             ffmpeg_path: None,
             baseline_path,
             gt_file,
+            scenarios_dir: None,
             only: vec![],
             out_dir: None,
             bless: false,
@@ -2329,6 +2384,7 @@ mod tests {
             ffmpeg_path: None,
             baseline_path,
             gt_file: tmp.0.join("verified_gt.json"),
+            scenarios_dir: None,
             only: vec![],
             out_dir: None,
             bless: false,
@@ -2967,6 +3023,7 @@ mod tests {
             ffmpeg_path: None,
             baseline_path: baseline_path.clone(),
             gt_file: gt_file.clone(),
+            scenarios_dir: None,
             only: vec![],
             out_dir: None,
             bless: true,
@@ -2980,6 +3037,7 @@ mod tests {
             ffmpeg_path: None,
             baseline_path,
             gt_file,
+            scenarios_dir: None,
             only: vec![],
             out_dir: None,
             bless: false,
@@ -3127,5 +3185,329 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(format_nav_col(Some(&web_only)), "hk 0/0 web 2");
+    }
+
+    fn setup_synthetic_qa_session(
+        tmp: &TempDir,
+        session_name: &str,
+        num_frames: usize,
+    ) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let data_dir = tmp.0.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        write_json_atomic(
+            &data_dir.join("multimap_v4.json"),
+            &json!({"version": "4.0.0", "maps": {}}),
+        )
+        .unwrap();
+
+        let sessions_dir = tmp.0.join("qa_sessions");
+        let sdir = sessions_dir.join(session_name);
+        std::fs::create_dir_all(sdir.join("frames")).unwrap();
+        let img = image::RgbaImage::from_pixel(434, 348, image::Rgba([20, 40, 60, 255]));
+        let mut meta = String::new();
+        for i in 1..=num_frames {
+            img.save(sdir.join("frames").join(format!("{i:06}.png")))
+                .unwrap();
+            let ts = 10.0 + (i - 1) as f64 * 0.05;
+            meta.push_str(&format!(
+                "{{\"i\":{i},\"ts\":{ts:.2},\"frame_w\":2560,\"frame_h\":1440,\"state\":\"UNLOCALIZED\"}}\n"
+            ));
+        }
+        std::fs::write(sdir.join("meta.jsonl"), meta).unwrap();
+
+        let baseline_path = tmp.0.join("qa_baseline.json");
+        let gt_file = tmp.0.join("verified_gt.json");
+        let bless = run_qa(&QaOptions {
+            sessions_dir: sessions_dir.clone(),
+            data_dir: data_dir.clone(),
+            ffmpeg_path: None,
+            baseline_path: baseline_path.clone(),
+            gt_file: gt_file.clone(),
+            scenarios_dir: None,
+            only: vec![],
+            out_dir: None,
+            bless: true,
+            overrides: QaThresholdOverrides::default(),
+        })
+        .unwrap();
+        assert!(bless.passed);
+        (sessions_dir, data_dir, baseline_path, gt_file)
+    }
+
+    #[test]
+    fn qa_scenarios_pass_known_fail_and_only_filter() {
+        use crate::scenario::ScenarioOutcome;
+
+        let tmp = TempDir::new("gh_sim_qa_scenarios_ok");
+        let (sessions_dir, data_dir, baseline_path, gt_file) =
+            setup_synthetic_qa_session(&tmp, "sess_synth_sc", 5);
+        let out_dir = tmp.0.join("out");
+        let scenarios_dir = tmp.0.join("scenarios");
+        std::fs::create_dir_all(&scenarios_dir).unwrap();
+
+        let pins_input = json!({
+            "frame": 1,
+            "web_input": {
+                "callback": "on_nearby_pins",
+                "payload": {
+                    "map_id": 2,
+                    "pins": [
+                        {"id": "101", "lat": 100.0, "lng": 200.0, "name": "Pin A"},
+                        {"id": "102", "lat": 120.0, "lng": 220.0, "name": "Pin B"}
+                    ]
+                }
+            }
+        });
+
+        // 1. Control scenario (pass) — stops at frame 2 out of 5!
+        std::fs::write(
+            scenarios_dir.join("01_pass.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "name": "control_pass",
+                "session": "sess_synth_sc",
+                "description": "nav_next switches target from 101 to 102",
+                "inputs": [
+                    pins_input,
+                    {"frame": 2, "hotkey": "nav_next"}
+                ],
+                "expect": [
+                    {"frame": 1, "nav": {"target_id": null, "user_locked_id": null}},
+                    {"frame": 2, "nav": {"target_id": "102", "user_locked_id": "102", "locked_target_id": null}}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // 2. Known-bug scenario (known-fail): nav_unlock after nav_next leaves user_locked_id set
+        std::fs::write(
+            scenarios_dir.join("02_known_fail.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "name": "unlock_after_next_bug",
+                "session": "sess_synth_sc",
+                "description": "nav_unlock should clear user_locked_id from nav_next",
+                "known_bug": "nav_unlock does not clear nav_next user lock",
+                "inputs": [
+                    pins_input,
+                    {"frame": 2, "hotkey": "nav_next"},
+                    {"frame": 3, "hotkey": "nav_unlock"}
+                ],
+                "expect": [
+                    {"frame": 3, "within_frames": 1, "nav": {"user_locked_id": null}}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // 3. Scenario for another session — filtered out because only sess_synth_sc is selected
+        std::fs::write(
+            scenarios_dir.join("03_other_session.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "name": "other_session_skip",
+                "session": "sess_not_selected",
+                "description": "ignored when session not in selection",
+                "inputs": [],
+                "expect": [
+                    {"frame": 1, "nav": {"target_id": "nonexistent"}}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Run QA with pass + known-fail -> MUST pass overall!
+        let rep = run_qa(&QaOptions {
+            sessions_dir,
+            data_dir,
+            ffmpeg_path: None,
+            baseline_path,
+            gt_file,
+            scenarios_dir: Some(scenarios_dir),
+            only: vec!["sess_synth_sc".to_owned()],
+            out_dir: Some(out_dir.clone()),
+            bless: false,
+            overrides: QaThresholdOverrides::default(),
+        })
+        .unwrap();
+
+        assert!(rep.passed, "known-fail must NOT fail QA");
+        assert_eq!(rep.scenarios.len(), 2);
+        assert_eq!(rep.scenario_summary.pass, 1);
+        assert_eq!(rep.scenario_summary.fail, 0);
+        assert_eq!(rep.scenario_summary.known_fail, 1);
+        assert_eq!(rep.scenario_summary.xpass, 0);
+        assert_eq!(
+            rep.scenario_summary.format_line(),
+            "Scenarios: pass 1 | fail 0 | known-fail 1 | xpass 0"
+        );
+        assert_eq!(rep.scenarios[0].outcome, ScenarioOutcome::Pass);
+        assert_eq!(rep.scenarios[0].frames_replayed, 2); // truncated to last needed frame (2 of 5)
+        assert_eq!(rep.scenarios[1].outcome, ScenarioOutcome::KnownFail);
+        assert_eq!(rep.scenarios[1].frames_replayed, 4); // frame 3 + within_frames 1 = 4 of 5
+
+        // Verify scenario results were serialized into qa_report.json
+        let saved_raw = std::fs::read_to_string(out_dir.join(QA_REPORT_FILENAME)).unwrap();
+        let saved_val: Value = serde_json::from_str(&saved_raw).unwrap();
+        assert_eq!(saved_val["scenario_summary"]["pass"], json!(1));
+        assert_eq!(saved_val["scenario_summary"]["known_fail"], json!(1));
+        assert_eq!(saved_val["scenarios"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn qa_scenarios_xpass_does_not_fail_qa() {
+        use crate::scenario::ScenarioOutcome;
+
+        let tmp = TempDir::new("gh_sim_qa_scenarios_xpass");
+        let (sessions_dir, data_dir, baseline_path, gt_file) =
+            setup_synthetic_qa_session(&tmp, "sess_synth_xpass", 4);
+        let scenarios_dir = tmp.0.join("scenarios");
+        std::fs::create_dir_all(&scenarios_dir).unwrap();
+
+        // Xpass scenario: known_bug set, but expectations pass (explicit lock_target -> nav_unlock works)
+        std::fs::write(
+            scenarios_dir.join("01_xpass.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "name": "unlock_after_lock_xpass",
+                "session": "sess_synth_xpass",
+                "description": "explicit lock_target cleared by nav_unlock",
+                "known_bug": "stale known bug marker",
+                "inputs": [
+                    {
+                        "frame": 1,
+                        "web_input": {
+                            "callback": "on_nearby_pins",
+                            "payload": {
+                                "map_id": 2,
+                                "pins": [
+                                    {"id": "101", "lat": 100.0, "lng": 200.0, "name": "Pin A"}
+                                ]
+                            }
+                        }
+                    },
+                    {
+                        "frame": 2,
+                        "web_input": {
+                            "callback": "on_nav_command",
+                            "payload": {
+                                "action": "lock_target",
+                                "pin": {"id": "103", "lat": 50.0, "lng": 60.0, "map_id": 2, "name": "Pin C"}
+                            }
+                        }
+                    },
+                    {"frame": 3, "hotkey": "nav_unlock"}
+                ],
+                "expect": [
+                    {"frame": 2, "nav": {"locked_target_id": "103"}},
+                    {"frame": 3, "nav": {"locked_target_id": null}}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let rep = run_qa(&QaOptions {
+            sessions_dir,
+            data_dir,
+            ffmpeg_path: None,
+            baseline_path,
+            gt_file,
+            scenarios_dir: Some(scenarios_dir),
+            only: vec!["sess_synth_xpass".to_owned()],
+            out_dir: None,
+            bless: false,
+            overrides: QaThresholdOverrides::default(),
+        })
+        .unwrap();
+
+        assert!(rep.passed, "xpass must NOT fail QA");
+        assert_eq!(rep.scenario_summary.xpass, 1);
+        assert_eq!(rep.scenarios[0].outcome, ScenarioOutcome::Xpass);
+        assert_eq!(rep.scenarios[0].frames_replayed, 3);
+    }
+
+    #[test]
+    fn qa_scenarios_seeded_fault_fails_qa_and_missing_dir_errors() {
+        use crate::scenario::ScenarioOutcome;
+
+        let tmp = TempDir::new("gh_sim_qa_scenarios_fail");
+        let (sessions_dir, data_dir, baseline_path, gt_file) =
+            setup_synthetic_qa_session(&tmp, "sess_synth_fail", 3);
+        let scenarios_dir = tmp.0.join("scenarios");
+        std::fs::create_dir_all(&scenarios_dir).unwrap();
+
+        // Seeded fault: wrong expected target_id in a non-known-bug scenario MUST fail QA!
+        std::fs::write(
+            scenarios_dir.join("01_seeded_fail.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "name": "seeded_wrong_target",
+                "session": "sess_synth_fail",
+                "description": "wrong expected target_id must fail qa",
+                "inputs": [
+                    {
+                        "frame": 1,
+                        "web_input": {
+                            "callback": "on_nearby_pins",
+                            "payload": {
+                                "map_id": 2,
+                                "pins": [
+                                    {"id": "101", "lat": 100.0, "lng": 200.0, "name": "Pin A"},
+                                    {"id": "102", "lat": 120.0, "lng": 220.0, "name": "Pin B"}
+                                ]
+                            }
+                        }
+                    },
+                    {"frame": 2, "hotkey": "nav_next"}
+                ],
+                "expect": [
+                    {"frame": 2, "nav": {"target_id": "wrong_pin_999"}}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let fail_rep = run_qa(&QaOptions {
+            sessions_dir: sessions_dir.clone(),
+            data_dir: data_dir.clone(),
+            ffmpeg_path: None,
+            baseline_path: baseline_path.clone(),
+            gt_file: gt_file.clone(),
+            scenarios_dir: Some(scenarios_dir),
+            only: vec!["sess_synth_fail".to_owned()],
+            out_dir: None,
+            bless: false,
+            overrides: QaThresholdOverrides::default(),
+        })
+        .unwrap();
+
+        assert!(!fail_rep.passed, "a non-known-bug scenario fail MUST fail QA");
+        assert_eq!(fail_rep.failed_sessions, 0, "pose QA itself remains unaffected");
+        assert_eq!(fail_rep.scenario_summary.fail, 1);
+        assert_eq!(fail_rep.scenarios[0].outcome, ScenarioOutcome::Fail);
+        let msg = fail_rep.scenarios[0].first_failure.as_deref().unwrap();
+        assert!(msg.contains("wrong_pin_999"), "got: {msg}");
+        assert!(msg.contains("102"), "got: {msg}");
+
+        // Explicit non-existent --scenarios dir returns Err before replaying
+        let err = run_qa(&QaOptions {
+            sessions_dir,
+            data_dir,
+            ffmpeg_path: None,
+            baseline_path,
+            gt_file,
+            scenarios_dir: Some(tmp.0.join("does_not_exist")),
+            only: vec![],
+            out_dir: None,
+            bless: false,
+            overrides: QaThresholdOverrides::default(),
+        })
+        .unwrap_err();
+        assert!(err.contains("scenarios directory does not exist"), "got: {err}");
     }
 }

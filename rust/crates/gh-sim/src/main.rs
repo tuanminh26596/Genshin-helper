@@ -171,6 +171,10 @@ enum Cmd {
         #[arg(long, default_value = "tests/verified_gt.json")]
         gt_file: PathBuf,
 
+        /// Directory containing scripted scenario JSON files (default: tests/scenarios).
+        #[arg(long)]
+        scenarios: Option<PathBuf>,
+
         /// Optional session name filter (repeatable: --only sess_A --only sess_B).
         #[arg(long)]
         only: Vec<String>,
@@ -417,6 +421,7 @@ fn main() {
             ffmpeg,
             baseline,
             gt_file,
+            scenarios,
             only,
             out,
             bless,
@@ -436,6 +441,7 @@ fn main() {
                 ffmpeg_path: ffmpeg,
                 baseline_path: baseline,
                 gt_file,
+                scenarios_dir: scenarios,
                 only,
                 out_dir: out,
                 bless,
