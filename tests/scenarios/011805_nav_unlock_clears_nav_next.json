@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "name": "nav_unlock_clears_nav_next_lock",
+  "session": "sess_20261127_011805",
+  "description": "After Alt+E (nav_next) locks onto a farther pin, Alt+F6 (nav_unlock) should clear user_locked_id and allow proximity takeover back to the nearest pin as the player walks up to it.",
+  "known_bug": "Alt+F6 (nav_unlock) does not clear an Alt+E (nav_next) lock",
+  "inputs": [
+    {
+      "frame": 355,
+      "web_input": {
+        "callback": "on_nearby_pins",
+        "payload": {
+          "map_id": 2,
+          "pins": [
+            {
+              "id": "scenario:pin_near",
+              "lng": -9433.5,
+              "lat": 4383.5,
+              "name": "Scenario Pin Near"
+            },
+            {
+              "id": "scenario:pin_mid",
+              "lng": -9484.0,
+              "lat": 4387.0,
+              "name": "Scenario Pin Mid"
+            },
+            {
+              "id": "scenario:pin_far",
+              "lng": -9530.0,
+              "lat": 4424.5,
+              "name": "Scenario Pin Far"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "frame": 358,
+      "hotkey": "nav_next"
+    },
+    {
+      "frame": 362,
+      "hotkey": "nav_unlock"
+    }
+  ],
+  "expect": [
+    {
+      "frame": 358,
+      "nav": {
+        "target_id": "scenario:pin_mid",
+        "user_locked_id": "scenario:pin_mid"
+      }
+    },
+    {
+      "frame": 362,
+      "within_frames": 2,
+      "nav": {
+        "user_locked_id": null
+      }
+    },
+    {
+      "frame": 370,
+      "within_frames": 20,
+      "nav": {
+        "user_locked_id": null,
+        "target_id": "scenario:pin_near"
+      }
+    }
+  ]
+}

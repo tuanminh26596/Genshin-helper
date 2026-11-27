@@ -7,8 +7,8 @@ use crate::compositor::{
     OfflineRadarAssets, composite_radar_onto_frame, save_bgra_png,
 };
 use crate::timeline::{
-    InputReplayReport, InputTimeline, dispatch_timeline_input, load_web_inputs_jsonl,
-    record_nav_comparison,
+    InputReplayReport, InputTimeline, TimelineInput, TimelineInputKind, dispatch_timeline_input,
+    load_web_inputs_jsonl, record_nav_comparison,
 };
 use crate::verified_gt::{SessionCheckpointGt, VerifiedGtFile};
 use gh_app::BUILD_GIT_COMMIT;
@@ -1078,6 +1078,27 @@ pub fn build_replay_provenance(
     }
 }
 
+/// Optional scripted-scenario hook layered on top of a standard offline replay.
+#[derive(Debug, Clone, Default)]
+pub struct ReplayScenarioHook {
+    /// Additional scripted inputs keyed by 1-based frame index (`rec.idx`), dispatched right before
+    /// that frame is processed (merged with the session's recorded inputs).
+    pub extra_inputs: Vec<(usize, TimelineInputKind)>,
+    /// Stop replaying after processing this 1-based frame index (`rec.idx`).
+    pub stop_at_frame: Option<usize>,
+    /// Capture `state.snapshot_nav_state()` after every processed frame.
+    pub capture_nav_snapshots: bool,
+}
+
+/// Complete output of [`run_replay_with_hook`], including optional per-frame nav snapshots.
+#[derive(Debug, Clone)]
+pub struct ReplayFullOutput {
+    pub report: ReplayReport,
+    pub observed: Vec<ObservedFrame>,
+    pub map_m_syncs: Vec<MapMSyncRecord>,
+    pub nav_snapshots: BTreeMap<usize, NavFrameSnapshot>,
+}
+
 pub fn run_replay(opts: &ReplayOptions) -> Result<ReplayReport, String> {
     run_replay_with_poses(opts).map(|(report, _)| report)
 }
@@ -1091,6 +1112,13 @@ pub fn run_replay_with_poses(
 pub fn run_replay_full(
     opts: &ReplayOptions,
 ) -> Result<(ReplayReport, Vec<ObservedFrame>, Vec<MapMSyncRecord>), String> {
+    run_replay_with_hook(opts, None).map(|o| (o.report, o.observed, o.map_m_syncs))
+}
+
+pub fn run_replay_with_hook(
+    opts: &ReplayOptions,
+    hook: Option<&ReplayScenarioHook>,
+) -> Result<ReplayFullOutput, String> {
     let kind = detect_session_kind(&opts.source_dir)?;
     let session_name = opts
         .source_dir
@@ -1220,9 +1248,14 @@ pub fn run_replay_full(
     if let Some(limit) = opts.max_frames {
         records.truncate(limit);
     }
+    if let Some(stop_idx) = hook.and_then(|h| h.stop_at_frame)
+        && let Some(cut) = records.iter().position(|r| r.idx > stop_idx)
+    {
+        records.truncate(cut);
+    }
 
     let mut web_inputs = load_web_inputs_jsonl(&opts.source_dir.join(WEB_INPUTS_FILENAME))?;
-    if opts.max_frames.is_some() {
+    if opts.max_frames.is_some() || hook.and_then(|h| h.stop_at_frame).is_some() {
         let cutoff_ts = records.last().map_or(f64::NEG_INFINITY, |r| r.ts);
         web_inputs.retain(|w| w.ts <= cutoff_ts);
     }
@@ -1230,9 +1263,41 @@ pub fn run_replay_full(
         .iter()
         .flat_map(|r| r.hotkeys.iter().cloned())
         .collect();
-    let mut timeline = InputTimeline::from_inputs(web_inputs, hotkeys);
+    let mut timeline = if let Some(extra) = hook
+        .map(|h| h.extra_inputs.as_slice())
+        .filter(|e| !e.is_empty())
+    {
+        let mut events = Vec::with_capacity(web_inputs.len() + hotkeys.len() + extra.len());
+        for w in web_inputs {
+            if w.ts.is_finite() {
+                events.push(TimelineInput::web_input(w.ts, w.callback, w.payload));
+            }
+        }
+        for (ts, action) in hotkeys {
+            if ts.is_finite() {
+                events.push(TimelineInput::hotkey(ts, action));
+            }
+        }
+        let ts_by_idx: BTreeMap<usize, f64> = records.iter().map(|r| (r.idx, r.ts)).collect();
+        for (frame_idx, kind) in extra {
+            let Some(&frame_ts) = ts_by_idx.get(frame_idx) else {
+                return Err(format!(
+                    "scenario input references frame {frame_idx} which does not exist in session '{session_name}'"
+                ));
+            };
+            events.push(TimelineInput {
+                ts: frame_ts,
+                kind: kind.clone(),
+            });
+        }
+        InputTimeline::from_events(events)
+    } else {
+        InputTimeline::from_inputs(web_inputs, hotkeys)
+    };
     let callbacks = AppServerCallbacks::new_offline_replay(Arc::clone(&state));
     let mut input_replay = InputReplayReport::default();
+    let capture_nav_snapshots = hook.is_some_and(|h| h.capture_nav_snapshots);
+    let mut nav_snapshots: BTreeMap<usize, NavFrameSnapshot> = BTreeMap::new();
 
     let base_ts = records.first().map_or(0.0, |r| r.ts);
     let mut rt = LoopRuntimeState::new();
@@ -1508,9 +1573,14 @@ pub fn run_replay_full(
             *match_methods.entry(obs.match_method.clone()).or_insert(0) += 1;
         }
 
-        if let Some(ref live_nav) = rec.live_nav {
+        if rec.live_nav.is_some() || capture_nav_snapshots {
             let replay_nav = state.snapshot_nav_state();
-            record_nav_comparison(rec.idx, live_nav, &replay_nav, &mut input_replay);
+            if let Some(ref live_nav) = rec.live_nav {
+                record_nav_comparison(rec.idx, live_nav, &replay_nav, &mut input_replay);
+            }
+            if capture_nav_snapshots {
+                nav_snapshots.insert(rec.idx, replay_nav);
+            }
         }
 
         tick_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
@@ -1592,7 +1662,12 @@ pub fn run_replay_full(
             .map_err(|e| format!("failed to write {}: {e}", out_path.display()))?;
     }
 
-    Ok((report, observed, map_m_syncs))
+    Ok(ReplayFullOutput {
+        report,
+        observed,
+        map_m_syncs,
+        nav_snapshots,
+    })
 }
 
 fn apply_pose_to_obs(pose: &MinimapPose, obs: &mut ObservedFrame) {
