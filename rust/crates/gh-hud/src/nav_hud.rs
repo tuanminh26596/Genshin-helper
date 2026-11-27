@@ -82,11 +82,11 @@ const MIN_ANIM_FRAME_DELAY_MS: u32 = 10;
 const DEFAULT_FAST_GIF_DELAY_MS: u32 = 100;
 const MAX_ANIM_FRAME_DELAY_MS: u32 = 5_000;
 
-// Midnight Slate glass palette (`alpha >= 240` on pill & dial interiors)
-const GLASS_BG: [u8; 4] = [15, 23, 42, 240];
-const DIAL_BG: [u8; 4] = [15, 23, 42, 244];
-const AMBER_RING: [u8; 4] = [245, 158, 11, 240];
-const SPOT_BORDER: [u8; 4] = [148, 163, 184, 128];
+// Teyvat Craft obsidian glass palette (`alpha >= 240` on pill & dial interiors)
+const GLASS_BG: [u8; 4] = [26, 30, 40, 242];
+const DIAL_BG: [u8; 4] = [20, 24, 34, 246];
+const AMBER_RING: [u8; 4] = [232, 168, 56, 242];
+const SPOT_BORDER: [u8; 4] = [211, 188, 142, 130];
 
 // ---------------------------------------------------------------------------
 // Enums & Palettes
@@ -195,49 +195,49 @@ impl HudPalette {
     pub const fn colors(self) -> PaletteColors {
         match self {
             Self::Info => PaletteColors {
-                accent: [56, 189, 248, 255],
-                border: [56, 189, 248, 210],
-                badge_tint: [56, 189, 248, 44],
-                tag_bg: [56, 189, 248, 52],
-                tag_text: [186, 230, 253, 255],
-                title: [248, 250, 252, 255],
-                sub: [148, 163, 184, 255],
+                accent: [211, 188, 142, 255],
+                border: [211, 188, 142, 195],
+                badge_tint: [211, 188, 142, 34],
+                tag_bg: [43, 50, 68, 225],
+                tag_text: [223, 196, 140, 255],
+                title: [242, 236, 224, 255],
+                sub: [184, 175, 158, 255],
             },
             Self::Success => PaletteColors {
-                accent: [34, 197, 94, 255],
-                border: [34, 197, 94, 220],
-                badge_tint: [22, 163, 74, 48],
-                tag_bg: [34, 197, 94, 56],
-                tag_text: [187, 247, 208, 255],
-                title: [248, 250, 252, 255],
-                sub: [187, 247, 208, 255],
+                accent: [82, 196, 160, 255],
+                border: [211, 188, 142, 200],
+                badge_tint: [82, 196, 160, 40],
+                tag_bg: [82, 196, 160, 48],
+                tag_text: [167, 243, 208, 255],
+                title: [242, 236, 224, 255],
+                sub: [184, 175, 158, 255],
             },
             Self::Warning => PaletteColors {
-                accent: [245, 158, 11, 255],
-                border: [245, 158, 11, 225],
-                badge_tint: [245, 158, 11, 52],
-                tag_bg: [245, 158, 11, 60],
-                tag_text: [254, 243, 199, 255],
-                title: [254, 243, 199, 255],
-                sub: [253, 230, 138, 255],
+                accent: [224, 171, 88, 255],
+                border: [224, 171, 88, 210],
+                badge_tint: [224, 171, 88, 44],
+                tag_bg: [224, 171, 88, 52],
+                tag_text: [246, 224, 180, 255],
+                title: [242, 236, 224, 255],
+                sub: [216, 196, 154, 255],
             },
             Self::LockOn => PaletteColors {
                 accent: [45, 212, 191, 255],
-                border: [45, 212, 191, 235],
-                badge_tint: [45, 212, 191, 58],
-                tag_bg: [45, 212, 191, 60],
-                tag_text: [204, 251, 241, 255],
-                title: [248, 250, 252, 255],
-                sub: [153, 246, 228, 255],
+                border: [211, 188, 142, 225],
+                badge_tint: [45, 212, 191, 48],
+                tag_bg: [45, 212, 191, 52],
+                tag_text: [165, 243, 252, 255],
+                title: [242, 236, 224, 255],
+                sub: [184, 175, 158, 255],
             },
             Self::Edit => PaletteColors {
-                accent: [167, 139, 250, 255],
-                border: [167, 139, 250, 240],
-                badge_tint: [139, 92, 246, 52],
-                tag_bg: [139, 92, 246, 60],
-                tag_text: [237, 233, 254, 255],
-                title: [248, 250, 252, 255],
-                sub: [221, 214, 254, 255],
+                accent: [223, 196, 140, 255],
+                border: [223, 196, 140, 235],
+                badge_tint: [211, 188, 142, 54],
+                tag_bg: [211, 188, 142, 56],
+                tag_text: [245, 231, 196, 255],
+                title: [242, 236, 224, 255],
+                sub: [211, 188, 142, 255],
             },
         }
     }
@@ -2471,52 +2471,24 @@ impl NavHudRenderer {
             }
         }
 
-        // 4. Directional chevron OR non-directional status glyph
+        // 4. Unified symmetrical Tinh Tú (Star Dart) OR non-directional status glyph
         if directional && angle_bucket >= 0 {
             let deg = (angle_bucket * BADGE_STEP_DEG) as f32;
-            let arrow_local = [
-                (0.0, -r * 0.62),
-                (r * 0.42, r * 0.44),
-                (0.0, r * 0.18),
-                (-r * 0.42, r * 0.44),
-            ];
-            let arrow_pts: Vec<(f32, f32)> = arrow_local
-                .iter()
-                .map(|&(px, py)| {
-                    let (rx, ry) = rotate_point(px, py, deg);
-                    (cx + rx, cy + ry)
-                })
-                .collect();
-            let arrow_fill = if lock_on {
-                [255, 255, 255, 255]
+            let style = if lock_on {
+                crate::star_dart::StarDartStyle::HUD_LOCK_ON
             } else {
-                pal.accent
+                crate::star_dart::StarDartStyle::HUD
             };
-            if let Some(p) = build_polygon_path(&arrow_pts) {
-                pm.fill_path(&p, &make_paint(arrow_fill), FillRule::Winding, Transform::identity(), None);
-            }
-
-            let core_local = [
-                (0.0, -r * 0.34),
-                (r * 0.16, r * 0.14),
-                (0.0, r * 0.04),
-                (-r * 0.16, r * 0.14),
-            ];
-            let core_pts: Vec<(f32, f32)> = core_local
-                .iter()
-                .map(|&(px, py)| {
-                    let (rx, ry) = rotate_point(px, py, deg);
-                    (cx + rx, cy + ry)
-                })
-                .collect();
-            let core_fill = if lock_on {
-                pal.accent
-            } else {
-                [248, 250, 252, 230]
-            };
-            if let Some(p) = build_polygon_path(&core_pts) {
-                pm.fill_path(&p, &make_paint(core_fill), FillRule::Winding, Transform::identity(), None);
-            }
+            crate::star_dart::draw_star_dart(
+                &mut pm,
+                cx,
+                cy,
+                r * 0.64,
+                deg.to_radians(),
+                style,
+                Transform::identity(),
+                None,
+            );
         } else if eff_pal == HudPalette::Warning {
             let mut pb = PathBuilder::new();
             pb.move_to(cx, cy - r * 0.36);
@@ -3094,6 +3066,24 @@ impl NavHudRenderer {
                 Transform::identity(),
                 None,
             );
+            if let Some(inner_pill) = build_rounded_rect_path(
+                3.0,
+                3.0,
+                (total_w as f32 - 6.0).max(4.0),
+                (pill_h as f32 - 6.0).max(4.0),
+                (pill_radius - 2.0).max(2.0),
+            ) {
+                pixmap.stroke_path(
+                    &inner_pill,
+                    &make_paint([211, 188, 142, 46]),
+                    &Stroke {
+                        width: (0.9 * s).max(0.7),
+                        ..Default::default()
+                    },
+                    Transform::identity(),
+                    None,
+                );
+            }
         }
 
         if has_spot {
@@ -3120,6 +3110,24 @@ impl NavHudRenderer {
                     Transform::identity(),
                     None,
                 );
+                if let Some(inner_spot) = build_rounded_rect_path(
+                    3.0,
+                    sy0 + 2.25,
+                    (total_w as f32 - 6.0).max(4.0),
+                    (sh - 4.5).max(4.0),
+                    (spot_radius - 2.0).max(2.0),
+                ) {
+                    pixmap.stroke_path(
+                        &inner_spot,
+                        &make_paint([211, 188, 142, 42]),
+                        &Stroke {
+                            width: (0.9 * s).max(0.7),
+                            ..Default::default()
+                        },
+                        Transform::identity(),
+                        None,
+                    );
+                }
             }
         }
 

@@ -707,12 +707,12 @@
                 gap: 8px;
                 max-width: min(480px, calc(100vw - 32px));
                 padding: 7px 14px;
-                border-radius: 999px;
-                background: rgba(15, 23, 42, 0.90);
+                border-radius: 10px;
+                background: rgba(26, 30, 40, 0.94);
                 backdrop-filter: blur(12px);
-                border: 1px solid rgba(56, 189, 248, 0.35);
-                box-shadow: 0 10px 26px rgba(2, 6, 23, 0.55);
-                color: #ECEFF4;
+                border: 1px solid rgba(211, 188, 142, 0.48);
+                box-shadow: inset 0 0 0 1px rgba(211, 188, 142, 0.14), 0 10px 26px rgba(8, 10, 16, 0.62);
+                color: #F2ECE0;
                 font-size: 12px;
                 font-weight: 500;
                 line-height: 1.3;
@@ -730,9 +730,10 @@
             #gh-mini-toast-dot {
                 width: 8px;
                 height: 8px;
-                border-radius: 50%;
+                border-radius: 2px;
+                transform: rotate(45deg);
                 flex-shrink: 0;
-                background: #38bdf8;
+                background: #D3BC8E;
             }
             #gh-mini-toast-text {
                 white-space: nowrap;
@@ -753,10 +754,10 @@
                 height: 36px;
                 padding: 0 16px 0 13px;
                 border-radius: 999px;
-                background: rgba(11, 15, 25, 0.94);
-                border: 1px solid rgba(56, 189, 248, 0.5);
-                box-shadow: 0 10px 28px rgba(2, 6, 23, 0.6);
-                color: #BAE6FD;
+                background: rgba(26, 30, 40, 0.95);
+                border: 1px solid rgba(211, 188, 142, 0.52);
+                box-shadow: inset 0 0 0 1px rgba(211, 188, 142, 0.14), 0 10px 28px rgba(8, 10, 16, 0.65);
+                color: #F2ECE0;
                 font-size: 12px;
                 font-weight: 600;
                 line-height: 1;
@@ -771,7 +772,7 @@
                 width: 16px;
                 height: 16px;
                 flex-shrink: 0;
-                color: #38bdf8;
+                color: #D3BC8E;
             }
             #gh-recenter-btn.gh-recenter-visible {
                 opacity: 1;
@@ -779,15 +780,15 @@
                 transform: translateX(-50%) translateY(0);
             }
             #gh-recenter-btn:hover {
-                background: rgba(3, 105, 161, 0.55);
-                border-color: #38bdf8;
-                color: #ECEFF4;
+                background: rgba(43, 50, 68, 0.96);
+                border-color: #DFC48C;
+                color: #FFF8EA;
             }
             #gh-recenter-btn:hover svg {
-                color: #ECEFF4;
+                color: #DFC48C;
             }
             #gh-recenter-btn:focus-visible {
-                outline: 2px solid #38bdf8;
+                outline: 2px solid #D3BC8E;
                 outline-offset: 3px;
             }
             #gh-recenter-btn:active {
@@ -818,9 +819,9 @@
                 height: 28px;
                 transform: translate(-50%, -50%);
                 border-radius: 50%;
-                background: rgba(15, 23, 42, 0.82);
-                border: 2px solid #ffffff;
-                box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.55), 0 2px 10px rgba(0, 0, 0, 0.55);
+                background: rgba(20, 24, 34, 0.88);
+                border: 2px solid #D3BC8E;
+                box-shadow: 0 0 0 3px rgba(126, 232, 255, 0.42), 0 2px 10px rgba(8, 10, 16, 0.65);
                 pointer-events: none;
             }
             .gh-player-pulse-ring {
@@ -830,8 +831,8 @@
                 width: 34px;
                 height: 34px;
                 border-radius: 50%;
-                border: 2px solid #38bdf8;
-                background: rgba(56, 189, 248, 0.22);
+                border: 2px solid #7EE8FF;
+                background: rgba(126, 232, 255, 0.2);
                 animation: gh-player-pulse 1.8s cubic-bezier(0.2, 0.6, 0.3, 1) infinite;
             }
             .gh-player-fov-svg {
@@ -860,7 +861,7 @@
                 transform: translate(-50%, -50%) rotate(var(--gh-dir, 0deg));
                 transition: transform 90ms linear;
                 will-change: transform;
-                filter: drop-shadow(0 2px 6px rgba(2, 132, 199, 0.85));
+                filter: drop-shadow(0 2px 6px rgba(20, 24, 34, 0.88));
                 pointer-events: none;
             }
 
@@ -904,10 +905,10 @@
                 gap: 6px 10px;
                 padding: 5px 5px 5px 14px;
                 border-radius: 9px;
-                background: rgba(11, 15, 25, 0.94);
-                border: 1px solid rgba(56, 189, 248, 0.32);
-                box-shadow: 0 10px 28px rgba(2, 6, 23, 0.6);
-                color: #ECEFF4;
+                background: rgba(26, 30, 40, 0.94);
+                border: 1px solid rgba(211, 188, 142, 0.44);
+                box-shadow: 0 10px 28px rgba(8, 10, 16, 0.65);
+                color: #F2ECE0;
                 font-size: 12px;
                 font-weight: 600;
                 line-height: 1.25;
@@ -962,11 +963,11 @@
             }
             #gh-route-bar .gh-route-sec b {
                 font-weight: 700;
-                color: #BAE6FD;
+                color: #E4CF9F;
             }
             #gh-route-bar .gh-route-sec span {
                 font-weight: 500;
-                color: #8B9BB5;
+                color: #A49B8C;
             }
             #gh-route-bar .gh-route-btn {
                 display: inline-flex;
@@ -976,10 +977,10 @@
                 height: 28px;
                 margin: 0;
                 padding: 0 11px;
-                border: 1px solid #32405D;
+                border: 1px solid rgba(211, 188, 142, 0.36);
                 border-radius: 7px;
-                background: #121826;
-                color: #ECEFF4;
+                background: #222836;
+                color: #F2ECE0;
                 font-size: 12px;
                 font-weight: 600;
                 line-height: 1;
@@ -997,12 +998,12 @@
                 padding: 0;
             }
             #gh-route-bar .gh-route-btn:hover:not(:disabled) {
-                border-color: rgba(56, 189, 248, 0.6);
-                background: #182134;
-                color: #ECEFF4;
+                border-color: rgba(211, 188, 142, 0.68);
+                background: #2B3244;
+                color: #F2ECE0;
             }
             #gh-route-bar .gh-route-btn:focus-visible {
-                outline: 2px solid #38bdf8;
+                outline: 2px solid #E4CF9F;
                 outline-offset: 2px;
             }
             #gh-route-bar .gh-route-btn:active:not(:disabled) {
@@ -1013,18 +1014,18 @@
                 cursor: default;
             }
             #gh-route-bar .gh-route-btn.is-primary {
-                border-color: rgba(56, 189, 248, 0.55);
-                background: rgba(3, 105, 161, 0.42);
-                color: #BAE6FD;
+                border-color: rgba(228, 207, 159, 0.68);
+                background: linear-gradient(135deg, #D3BC8E, #B59963);
+                color: #141822;
             }
             #gh-route-bar .gh-route-btn.is-primary:hover:not(:disabled) {
-                background: rgba(3, 105, 161, 0.7);
-                border-color: #38bdf8;
+                background: linear-gradient(135deg, #E4CF9F, #C2A56B);
+                border-color: #E4CF9F;
             }
             #gh-route-bar .gh-route-btn.is-follow {
-                border-color: rgba(217, 164, 65, 0.6);
-                background: rgba(217, 164, 65, 0.12);
-                color: #f3d28b;
+                border-color: rgba(211, 188, 142, 0.6);
+                background: rgba(211, 188, 142, 0.14);
+                color: #E4CF9F;
             }
             #gh-route-bar .gh-route-btn.is-follow:hover:not(:disabled) {
                 border-color: #d9a441;
@@ -1610,9 +1611,12 @@
                         '</radialGradient>' +
                     '</defs>' +
                     '<path d="M32 32 L15.94 9.06 A28 28 0 0 1 48.06 9.06 Z" fill="url(#gh-fov-grad)"/>' +
+                    '<path d="M15.94 9.06 A28 28 0 0 1 48.06 9.06" fill="none" stroke="#D3BC8E" stroke-opacity="0.72" stroke-width="1.35"/>' +
                 '</svg>' +
                 '<svg class="gh-player-arrow-svg" viewBox="0 0 32 32" aria-hidden="true">' +
-                    '<path d="M16 4.5 L25 24 L16 19.5 L7 24 Z" fill="#38bdf8" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"/>' +
+                    '<path d="M16 3 L25.5 25 L16 20 L6.5 25 Z" fill="#7EE8FF" stroke="#141822" stroke-width="2.4" stroke-linejoin="round" paint-order="stroke fill"/>' +
+                    '<path d="M16 7.0 L22.2 21.8 L16 18.4 L9.8 21.8 Z" fill="none" stroke="#F0FCFF" stroke-width="1.15" stroke-linejoin="round"/>' +
+                    '<path d="M16 12.2 L17.1 14.5 L19.4 15.6 L17.1 16.7 L16 19.0 L14.9 16.7 L12.6 15.6 L14.9 14.5 Z" fill="#D3BC8E" stroke="#141822" stroke-width="1.0" stroke-linejoin="round" paint-order="stroke fill"/>' +
                 '</svg>' +
             '</div>'
         );
@@ -1658,6 +1662,14 @@
         fovPath.setAttribute('d', 'M32 32 L15.94 9.06 A28 28 0 0 1 48.06 9.06 Z');
         fovPath.setAttribute('fill', 'url(#gh-fov-grad-dom)');
         fovSvg.appendChild(fovPath);
+
+        const fovRim = document.createElementNS(SVG_NS, 'path');
+        fovRim.setAttribute('d', 'M15.94 9.06 A28 28 0 0 1 48.06 9.06');
+        fovRim.setAttribute('fill', 'none');
+        fovRim.setAttribute('stroke', '#D3BC8E');
+        fovRim.setAttribute('stroke-opacity', '0.72');
+        fovRim.setAttribute('stroke-width', '1.35');
+        fovSvg.appendChild(fovRim);
         wrap.appendChild(fovSvg);
 
         const arrowSvg = document.createElementNS(SVG_NS, 'svg');
@@ -1666,12 +1678,31 @@
         arrowSvg.setAttribute('aria-hidden', 'true');
 
         const arrowPath = document.createElementNS(SVG_NS, 'path');
-        arrowPath.setAttribute('d', 'M16 4.5 L25 24 L16 19.5 L7 24 Z');
-        arrowPath.setAttribute('fill', '#38bdf8');
-        arrowPath.setAttribute('stroke', '#ffffff');
-        arrowPath.setAttribute('stroke-width', '2');
+        arrowPath.setAttribute('d', 'M16 3 L25.5 25 L16 20 L6.5 25 Z');
+        arrowPath.setAttribute('fill', '#7EE8FF');
+        arrowPath.setAttribute('stroke', '#141822');
+        arrowPath.setAttribute('stroke-width', '2.4');
         arrowPath.setAttribute('stroke-linejoin', 'round');
+        arrowPath.setAttribute('paint-order', 'stroke fill');
         arrowSvg.appendChild(arrowPath);
+
+        const arrowTrim = document.createElementNS(SVG_NS, 'path');
+        arrowTrim.setAttribute('d', 'M16 7.0 L22.2 21.8 L16 18.4 L9.8 21.8 Z');
+        arrowTrim.setAttribute('fill', 'none');
+        arrowTrim.setAttribute('stroke', '#F0FCFF');
+        arrowTrim.setAttribute('stroke-width', '1.15');
+        arrowTrim.setAttribute('stroke-linejoin', 'round');
+        arrowSvg.appendChild(arrowTrim);
+
+        const arrowStar = document.createElementNS(SVG_NS, 'path');
+        arrowStar.setAttribute('d', 'M16 12.2 L17.1 14.5 L19.4 15.6 L17.1 16.7 L16 19.0 L14.9 16.7 L12.6 15.6 L14.9 14.5 Z');
+        arrowStar.setAttribute('fill', '#D3BC8E');
+        arrowStar.setAttribute('stroke', '#141822');
+        arrowStar.setAttribute('stroke-width', '1.0');
+        arrowStar.setAttribute('stroke-linejoin', 'round');
+        arrowStar.setAttribute('paint-order', 'stroke fill');
+        arrowSvg.appendChild(arrowStar);
+
         wrap.appendChild(arrowSvg);
 
         return wrap;

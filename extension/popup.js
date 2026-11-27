@@ -147,6 +147,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const toggleAudioEnabled = document.getElementById('toggle-audio-enabled');
   const audioVolRow = document.getElementById('audio-vol-row');
   const rangeAudioVolume = document.getElementById('range-audio-volume');
+  const audioVolFill = document.getElementById('audio-vol-fill');
+  const audioVolThumb = document.getElementById('audio-vol-thumb');
   const audioVolumeValue = document.getElementById('audio-volume-value');
   const btnAudioTest = document.getElementById('btn-audio-test');
   const toggleRadarEnabled = document.getElementById('toggle-radar-enabled');
@@ -465,6 +467,7 @@ document.addEventListener('DOMContentLoaded', () => {
       setBtnLabel(btnToggleLan, lanRunning ? t('popup.lan.stop_btn') : t('popup.lan.start_btn'));
       btnToggleLan.classList.toggle('btn-brass', lanRunning);
       btnToggleLan.classList.toggle('btn-primary', !lanRunning);
+      btnToggleLan.classList.toggle('is-lan-on', lanRunning);
       btnToggleLan.disabled = !currentConnected;
     }
     if (lanDetails) {
@@ -806,6 +809,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if (rangeAudioVolume && typeof currentLastStatus.audio_volume === 'number' && document.activeElement !== rangeAudioVolume) {
         const clampedVol = Math.max(0, Math.min(100, Math.round(currentLastStatus.audio_volume)));
         rangeAudioVolume.value = String(clampedVol);
+        rangeAudioVolume.style.setProperty('--vol-pct', `${clampedVol}%`);
+        if (audioVolFill) audioVolFill.style.width = `${clampedVol}%`;
+        if (audioVolThumb) audioVolThumb.style.left = `${clampedVol}%`;
         if (audioVolumeValue) {
           audioVolumeValue.textContent = `${clampedVol}%`;
         }
@@ -1780,13 +1786,22 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   if (rangeAudioVolume) {
+    const syncAudioSliderCss = (val) => {
+      const pct = Math.max(0, Math.min(100, Math.round(Number(val) || 0)));
+      rangeAudioVolume.style.setProperty('--vol-pct', `${pct}%`);
+      if (audioVolFill) audioVolFill.style.width = `${pct}%`;
+      if (audioVolThumb) audioVolThumb.style.left = `${pct}%`;
+    };
+    syncAudioSliderCss(rangeAudioVolume.value);
     rangeAudioVolume.addEventListener('input', () => {
+      syncAudioSliderCss(rangeAudioVolume.value);
       if (audioVolumeValue) {
         audioVolumeValue.textContent = `${rangeAudioVolume.value}%`;
       }
     });
     rangeAudioVolume.addEventListener('change', async () => {
       const wantVol = Math.max(0, Math.min(100, Math.round(Number(rangeAudioVolume.value) || 0)));
+      syncAudioSliderCss(wantVol);
       showFeedback('');
       const res = await apiRequest('/set_audio', 'POST', {
         audio_volume: wantVol,
@@ -1795,6 +1810,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (res && res.ok && res.data && typeof res.data.audio_volume === 'number') {
         const actual = Math.max(0, Math.min(100, Math.round(res.data.audio_volume)));
         rangeAudioVolume.value = String(actual);
+        syncAudioSliderCss(actual);
         if (audioVolumeValue) {
           audioVolumeValue.textContent = `${actual}%`;
         }

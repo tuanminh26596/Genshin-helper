@@ -248,7 +248,7 @@ def verify_page_main_v5_upgrades() -> None:
         "gh-player-fov-svg",
         "gh-has-fov",
         "camera_heading",
-        "M16 4.5 L25 24 L16 19.5 L7 24 Z",
+        "M16 3 L25.5 25 L16 20 L6.5 25 Z",
         "translate3d(${(pt.x - 22).toFixed(2)}px, ${(pt.y - 22).toFixed(2)}px, 0)",
         "setLatLng(",
     ):

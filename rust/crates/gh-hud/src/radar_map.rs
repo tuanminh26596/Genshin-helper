@@ -2617,37 +2617,13 @@ fn draw_offscreen_target_edge_arrow(
     let ex = cx + ux * t;
     let ey = cy + uy * t;
 
-    let perp_x = -uy;
-    let perp_y = ux;
-    let mut pb = PathBuilder::new();
-    pb.move_to(ex + ux * 7.0, ey + uy * 7.0);
-    pb.line_to(ex - ux * 4.5 + perp_x * 5.2, ey - uy * 4.5 + perp_y * 5.2);
-    pb.line_to(ex - ux * 2.0, ey - uy * 2.0);
-    pb.line_to(ex - ux * 4.5 - perp_x * 5.2, ey - uy * 4.5 - perp_y * 5.2);
-    pb.close();
-    if let Some(path) = pb.finish() {
-        let mut outline = Paint {
-            anti_alias: true,
-            ..Default::default()
-        };
-        outline.set_color_rgba8(10, 14, 22, 230);
-        let st = Stroke {
-            width: 2.0,
-            ..Stroke::default()
-        };
-        pm.stroke_path(&path, &outline, &st, Transform::identity(), mask);
-
-        let mut fill = Paint {
-            anti_alias: true,
-            ..Default::default()
-        };
-        if is_locked {
-            fill.set_color_rgba8(251, 191, 36, 245);
-        } else {
-            fill.set_color_rgba8(56, 189, 248, 245);
-        }
-        pm.fill_path(&path, &fill, FillRule::Winding, Transform::identity(), mask);
-    }
+    let ang = dy.atan2(dx) + std::f32::consts::FRAC_PI_2;
+    let style = if is_locked {
+        crate::star_dart::StarDartStyle::EDGE_GOLD
+    } else {
+        crate::star_dart::StarDartStyle::EDGE_CYAN
+    };
+    crate::star_dart::draw_star_dart(pm, ex, ey, 8.5, ang, style, Transform::identity(), mask);
 }
 
 fn draw_player_fov_and_arrow(
@@ -2658,7 +2634,7 @@ fn draw_player_fov_and_arrow(
     body_deg: f64,
     mask: Option<&Mask>,
 ) {
-    // 1. Translucent cyan camera FOV cone (`0° = North`, clockwise, ~84° FOV matching Genshin).
+    // 1. Translucent cyan camera FOV cone (`0° = North`, clockwise, ~84° FOV) with antique-gold outer rim.
     let cam_rad = (cam_deg - 90.0).to_radians() as f32;
     let spread = 42.0f32.to_radians();
     for (cone_r, alpha) in [(50.0f32, 34u8), (32.0f32, 36u8)] {
@@ -2679,50 +2655,41 @@ fn draw_player_fov_and_arrow(
             pm.fill_path(&cone_path, &p, FillRule::Winding, Transform::identity(), mask);
         }
     }
-
-    // 2. Crisp Genshin-style cyan-teal player arrow with dark outline.
-    let body_rad = body_deg.to_radians() as f32;
-    let (sin_a, cos_a) = body_rad.sin_cos();
-    let rot = |lx: f32, ly: f32| -> (f32, f32) {
-        (cx + lx * cos_a - ly * sin_a, cy + lx * sin_a + ly * cos_a)
-    };
-    let pts = [rot(0.0, -10.5), rot(7.4, 7.6), rot(0.0, 3.6), rot(-7.4, 7.6)];
-    let mut pb = PathBuilder::new();
-    pb.move_to(pts[0].0, pts[0].1);
-    pb.line_to(pts[1].0, pts[1].1);
-    pb.line_to(pts[2].0, pts[2].1);
-    pb.line_to(pts[3].0, pts[3].1);
-    pb.close();
-    if let Some(arrow_path) = pb.finish() {
-        let mut outline = Paint {
+    let mut arc_pb = PathBuilder::new();
+    for i in 0..=16 {
+        let a = cam_rad - spread + (2.0 * spread) * (i as f32 / 16.0);
+        let px = cx + a.cos() * 50.0;
+        let py = cy + a.sin() * 50.0;
+        if i == 0 {
+            arc_pb.move_to(px, py);
+        } else {
+            arc_pb.line_to(px, py);
+        }
+    }
+    if let Some(arc_path) = arc_pb.finish() {
+        let mut gp = Paint {
             anti_alias: true,
             ..Default::default()
         };
-        outline.set_color_rgba8(11, 18, 32, 240);
-        let st = Stroke {
-            width: 2.6,
-            line_join: LineJoin::Round,
+        gp.set_color_rgba8(211, 188, 142, 175);
+        let gs = Stroke {
+            width: 1.2,
             ..Stroke::default()
         };
-        pm.stroke_path(&arrow_path, &outline, &st, Transform::identity(), mask);
-
-        let mut fill = Paint {
-            anti_alias: true,
-            ..Default::default()
-        };
-        fill.set_color_rgba8(56, 217, 255, 255);
-        pm.fill_path(&arrow_path, &fill, FillRule::Winding, Transform::identity(), mask);
+        pm.stroke_path(&arc_path, &gp, &gs, Transform::identity(), mask);
     }
 
-    // Subtle white inner glint at center.
-    if let Some(dot) = PathBuilder::from_circle(cx, cy, 1.8) {
-        let mut p = Paint {
-            anti_alias: true,
-            ..Default::default()
-        };
-        p.set_color_rgba8(240, 253, 255, 235);
-        pm.fill_path(&dot, &p, FillRule::Winding, Transform::identity(), mask);
-    }
+    // 2. Unified symmetrical Tinh Tú (Star Dart) player arrow.
+    crate::star_dart::draw_star_dart(
+        pm,
+        cx,
+        cy,
+        11.5,
+        (body_deg as f32).to_radians(),
+        crate::star_dart::StarDartStyle::PLAYER,
+        Transform::identity(),
+        mask,
+    );
 }
 
 fn draw_inner_vignette(pm: &mut Pixmap, pad: f32, wf: f32, hf: f32, radius: f32, mask: Option<&Mask>) {

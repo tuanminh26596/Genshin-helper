@@ -714,7 +714,7 @@
       .gh-player-pulse {
         position: absolute; left: 50%; top: 50%; width: 22px; height: 22px;
         margin: -11px 0 0 -11px; border-radius: 50%;
-        background: rgba(56, 189, 248, 0.24);
+        background: rgba(126, 232, 255, 0.24);
         animation: ghProvPulse 2.1s ease-out infinite;
       }
       @keyframes ghProvPulse {
@@ -731,42 +731,42 @@
       .gh-player-arrow-svg {
         position: absolute; left: 6px; top: 6px; width: 32px; height: 32px;
         transform: rotate(calc(var(--gh-dir, 0) * 1deg));
-        filter: drop-shadow(0 0 4px rgba(14, 165, 233, 0.95));
+        filter: drop-shadow(0 2px 5px rgba(20, 24, 34, 0.88));
       }
       #gh-recenter-btn {
         position: fixed; right: 20px; bottom: 88px; z-index: 9998;
         display: none; align-items: center; gap: 6px;
-        padding: 8px 14px; border-radius: 999px; border: 1px solid rgba(212,175,55,0.55);
-        background: rgba(15, 23, 42, 0.92); color: #f8fafc; font: 600 12px/1 system-ui, sans-serif;
-        cursor: pointer; box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+        padding: 8px 14px; border-radius: 999px; border: 1px solid rgba(211,188,142,0.52);
+        background: rgba(26, 30, 40, 0.94); color: #F2ECE0; font: 600 12px/1 system-ui, sans-serif;
+        cursor: pointer; box-shadow: inset 0 0 0 1px rgba(211,188,142,0.14), 0 6px 20px rgba(8,10,16,0.52);
       }
       #gh-recenter-btn.is-visible { display: inline-flex; }
       #gh-target-lock-pill {
         position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 9998;
         display: none; align-items: center; gap: 8px; padding: 7px 12px;
-        border-radius: 999px; border: 1px solid rgba(212,175,55,0.6);
-        background: rgba(15, 23, 42, 0.92); color: #f8fafc; font: 600 12px/1.2 system-ui, sans-serif;
-        box-shadow: 0 6px 22px rgba(0,0,0,0.48);
+        border-radius: 999px; border: 1px solid rgba(211,188,142,0.55);
+        background: rgba(26, 30, 40, 0.94); color: #F2ECE0; font: 600 12px/1.2 system-ui, sans-serif;
+        box-shadow: inset 0 0 0 1px rgba(211,188,142,0.14), 0 6px 22px rgba(8,10,16,0.55);
       }
       #gh-target-lock-pill.is-visible { display: inline-flex; }
       #gh-target-lock-pill button {
         border: 0; border-radius: 999px; padding: 3px 8px; cursor: pointer;
-        background: rgba(239, 68, 68, 0.88); color: #fff; font: 600 11px/1 system-ui, sans-serif;
+        background: rgba(238, 130, 125, 0.88); color: #141822; font: 600 11px/1 system-ui, sans-serif;
       }
       #gh-mini-toast {
         position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 10000;
-        padding: 8px 14px; border-radius: 10px; border: 1px solid rgba(212,175,55,0.45);
-        background: rgba(15, 23, 42, 0.94); color: #f8fafc; font: 600 12px/1.35 system-ui, sans-serif;
-        box-shadow: 0 8px 24px rgba(0,0,0,0.45); opacity: 0; pointer-events: none;
+        padding: 8px 14px; border-radius: 10px; border: 1px solid rgba(211,188,142,0.48);
+        background: rgba(26, 30, 40, 0.94); color: #F2ECE0; font: 600 12px/1.35 system-ui, sans-serif;
+        box-shadow: inset 0 0 0 1px rgba(211,188,142,0.14), 0 8px 24px rgba(8,10,16,0.55); opacity: 0; pointer-events: none;
         transition: opacity 0.18s ease;
       }
       #gh-mini-toast.is-visible { opacity: 1; }
       #gh-popup-navigate-btn {
         margin-left: 6px; padding: 5px 10px; border-radius: 8px;
-        border: 1px solid rgba(212,175,55,0.65); background: rgba(15, 23, 42, 0.92);
-        color: #fde68a; font: 600 12px/1.2 system-ui, sans-serif; cursor: pointer;
+        border: 1px solid rgba(211,188,142,0.58); background: rgba(43, 50, 68, 0.94);
+        color: #DFC48C; font: 600 12px/1.2 system-ui, sans-serif; cursor: pointer;
       }
-      #gh-popup-navigate-btn:hover { background: rgba(30, 41, 59, 0.98); }
+      #gh-popup-navigate-btn:hover { background: rgba(52, 60, 82, 0.98); }
       ${activeAdapter.compactCss || ''}
     `;
     (document.head || document.documentElement).appendChild(style);
@@ -977,9 +977,12 @@
             </radialGradient>
           </defs>
           <path d="M40 40 L16 8 A38 38 0 0 1 64 8 Z" fill="url(#ghProvFovGrad)"/>
+          <path d="M16 8 A38 38 0 0 1 64 8" fill="none" stroke="#D3BC8E" stroke-opacity="0.72" stroke-width="1.5"/>
         </svg>
         <svg class="gh-player-arrow-svg" viewBox="0 0 32 32" aria-hidden="true">
-          <path d="M16 4.5 L25 24 L16 19.5 L7 24 Z" fill="#38bdf8" stroke="#0f172a" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M16 3 L25.5 25 L16 20 L6.5 25 Z" fill="#7EE8FF" stroke="#141822" stroke-width="2.4" stroke-linejoin="round" paint-order="stroke fill"/>
+          <path d="M16 7.0 L22.2 21.8 L16 18.4 L9.8 21.8 Z" fill="none" stroke="#F0FCFF" stroke-width="1.15" stroke-linejoin="round"/>
+          <path d="M16 12.2 L17.1 14.5 L19.4 15.6 L17.1 16.7 L16 19.0 L14.9 16.7 L12.6 15.6 L14.9 14.5 Z" fill="#D3BC8E" stroke="#141822" stroke-width="1.0" stroke-linejoin="round" paint-order="stroke fill"/>
         </svg>
       </div>
     `;

@@ -28,7 +28,7 @@ pub const WM_APP_SHOW: u32 = WM_APP + 1; // 0x8001
 pub const TIMER_WAIT: usize = 1;
 pub const TIMER_FADE: usize = 2;
 
-const CARD_FILL: [u8; 4] = [15, 23, 42, 232];
+const CARD_FILL: [u8; 4] = [26, 30, 40, 240];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToastKind {
@@ -52,32 +52,32 @@ impl ToastKind {
     pub const fn palette(self) -> ToastPalette {
         match self {
             Self::Success => ToastPalette {
-                accent: [34, 197, 94, 255],
-                border: [34, 197, 94, 210],
-                badge_bg: [22, 163, 74, 48],
-                title: [248, 250, 252, 255],
-                sub: [148, 163, 184, 255],
+                accent: [82, 196, 160, 255],
+                border: [211, 188, 142, 185],
+                badge_bg: [82, 196, 160, 42],
+                title: [242, 236, 224, 255],
+                sub: [184, 175, 158, 255],
             },
             Self::Info => ToastPalette {
-                accent: [56, 189, 248, 255],
-                border: [56, 189, 248, 210],
-                badge_bg: [56, 189, 248, 48],
-                title: [248, 250, 252, 255],
-                sub: [148, 163, 184, 255],
+                accent: [211, 188, 142, 255],
+                border: [211, 188, 142, 185],
+                badge_bg: [211, 188, 142, 38],
+                title: [242, 236, 224, 255],
+                sub: [184, 175, 158, 255],
             },
             Self::Warning => ToastPalette {
-                accent: [245, 158, 11, 255],
-                border: [245, 158, 11, 220],
-                badge_bg: [245, 158, 11, 52],
-                title: [254, 243, 199, 255],
-                sub: [203, 213, 225, 255],
+                accent: [224, 171, 88, 255],
+                border: [211, 188, 142, 195],
+                badge_bg: [224, 171, 88, 44],
+                title: [242, 236, 224, 255],
+                sub: [204, 190, 162, 255],
             },
             Self::Error => ToastPalette {
-                accent: [239, 68, 68, 255],
-                border: [239, 68, 68, 225],
-                badge_bg: [239, 68, 68, 56],
-                title: [254, 226, 226, 255],
-                sub: [203, 213, 225, 255],
+                accent: [238, 130, 125, 255],
+                border: [211, 188, 142, 195],
+                badge_bg: [238, 130, 125, 48],
+                title: [248, 228, 224, 255],
+                sub: [196, 182, 176, 255],
             },
         }
     }
@@ -330,13 +330,38 @@ pub fn render_toast_pixmap(
         Transform::identity(),
         None,
     );
+    if let Some(inner_path) = build_rounded_rect_path(
+        3.0,
+        3.0,
+        (w as f32) - 6.0,
+        (h as f32) - 6.0,
+        (radius - 2.0).max(2.0),
+    ) {
+        let mut inner_paint = Paint {
+            anti_alias: true,
+            ..Default::default()
+        };
+        inner_paint.set_color_rgba8(211, 188, 142, 46);
+        pixmap.stroke_path(
+            &inner_path,
+            &inner_paint,
+            &Stroke {
+                width: (0.9 * s).max(0.7),
+                ..Default::default()
+            },
+            Transform::identity(),
+            None,
+        );
+    }
 
-    // Status badge circle
+    // Status badge rounded plaque
     let bsz = badge_d as f32;
     let cx = (pad_x as f32) + bsz * 0.5;
     let cy = (h as f32) * 0.5;
     let badge_r = bsz * 0.5;
-    if let Some(circle) = PathBuilder::from_circle(cx, cy, badge_r) {
+    if let Some(plaque) =
+        build_rounded_rect_path(cx - badge_r, cy - badge_r, bsz, bsz, (6.0 * s).round())
+    {
         let mut bg_paint = Paint {
             anti_alias: true,
             ..Default::default()
@@ -348,7 +373,7 @@ pub fn render_toast_pixmap(
             pal.badge_bg[3],
         );
         pixmap.fill_path(
-            &circle,
+            &plaque,
             &bg_paint,
             FillRule::Winding,
             Transform::identity(),
@@ -361,9 +386,12 @@ pub fn render_toast_pixmap(
         };
         ring_paint.set_color_rgba8(pal.accent[0], pal.accent[1], pal.accent[2], pal.accent[3]);
         pixmap.stroke_path(
-            &circle,
+            &plaque,
             &ring_paint,
-            &border_stroke,
+            &Stroke {
+                width: (1.2 * s).max(1.0),
+                ..Default::default()
+            },
             Transform::identity(),
             None,
         );
