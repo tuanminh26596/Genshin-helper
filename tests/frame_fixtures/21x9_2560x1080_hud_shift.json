@@ -7,7 +7,6 @@
   "width": 2560,
   "height": 1080,
   "is_gamepad": false,
-  "known_bug": "21:9 ultrawide HUD shifts +72px inward on X at 2560x1080; compute_ui_layout keeps minimap_rect at x=59 (right edge 277) and tracker hud_crop at width=325, clipping the right side of the true minimap circle (cx+r=347.5).",
   "expected_minimap_rect": {
     "x": 131,
     "y": 15,

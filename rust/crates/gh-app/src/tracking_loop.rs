@@ -8,7 +8,7 @@ use gh_core::frame::{FrameBuf, PixelFormat, RectI32};
 use gh_core::i18n::{get_language, t};
 use gh_core::multimap::MultimapDb;
 use gh_core::nav_controller::NavState;
-use gh_core::ui_layout::compute_ui_layout;
+use gh_core::ui_layout::{compute_tracker_hud_crop, compute_ui_layout};
 use gh_cv::locator::{DEFAULT_AREA_NAMES, LocateResult, MapLocator};
 use gh_cv::map_state::{
     CLOSE_PROBE_DEFAULT_THRESHOLD, MAX_RETRIES, MapScreenStateMachine, MapState, MapStepResult,
@@ -610,12 +610,7 @@ pub fn run_tick_worker(state: &AppState, p: TickParams) -> TickOutput {
         }
 
         if do_minimap && let Ok(layout) = compute_ui_layout(cw as u32, ch as u32, false) {
-            let mm = layout.minimap_rect;
-            let pm = layout.paimon_maybe_rect;
-            let cal_pad_x = (48.0 * layout.scale_ui).round() as i32;
-            let cal_pad_y = (28.0 * layout.scale_ui).round() as i32;
-            let hud_w = cw.min((mm.x + mm.width + cal_pad_x).max(pm.x + pm.width));
-            let hud_h = ch.min((mm.y + mm.height + cal_pad_y).max(pm.y + pm.height));
+            let (hud_w, hud_h) = compute_tracker_hud_crop(&layout);
 
             // Single-capture guarantee when SessionRecorder is active: capture the full client
             // frame once and slice `hud_bgra` from that exact buffer (zero timestamp/pixel skew).
@@ -2656,6 +2651,155 @@ mod tests {
         let rects = cap.bgra_rects.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(rects.len(), 2);
         assert_eq!(rects[1], (0, 0, hud.width as i32, hud.height as i32));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ultrawide_live_and_session_capture_cover_shifted_minimap() {
+        use crate::capture_backend::FrameCapturer;
+        use gh_cv::minimap_tracker::{HybridMinimapTracker, MinimapTrackerConfig};
+        use gh_cv::tile_cache::{LruTerrainTileCache, TileCacheConfig};
+        use gh_win32::wgc_hdr::WgcWindowCaptureOutcome;
+        use std::sync::Mutex;
+
+        struct UltrawideMockCapturer {
+            bgra_rects: Mutex<Vec<(i32, i32, i32, i32)>>,
+            full_w: u32,
+            full_h: u32,
+        }
+
+        impl FrameCapturer for UltrawideMockCapturer {
+            fn capture_region(&self, _l: i32, _t: i32, _w: i32, _h: i32) -> Option<FrameBuf> {
+                None
+            }
+
+            fn capture_region_bgra(&self, l: i32, t: i32, w: i32, h: i32) -> Option<FrameBuf> {
+                self.bgra_rects
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((l, t, w, h));
+                if w <= 0 || h <= 0 || (w as u32) > self.full_w || (h as u32) > self.full_h {
+                    return None;
+                }
+                let mut fb = FrameBuf::new_zeroed(w as u32, h as u32, PixelFormat::Bgra8);
+                fb.data.fill(0x80);
+                Some(fb)
+            }
+
+            fn capture_window_client_outcome(
+                &self,
+                _hwnd: isize,
+                _l: i32,
+                _t: i32,
+                _w: i32,
+                _h: i32,
+            ) -> WgcWindowCaptureOutcome {
+                WgcWindowCaptureOutcome::Failed
+            }
+
+            fn window_capture_status(&self) -> String {
+                "test".to_owned()
+            }
+
+            fn release_window_capture(&self) {}
+            fn close(&self) {}
+        }
+
+        let (full_w, full_h) = (2560_u32, 1080_u32);
+        let layout = compute_ui_layout(full_w, full_h, false).expect("ultrawide layout");
+        let (hud_w, hud_h) = compute_tracker_hud_crop(&layout);
+        assert_eq!((hud_w, hud_h), (397, 261));
+        assert!(
+            (hud_w as f64) >= 241.0 + 106.5 && (hud_h as f64) >= 124.0 + 106.5,
+            "ultrawide HUD crop ({hud_w}x{hud_h}) must contain shifted minimap circle"
+        );
+
+        let tmp = std::env::temp_dir().join(format!(
+            "gh_ultrawide_hud_crop_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+
+        let cap = Arc::new(UltrawideMockCapturer {
+            bgra_rects: Mutex::new(Vec::new()),
+            full_w,
+            full_h,
+        });
+        let state = crate::state::make_test_state_with_capturer(
+            &tmp,
+            Arc::clone(&cap) as Arc<dyn FrameCapturer>,
+        );
+        let cache = Arc::new(
+            LruTerrainTileCache::from_config(TileCacheConfig {
+                use_default_npz: false,
+                disk_cache_dir: Some(tmp.join("tiles")),
+                async_fetch: false,
+                ..Default::default()
+            })
+            .expect("empty tile cache"),
+        );
+        let tracker = HybridMinimapTracker::new(cache, MinimapTrackerConfig::production_defaults())
+            .expect("tracker init");
+        *state.tracker.lock().unwrap_or_else(|e| e.into_inner()) = Some((tracker, 0.0));
+
+        let out_rec = run_tick_worker(
+            &state,
+            TickParams {
+                game_hwnd: 0,
+                cl: 0,
+                ct: 0,
+                cw: full_w as i32,
+                ch: full_h as i32,
+                is_closed: true,
+                do_auto_sync: true,
+                do_minimap: true,
+                fast_ok: false,
+                guide_view: false,
+                guide_map: 2,
+                want_window_capture: false,
+                now_s: Some(1.0),
+                cursor_client: None,
+                capture_session_frame: true,
+                session_rec_active: true,
+            },
+        );
+        assert_eq!(out_rec.mode, TickMode::Minimap);
+        let ring = state.minimap_ring.snapshot();
+        assert_eq!(ring.len(), 1);
+        assert_eq!(
+            (ring[0].frame.width as i32, ring[0].frame.height as i32),
+            (hud_w, hud_h)
+        );
+
+        let out_live = run_tick_worker(
+            &state,
+            TickParams {
+                game_hwnd: 0,
+                cl: 0,
+                ct: 0,
+                cw: full_w as i32,
+                ch: full_h as i32,
+                is_closed: true,
+                do_auto_sync: true,
+                do_minimap: true,
+                fast_ok: false,
+                guide_view: false,
+                guide_map: 2,
+                want_window_capture: false,
+                now_s: Some(2.0),
+                cursor_client: None,
+                capture_session_frame: false,
+                session_rec_active: false,
+            },
+        );
+        assert_eq!(out_live.mode, TickMode::Minimap);
+        let rects = cap.bgra_rects.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            *rects,
+            vec![(0, 0, full_w as i32, full_h as i32), (0, 0, hud_w, hud_h)]
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
