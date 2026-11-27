@@ -49,6 +49,7 @@ use gh_win32::hotkey_conflicts::HotkeyConflictAdvisor;
 use gh_win32::locale::Win32LocaleProvider;
 use gh_win32::switcher::WindowSwitcher;
 use gh_win32::tray::{SystemTrayApp, TrayState};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -116,6 +117,19 @@ pub struct RouteState {
 pub struct NavMarkConfirm {
     pub pin_id: Option<String>,
     pub until: Option<Instant>,
+}
+
+/// Read-only snapshot of user-visible HUD/Radar toggle and edit-mode flags captured post-tick
+/// during offline replay scenarios.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiFrameSnapshot {
+    pub guide_open: bool,
+    pub guide_zoomed: bool,
+    pub nav_edit_mode: bool,
+    pub nav_hud_enabled: bool,
+    pub radar_enabled: bool,
+    pub radar_active: bool,
+    pub radar_edit_mode: bool,
 }
 
 pub struct AppFloorResolver {
@@ -332,6 +346,28 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         snapshot_nav_state(&nav)
+    }
+
+    pub fn snapshot_ui_state(&self) -> UiFrameSnapshot {
+        let (nav_hud_enabled, radar_enabled) = {
+            let cfg = self.config.read().expect("config lock poisoned");
+            (cfg.nav_hud_enabled, cfg.radar_enabled)
+        };
+        let radar_edit_mode = self
+            .radar_map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|c| c.is_edit_mode());
+        UiFrameSnapshot {
+            guide_open: self.nav_hud.is_guide_open(),
+            guide_zoomed: self.nav_hud.is_guide_zoomed(),
+            nav_edit_mode: self.nav_hud.is_edit_mode(),
+            nav_hud_enabled,
+            radar_enabled,
+            radar_active: self.is_radar_active(),
+            radar_edit_mode,
+        }
     }
 
     pub fn floor_resolver(&self) -> AppFloorResolver {

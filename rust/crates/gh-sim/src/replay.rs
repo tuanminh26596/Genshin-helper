@@ -18,7 +18,7 @@ use gh_app::diagnostics::{DiagnosticManager, MinimapPreLostRingBuffer};
 use gh_app::log_buffer::LogRingBuffer;
 use gh_app::mmap_view::{LocatorRegistrar, MMapViewEngine};
 use gh_app::session_recorder::{NavFrameSnapshot, WEB_INPUTS_FILENAME};
-use gh_app::state::{AppState, GameState, NavMarkConfirm, RouteState};
+use gh_app::state::{AppState, GameState, NavMarkConfirm, RouteState, UiFrameSnapshot};
 use gh_app::tracking_loop::{
     LoopRuntimeState, PostTickContext, TickMode, TickParams, apply_tick_output,
     prepare_tick_locate, run_tick_worker,
@@ -1218,15 +1218,34 @@ pub struct ReplayScenarioHook {
     pub stop_at_frame: Option<usize>,
     /// Capture `state.snapshot_nav_state()` after every processed frame.
     pub capture_nav_snapshots: bool,
+    /// Capture `state.snapshot_ui_state()` after every processed frame.
+    pub capture_ui_snapshots: bool,
 }
 
-/// Complete output of [`run_replay_with_hook`], including optional per-frame nav snapshots.
+/// Complete output of [`run_replay_with_hook`], including optional per-frame nav/UI snapshots.
 #[derive(Debug, Clone)]
 pub struct ReplayFullOutput {
     pub report: ReplayReport,
     pub observed: Vec<ObservedFrame>,
     pub map_m_syncs: Vec<MapMSyncRecord>,
     pub nav_snapshots: BTreeMap<usize, NavFrameSnapshot>,
+    pub ui_snapshots: BTreeMap<usize, UiFrameSnapshot>,
+}
+
+struct ReplayStateCleanupGuard(Arc<AppState>);
+
+impl Drop for ReplayStateCleanupGuard {
+    fn drop(&mut self) {
+        self.0.shutdown_radar();
+        self.0.nav_hud.close();
+        self.0.hud_toast.close();
+        self.0.mmap_overlay.close();
+        self.0.capturer.close();
+        self.0.hd_provider.close();
+        self.0.ug_provider.close();
+        self.0.audio.close();
+        self.0.guide_fetcher.stop();
+    }
 }
 
 pub fn run_replay(opts: &ReplayOptions) -> Result<ReplayReport, String> {
@@ -1309,6 +1328,7 @@ pub fn run_replay_with_hook(
         Arc::clone(&capturer),
         enable_mmap_view,
     )?;
+    let _state_cleanup = ReplayStateCleanupGuard(Arc::clone(&state));
 
     let mut radar_renderer = if let Some(ref rdir) = opts.render_out {
         std::fs::create_dir_all(rdir)
@@ -1429,7 +1449,10 @@ pub fn run_replay_with_hook(
     let callbacks = AppServerCallbacks::new_offline_replay(Arc::clone(&state));
     let mut input_replay = InputReplayReport::default();
     let capture_nav_snapshots = hook.is_some_and(|h| h.capture_nav_snapshots);
+    let capture_ui_snapshots =
+        hook.is_some_and(|h| h.capture_ui_snapshots || h.capture_nav_snapshots);
     let mut nav_snapshots: BTreeMap<usize, NavFrameSnapshot> = BTreeMap::new();
+    let mut ui_snapshots: BTreeMap<usize, UiFrameSnapshot> = BTreeMap::new();
 
     let base_ts = records.first().map_or(0.0, |r| r.ts);
     let mut rt = LoopRuntimeState::new();
@@ -1714,6 +1737,9 @@ pub fn run_replay_with_hook(
                 nav_snapshots.insert(rec.idx, replay_nav);
             }
         }
+        if capture_ui_snapshots {
+            ui_snapshots.insert(rec.idx, state.snapshot_ui_state());
+        }
 
         tick_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
         observed.push(obs);
@@ -1777,15 +1803,7 @@ pub fn run_replay_with_hook(
         input_replay,
     };
 
-    state.shutdown_radar();
-    state.nav_hud.close();
-    state.hud_toast.close();
-    state.mmap_overlay.close();
-    state.capturer.close();
-    state.hd_provider.close();
-    state.ug_provider.close();
-    state.audio.close();
-    state.guide_fetcher.stop();
+    drop(_state_cleanup);
 
     if let Some(ref out_path) = opts.out_report {
         let val = serde_json::to_value(&report)
@@ -1799,6 +1817,7 @@ pub fn run_replay_with_hook(
         observed,
         map_m_syncs,
         nav_snapshots,
+        ui_snapshots,
     })
 }
 
