@@ -662,6 +662,13 @@ fn spawn_ffmpeg_encoder(
             cmd.args(["-c:v", "ffv1", "-level", "3", "-g", "1", "-pix_fmt", "bgr0"]);
         }
     }
+    #[cfg(windows)]
+    {
+        // Keep ffmpeg's console from popping up on every Alt+F8 take.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     cmd.arg(video_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
