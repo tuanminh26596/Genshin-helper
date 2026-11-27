@@ -1822,4 +1822,63 @@ mod tests {
             Some(BrowserMatch::PreferredProvider)
         );
     }
+
+    #[test]
+    fn appsample_title_browser_meta_exemption_and_exclusions() {
+        let appsample_titles = [
+            "genshin impact interactive world map",
+            "genshin impact interactive world map - appsample - microsoft edge",
+        ];
+
+        // Accepted for verified browser executables (including case/whitespace normalization).
+        for proc_name in ["chrome.exe", "msedge.exe", "brave.exe", " Chrome.EXE "] {
+            for title in appsample_titles {
+                assert!(
+                    is_browser_window_from_meta(proc_name, title, true),
+                    "expected accept for proc={proc_name:?} title={title:?} (unverified=true)"
+                );
+                assert!(
+                    is_browser_window_from_meta(proc_name, title, false),
+                    "expected accept for proc={proc_name:?} title={title:?} (unverified=false)"
+                );
+            }
+        }
+
+        // Rejected for game binary, non-browser binary, and empty proc_name.
+        for bad_proc in ["genshinimpact.exe", "notepad.exe", "", "   "] {
+            for title in appsample_titles {
+                assert!(
+                    !is_browser_window_from_meta(bad_proc, title, true),
+                    "expected reject for proc={bad_proc:?} title={title:?} (unverified=true)"
+                );
+                assert!(
+                    !is_browser_window_from_meta(bad_proc, title, false),
+                    "expected reject for proc={bad_proc:?} title={title:?} (unverified=false)"
+                );
+            }
+        }
+
+        // Rejected for bare "genshin impact" without an explicit interactive map keyword.
+        for proc_name in ["chrome.exe", "msedge.exe", "brave.exe"] {
+            assert!(!is_browser_window_from_meta(proc_name, "genshin impact", true));
+            assert!(!is_browser_window_from_meta(proc_name, "genshin impact", false));
+        }
+
+        // Rejected when a non-game excluded app substring appears alongside the map keyword.
+        for excluded_title in [
+            "genshin impact interactive world map - visual studio code",
+            "genshin impact interactive world map - visual studio",
+            "genshin impact interactive world map - discord",
+            "genshin impact interactive world map - spotify",
+            "genshin impact interactive world map - powershell",
+            "genshin impact interactive world map - cmd.exe",
+        ] {
+            for proc_name in ["chrome.exe", "msedge.exe", "brave.exe"] {
+                assert!(
+                    !is_browser_window_from_meta(proc_name, excluded_title, true),
+                    "expected reject for excluded title={excluded_title:?} proc={proc_name:?}"
+                );
+            }
+        }
+    }
 }

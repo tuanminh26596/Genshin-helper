@@ -1680,6 +1680,211 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp_root);
     }
 
+    #[test]
+    fn on_calibrate_provider_filters_waypoint_labels_and_handles_insufficient_anchors() {
+        use crate::state::make_test_state_with_db;
+        use gh_core::multimap::{MapMeta, MultimapDb, WaypointEntry};
+
+        let seq_id = CB_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp_root = std::env::temp_dir().join(format!(
+            "gh_app_cb_calibrate_{}_{seq_id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_root);
+        std::fs::create_dir_all(&tmp_root).unwrap();
+
+        let sx = 0.00015_f64;
+        let sy = -0.00015_f64;
+        let bx = 0.42_f64;
+        let dy = 0.18_f64;
+
+        let mut waypoints = Vec::new();
+        let mut provider_anchors = Vec::new();
+        // 12 valid calibration anchors across label_id in {2 (Statue), 3 (Teleport), 154 (Domain)}.
+        let valid_labels = [2, 3, 154];
+        for i in 0..12 {
+            let cx = -4000.0 + (i as f64) * 700.0;
+            let cy = -2500.0 + ((i % 4) as f64) * 1400.0;
+            let lid = valid_labels[i % valid_labels.len()];
+            waypoints.push(WaypointEntry {
+                id: 1000 + i as i64,
+                label_id: lid,
+                x_pos: cx,
+                y_pos: cy,
+                area_id: 1,
+                map_id: 2,
+                ..Default::default()
+            });
+            provider_anchors.push(json!({
+                "x": sx * cx + bx,
+                "y": sy * cy + dy,
+                "is_statue": lid == 2,
+            }));
+        }
+        // Non-anchor distractors (label_id = 5, 17, 85) MUST be excluded by on_calibrate_provider.
+        for (idx, lid) in [5, 17, 85].iter().enumerate() {
+            waypoints.push(WaypointEntry {
+                id: 9000 + idx as i64,
+                label_id: *lid,
+                x_pos: 50000.0 + (idx as f64) * 100.0,
+                y_pos: -50000.0,
+                area_id: 1,
+                map_id: 2,
+                ..Default::default()
+            });
+        }
+
+        let mut db = MultimapDb::default();
+        db.maps.insert(
+            2,
+            MapMeta {
+                id: 2,
+                name: "Teyvat".to_owned(),
+                waypoints,
+                ..Default::default()
+            },
+        );
+
+        let state = make_test_state_with_db(&tmp_root, None, None, Some(Arc::new(db)));
+        let cb = AppServerCallbacks::new_offline_replay(Arc::clone(&state));
+
+        // 1. Valid anchors calibrate cleanly and count ONLY the 12 anchors with label_id in 2|3|154.
+        let res = cb
+            .on_calibrate_provider(&json!({
+                "provider_id": "custom_cb",
+                "map_id": 2,
+                "expected_y_flip": true,
+                "anchors": provider_anchors,
+            }))
+            .expect("valid calibration");
+        assert_eq!(res["ok"], json!(true));
+        assert_eq!(res["provider"], json!("custom_cb"));
+        assert_eq!(res["map_id"], json!(2));
+        assert_eq!(res["transform"]["total_canonical_anchors"], json!(12));
+        assert_eq!(res["transform"]["matched_anchors"], json!(12));
+        assert!(res["transform"]["rmse_canonical"].as_f64().unwrap() < 0.05);
+
+        // 2. Insufficient provider anchors (< 3) on non-seed provider returns Err.
+        let err_few = cb.on_calibrate_provider(&json!({
+            "provider_id": "custom_cb",
+            "map_id": 2,
+            "anchors": [{"x": 0.1, "y": 0.2}, {"x": 0.3, "y": 0.4}],
+        }));
+        assert!(err_few.is_err(), "expected error on < 3 provider anchors");
+
+        // 3. Missing map_id in maps_db yields 0 canonical anchors -> Err on non-seed provider.
+        let err_missing_map = cb.on_calibrate_provider(&json!({
+            "provider_id": "custom_cb",
+            "map_id": 999,
+            "anchors": provider_anchors,
+        }));
+        assert!(err_missing_map.is_err(), "expected error on missing map_id");
+
+        // 4. Built-in seed provider (appsample map 2) falls back to seed when anchors are missing.
+        let seed_fb = cb
+            .on_calibrate_provider(&json!({
+                "provider_id": "appsample",
+                "map_id": 2,
+                "anchors": [],
+            }))
+            .expect("appsample seed fallback");
+        assert_eq!(seed_fb["ok"], json!(true));
+        assert_eq!(seed_fb["transform"]["source"], json!("seed_appsample_v72"));
+
+        state.nav_hud.close();
+        state.hud_toast.close();
+        state.guide_fetcher.stop();
+        state.audio.close();
+        state.capturer.close();
+        let _ = std::fs::remove_dir_all(&tmp_root);
+    }
+
+    #[tokio::test]
+    async fn on_active_provider_change_clears_lock_and_broadcasts_only_when_locked() {
+        let seq_id = CB_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp_root = std::env::temp_dir().join(format!(
+            "gh_app_cb_prov_switch_{}_{seq_id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_root);
+        std::fs::create_dir_all(&tmp_root).unwrap();
+
+        let state = make_test_state(&tmp_root);
+        let cb = AppServerCallbacks::new_offline_replay(Arc::clone(&state));
+        let port = state.server.start().await.expect("start sync server");
+
+        // 1. Unlocked state: switching provider emits NO spurious TARGET_LOCK_UPDATED broadcast.
+        let seq0 = state.server.latest_seq();
+        cb.on_active_provider_change("appsample");
+        assert_eq!(
+            state.server.latest_seq(),
+            seq0,
+            "unlocked provider change must not emit spurious broadcast"
+        );
+
+        // 2. Lock a target pin via on_nav_command, then switch provider -> clears lock and
+        //    broadcasts TARGET_LOCK_UPDATED { locked_target: null }.
+        let lock_res = cb
+            .on_nav_command(&json!({
+                "action": "lock_target",
+                "pin": {
+                    "id": "appsample:5001",
+                    "name": "Exquisite Chest",
+                    "lat": 10.0,
+                    "lng": 20.0,
+                    "map_id": 2
+                }
+            }))
+            .expect("lock target");
+        assert_eq!(lock_res["ok"], json!(true));
+        assert!(
+            state
+                .nav_controller
+                .lock()
+                .unwrap()
+                .locked_target_pin()
+                .is_some()
+        );
+
+        let seq_before = state.server.latest_seq();
+        cb.on_active_provider_change("kongying");
+        assert!(
+            state
+                .nav_controller
+                .lock()
+                .unwrap()
+                .locked_target_pin()
+                .is_none(),
+            "active provider switch must clear locked_target_pin"
+        );
+        assert!(
+            state.server.latest_seq() > seq_before,
+            "clearing active lock must broadcast TARGET_LOCK_UPDATED"
+        );
+
+        let (code, ev) = tokio::task::spawn_blocking(move || {
+            http_request(port, "GET", &format!("/poll?since={seq_before}"), None)
+        })
+        .await
+        .unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(ev["type"], json!("TARGET_LOCK_UPDATED"));
+        assert_eq!(ev["locked_target"], Value::Null);
+
+        // 3. Subsequent switch while unlocked emits no spurious clear broadcast.
+        let seq_after = state.server.latest_seq();
+        cb.on_active_provider_change("hoyolab");
+        assert_eq!(state.server.latest_seq(), seq_after);
+
+        state.server.stop().await;
+        state.nav_hud.close();
+        state.hud_toast.close();
+        state.guide_fetcher.stop();
+        state.audio.close();
+        state.capturer.close();
+        let _ = std::fs::remove_dir_all(&tmp_root);
+    }
+
     #[allow(dead_code)]
     fn _ensure_diag_import(_: &DiagnosticManager) {}
 }
