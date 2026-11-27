@@ -1193,7 +1193,11 @@ pub fn format_nav_col(input: Option<&InputReplayReport>) -> String {
     let Some(ir) = input else {
         return "n/a".to_owned();
     };
-    if ir.hotkeys_recorded == 0 && ir.web_inputs_delivered == 0 {
+    if ir.hotkeys_recorded == 0
+        && ir.web_inputs_delivered == 0
+        && !ir.initial_state_applied
+        && ir.nav_frames_compared == 0
+    {
         return "n/a".to_owned();
     }
     let mut out = format!("hk {}/{}", ir.hotkeys_dispatched, ir.hotkeys_recorded);
@@ -1201,10 +1205,17 @@ pub fn format_nav_col(input: Option<&InputReplayReport>) -> String {
         out.push_str(&format!(" web {}", ir.web_inputs_delivered));
     }
     if ir.nav_frames_compared > 0 {
-        out.push_str(&format!(
-            " nav {}/{}",
-            ir.nav_mismatches, ir.nav_frames_compared
-        ));
+        if ir.nav_carried_over_mismatches > 0 {
+            out.push_str(&format!(
+                " nav {}/{} (+{}pre)",
+                ir.nav_mismatches, ir.nav_frames_compared, ir.nav_carried_over_mismatches
+            ));
+        } else {
+            out.push_str(&format!(
+                " nav {}/{}",
+                ir.nav_mismatches, ir.nav_frames_compared
+            ));
+        }
     }
     out
 }
@@ -1453,7 +1464,13 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
             .current_commit
             .as_deref()
             .unwrap_or(BUILD_GIT_COMMIT);
-        let prov_notes = provenance_notes(Some(&session_prov), prov_cur_commit);
+        let mut prov_notes = provenance_notes(Some(&session_prov), prov_cur_commit);
+        if report.input_replay.nav_carried_over_mismatches > 0 {
+            prov_notes.push(format!(
+                "nav carried-over pre-web: {} frames (legacy recording without initial_state)",
+                report.input_replay.nav_carried_over_mismatches
+            ));
+        }
         let blessed_path = sdir.join(BLESSED_POSES_FILENAME);
 
         let result = if opts.bless {
@@ -3218,6 +3235,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(format_nav_col(Some(&web_only)), "hk 0/0 web 2");
+
+        // Legacy recording with carried-over pre-web nav mismatches surfaced separately
+        let carried = InputReplayReport {
+            web_inputs_delivered: 11,
+            nav_frames_compared: 389,
+            nav_mismatches: 16,
+            nav_carried_over_mismatches: 72,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_nav_col(Some(&carried)),
+            "hk 0/0 web 11 nav 16/389 (+72pre)"
+        );
     }
 
     fn setup_synthetic_qa_session(

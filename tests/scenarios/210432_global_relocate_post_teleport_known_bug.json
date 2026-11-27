@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "name": "global_relocate_post_teleport_210432",
+  "session": "sess_20261127_210432",
+  "description": "Reproduces E2 engine weakness: after teleporting from (510.1, -424.2) to (-1872.4, 1129.2) on map 2 before f217, TeyvatGlobalRelocator built from fresh terrain_n2_v4.npz (51707 des) yields 0 Lowe-ratio votes across f217..f235, holding relocating_hold at (510.1, -424.2) until M-Map at f245.",
+  "known_bug": "TeyvatGlobalRelocator yields 0 Lowe-ratio votes at (-1872.4, 1129.2) across f217..f235 on fresh terrain_n2_v4.npz (51707 des vs stale live cache 51060 des with 1 fragile vote/frame); replay stays stuck in relocating_hold at (510.1, -424.2) with 2844w drift until M-Map sync at f245.",
+  "inputs": [
+    {
+      "frame": 227,
+      "web_input": {
+        "callback": "on_nearby_pins",
+        "payload": {
+          "map_id": 2,
+          "filter_changed": true,
+          "pins": [
+            {
+              "id": "e2:old_anchor",
+              "lng": 540.0,
+              "lat": -424.0,
+              "name": "Pre-Teleport Anchor Pin"
+            },
+            {
+              "id": "e2:post_teleport",
+              "lng": -1842.0,
+              "lat": 1129.0,
+              "name": "Post-Teleport Destination Pin"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "expect": [
+    {
+      "frame": 227,
+      "within_frames": 6,
+      "nav": {
+        "target_id": "e2:post_teleport",
+        "state": "tracking"
+      }
+    }
+  ]
+}

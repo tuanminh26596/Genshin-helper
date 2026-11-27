@@ -647,10 +647,7 @@ async fn main() {
                     })),
                 ) {
                     Ok(srec) => {
-                        *st_rec
-                            .session_recorder
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = Some(srec);
+                        st_rec.attach_session_recorder(srec);
                         if let Some(tray) = st_rec
                             .tray
                             .lock()

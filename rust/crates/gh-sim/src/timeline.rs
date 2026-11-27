@@ -128,6 +128,14 @@ pub struct InputReplayReport {
     pub web_inputs_skipped: usize,
     pub nav_frames_compared: usize,
     pub nav_mismatches: usize,
+    /// Informational count of nav mismatches strictly before the first recorded web input
+    /// in legacy recordings that lack an `initial_state` snapshot. Not counted in `nav_mismatches`.
+    #[serde(default)]
+    pub nav_carried_over_mismatches: usize,
+    /// `true` when an `initial_state` snapshot was present in `web_inputs.jsonl` and applied
+    /// before frame 1.
+    #[serde(default)]
+    pub initial_state_applied: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_nav_mismatch_idx: Option<usize>,
 }
@@ -216,12 +224,41 @@ pub fn record_nav_comparison(
     replay_nav: &NavFrameSnapshot,
     report: &mut InputReplayReport,
 ) {
+    record_nav_comparison_with_carryover(
+        frame_idx,
+        0.0,
+        None,
+        false,
+        live_nav,
+        replay_nav,
+        report,
+    );
+}
+
+/// Like [`record_nav_comparison`], but for legacy recordings without an `initial_state` snapshot
+/// (`!initial_state_applied`) routes mismatches strictly before `first_web_input_ts` into
+/// `nav_carried_over_mismatches` instead of `nav_mismatches`.
+pub fn record_nav_comparison_with_carryover(
+    frame_idx: usize,
+    frame_ts: f64,
+    first_web_input_ts: Option<f64>,
+    initial_state_applied: bool,
+    live_nav: &NavFrameSnapshot,
+    replay_nav: &NavFrameSnapshot,
+    report: &mut InputReplayReport,
+) {
     report.nav_frames_compared += 1;
     if replay_nav.target_id != live_nav.target_id
         || replay_nav.locked_target_id != live_nav.locked_target_id
     {
-        report.nav_mismatches += 1;
-        report.first_nav_mismatch_idx.get_or_insert(frame_idx);
+        let is_legacy_pre_web = !initial_state_applied
+            && first_web_input_ts.is_some_and(|t0| frame_ts.is_finite() && frame_ts < t0);
+        if is_legacy_pre_web {
+            report.nav_carried_over_mismatches += 1;
+        } else {
+            report.nav_mismatches += 1;
+            report.first_nav_mismatch_idx.get_or_insert(frame_idx);
+        }
     }
 }
 
