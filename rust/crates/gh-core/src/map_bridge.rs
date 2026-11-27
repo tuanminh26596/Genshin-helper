@@ -6449,13 +6449,13 @@ mod tests {
         }
 
         // Verify forward-only base fallback on non-invertible ocean fold-over sides just outside 350u pad.
-        let as2 = provider_default_transform("appsample", 2).expect("appsample:2");
+        let as2 = provider_default_transform("appsample", 2).expect("appsample map 2");
         for (cx, cy) in [(-569.0, 6000.0), (-13939.4, 1500.0)] {
             let (px, py) = as2.forward(cx, cy);
             let (bx, by) = as2.base.transform(cx, cy);
             assert!(
                 (px - bx).abs() <= forward_abs && (py - by).abs() <= forward_abs,
-                "appsample:2 ({cx}, {cy}) did not fall back to base"
+                "appsample map 2 ({cx}, {cy}) did not fall back to base"
             );
         }
     }

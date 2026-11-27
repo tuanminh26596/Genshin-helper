@@ -1828,7 +1828,7 @@ mod tests {
             .on_nav_command(&json!({
                 "action": "lock_target",
                 "pin": {
-                    "id": "appsample:5001",
+                    "id": "appsample:7101",
                     "name": "Exquisite Chest",
                     "lat": 10.0,
                     "lng": 20.0,

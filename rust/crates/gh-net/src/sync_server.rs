@@ -6947,12 +6947,12 @@ mod tests {
 
         // 1. All 7 routed event types receive target_provider + owner_tab_id.
         let routed_cases = vec![
-            json!({"type": "NAV_MARK_PIN", "action": "mark", "pin_id": "appsample:5001"}),
+            json!({"type": "NAV_MARK_PIN", "action": "mark", "pin_id": "appsample:7301"}),
             json!({"type": "SYNC_AND_MARK", "map_id": 2, "lat": 1.0, "lng": 2.0}),
-            json!({"type": "TARGET_LOCK_UPDATED", "locked_target": {"id": "appsample:5001"}}),
+            json!({"type": "TARGET_LOCK_UPDATED", "locked_target": {"id": "appsample:7301"}}),
             json!({"type": "TSP_ROUTE_UPDATED", "map_id": 2}),
             json!({"type": "FOCUS_MAP_TAB"}),
-            json!({"type": "LAN_FOCUS_PIN", "pin_id": "appsample:5001"}),
+            json!({"type": "LAN_FOCUS_PIN", "pin_id": "appsample:7301"}),
             json!({"type": "LAN_SET_FLOOR", "floor_id": "10"}),
         ];
         for msg in routed_cases {

@@ -62,18 +62,16 @@ function resolveQaSessionMetaPath() {
   const rel = join('scratch', 'qa_sessions', 'sess_20261127_211043', 'meta.jsonl');
   const direct = join(ROOT, rel);
   if (existsSync(direct)) return direct;
-  try {
-    const out = spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: ROOT, encoding: 'utf8' });
-    if (out.status === 0 && out.stdout) {
-      for (const line of out.stdout.split(/\r?\n/)) {
-        if (line.startsWith('worktree ')) {
-          const wtPath = line.slice('worktree '.length).trim();
-          const candidate = join(wtPath, rel);
-          if (existsSync(candidate)) return candidate;
-        }
+  const out = spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: ROOT, encoding: 'utf8' });
+  if (!out.error && out.status === 0 && out.stdout) {
+    for (const line of out.stdout.split(/\r?\n/)) {
+      if (line.startsWith('worktree ')) {
+        const wtPath = line.slice('worktree '.length).trim();
+        const candidate = join(wtPath, rel);
+        if (existsSync(candidate)) return candidate;
       }
     }
-  } catch (e) {}
+  }
   return null;
 }
 
@@ -145,7 +143,11 @@ class Cdp {
     }
     return r.result && r.result.result ? r.result.result.value : undefined;
   }
-  close() { try { this.ws.close(); } catch (e) {} }
+  close() {
+    if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+      this.ws.close();
+    }
+  }
 }
 
 // Helper expression snippets run inside the target page
@@ -257,8 +259,8 @@ async function main() {
     for (const c of sessions) c.close();
     if (process.platform === 'win32' && proc.pid) {
       spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore' });
-    } else {
-      try { proc.kill(); } catch (e) {}
+    } else if (!proc.killed && proc.exitCode === null) {
+      proc.kill();
     }
     await Promise.race([procExited, sleep(2000)]);
     await sleep(300);
@@ -275,10 +277,14 @@ async function main() {
     for (const c of sessions) c.close();
     if (process.platform === 'win32' && proc.pid) {
       spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore' });
-    } else {
-      try { proc.kill(); } catch (e) {}
+    } else if (!proc.killed && proc.exitCode === null) {
+      proc.kill();
     }
-    try { rmSync(profile, { recursive: true, force: true }); } catch (e) {}
+    try {
+      rmSync(profile, { recursive: true, force: true });
+    } catch (e) {
+      console.warn(`[WARN] abort cleanup failed for ${profile}: ${e && e.code ? e.code : e}`);
+    }
   };
 
   const results = [];
@@ -356,7 +362,11 @@ async function main() {
           { name: 'Access-Control-Allow-Origin', value: '*' }
         ],
         body: Buffer.from(JSON.stringify(payload), 'utf8').toString('base64')
-      }).catch(() => {});
+      }).catch((err) => {
+        if (sw.ws.readyState === WebSocket.OPEN) {
+          console.warn('[WARN] Fetch.fulfillRequest failed:', err && err.message ? err.message : err);
+        }
+      });
     };
 
     const pushServerEvent = (ev) => {
@@ -470,8 +480,12 @@ async function main() {
     };
 
     const closeTab = async (tab) => {
-      try { tab.page.close(); } catch (e) {}
-      try { await fetch(`http://127.0.0.1:${port}/json/close/${tab.targetId}`, { signal: AbortSignal.timeout(5000) }); } catch (e) {}
+      tab.page.close();
+      try {
+        await fetch(`http://127.0.0.1:${port}/json/close/${tab.targetId}`, { signal: AbortSignal.timeout(5000) });
+      } catch (e) {
+        console.warn(`[WARN] closeTab(${tab.targetId}) failed:`, e && e.message ? e.message : e);
+      }
     };
 
     const waitUntil = async (fn, timeoutMs = 45000, intervalMs = 400) => {
@@ -843,7 +857,11 @@ async function main() {
       await kyTab.page.eval(`(async () => {
         const ctx = window.__GH_BRIDGE__.getContext();
         if (ctx && ctx.vm && typeof ctx.vm.teleport_switch === 'function') {
-          try { ctx.vm.teleport_switch(); } catch (e) {}
+          try {
+            ctx.vm.teleport_switch();
+          } catch (e) {
+            console.warn('[provider_live_smoke] teleport_switch failed:', String(e));
+          }
         }
         const headers = Array.from(document.querySelectorAll('.item_selector_item .item_header'));
         if (headers[0]) headers[0].click();
@@ -851,7 +869,11 @@ async function main() {
         const leaves = Array.from(document.querySelectorAll('.item_selector_item .item_content > div, .item_selector_item img'))
           .filter((el) => el.offsetWidth > 0 && el.offsetHeight > 0);
         for (const el of leaves.slice(0, 3)) {
-          try { el.click(); } catch (e) {}
+          try {
+            el.click();
+          } catch (e) {
+            console.warn('[provider_live_smoke] selector leaf click failed:', String(e));
+          }
         }
       })()`);
 

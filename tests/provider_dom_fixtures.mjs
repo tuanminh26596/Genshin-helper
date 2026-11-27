@@ -129,7 +129,9 @@ class Cdp {
     });
   }
   close() {
-    try { this.ws.close(); } catch (e) {}
+    if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+      this.ws.close();
+    }
   }
 }
 
@@ -493,8 +495,8 @@ async function main() {
     for (const c of sessions) c.close();
     if (process.platform === 'win32' && proc.pid) {
       spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore' });
-    } else {
-      try { proc.kill(); } catch (e) {}
+    } else if (!proc.killed && proc.exitCode === null) {
+      proc.kill();
     }
     await Promise.race([procExited, sleep(2000)]);
     await sleep(250);
@@ -511,10 +513,14 @@ async function main() {
     for (const c of sessions) c.close();
     if (process.platform === 'win32' && proc.pid) {
       spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore' });
-    } else {
-      try { proc.kill(); } catch (e) {}
+    } else if (!proc.killed && proc.exitCode === null) {
+      proc.kill();
     }
-    try { rmSync(profile, { recursive: true, force: true }); } catch (e) {}
+    try {
+      rmSync(profile, { recursive: true, force: true });
+    } catch (e) {
+      console.warn(`[WARN] abort cleanup failed for ${profile}: ${e && e.code ? e.code : e}`);
+    }
   };
 
   const counts = { pass: 0, fail: 0, 'known-fail': 0, xpass: 0 };
@@ -552,12 +558,14 @@ async function main() {
       if (m.method !== 'Fetch.requestPaused') return;
       const reqUrl = m.params.request.url;
       let match = routeMap.get(reqUrl);
-      if (!match) {
-        try {
-          const u = new URL(reqUrl);
-          match = routeMap.get(u.pathname);
-        } catch (e) {}
+      if (!match && URL.canParse(reqUrl)) {
+        match = routeMap.get(new URL(reqUrl).pathname);
       }
+      const onInterceptErr = (err) => {
+        if (page.ws.readyState === WebSocket.OPEN) {
+          console.warn('[WARN] Fetch intercept reply failed:', err && err.message ? err.message : err);
+        }
+      };
       if (match) {
         page.send('Fetch.fulfillRequest', {
           requestId: m.params.requestId,
@@ -567,12 +575,12 @@ async function main() {
             { name: 'Cache-Control', value: 'no-store' }
           ],
           body: Buffer.from(match.body, 'utf8').toString('base64')
-        }).catch(() => {});
+        }).catch(onInterceptErr);
       } else {
         page.send('Fetch.failRequest', {
           requestId: m.params.requestId,
           errorReason: 'BlockedByClient'
-        }).catch(() => {});
+        }).catch(onInterceptErr);
       }
     });
     await page.send('Fetch.enable', { patterns: [{ urlPattern: 'http://*' }, { urlPattern: 'https://*' }] });

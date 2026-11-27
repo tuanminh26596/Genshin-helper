@@ -2986,7 +2986,7 @@ mod tests {
         let provider: &dyn GuideProvider = &fetcher;
 
         for invalid_id in [
-            "appsample:5001",
+            "appsample:7201",
             "kongying:777",
             "custom:1",
             "",
@@ -3088,7 +3088,7 @@ mod tests {
             "file:///C:/Windows/win.ini",
             "file://assets.yuanshen.site/a.png",
             "data:image/png;base64,iVBORw0KGgo=",
-            "javascript:alert(1)",
+            "javascript:void(0)",
             "ftp://assets.yuanshen.site/a.png",
             "https://assets.yuanshen.site/a.png\r\nX-Inject: 1",
         ];
