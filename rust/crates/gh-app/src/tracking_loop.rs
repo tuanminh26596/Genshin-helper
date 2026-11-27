@@ -227,12 +227,34 @@ pub struct PostTickContext {
 pub struct TickPostSummary {
     pub map_m_synced: bool,
     pub map_m_anchor: Option<(i32, f64, f64, bool)>,
+    pub map_m_sync_payload: Option<Value>,
     pub pending_verify_scheduled: bool,
     pub pending_verify_corrected: bool,
     pub broadcast_minimap_pos: bool,
     pub nav_state: Option<String>,
     pub gate_reject_streak: usize,
     pub hdr_clip_streak: usize,
+}
+
+/// Builds the exact `SYNC_POSITION_ONLY` broadcast payload used by M-Map auto-sync and
+/// pending-verify correction.
+pub fn build_sync_position_only_payload(res: &LocateResult, lang: &str) -> Value {
+    let mid = res.map_id.unwrap_or(2);
+    let loc_map = HoYoLABLabelCatalog::get_map_name(
+        mid,
+        Some(lang),
+        res.map_name.as_deref().unwrap_or(""),
+    );
+    let mut bcast = match res.to_json_value() {
+        Value::Object(m) => m,
+        _ => Map::new(),
+    };
+    bcast.insert(
+        "type".to_owned(),
+        Value::String("SYNC_POSITION_ONLY".to_owned()),
+    );
+    bcast.insert("map_name".to_owned(), Value::String(loc_map));
+    Value::Object(bcast)
 }
 
 #[derive(Debug, Clone)]
@@ -799,24 +821,10 @@ pub fn apply_tick_output(
                                 }
                             } else {
                                 let mid = res.map_id.unwrap_or(2);
+                                let lang = get_language();
+                                let payload = build_sync_position_only_payload(&res, &lang);
                                 if emit_ui {
-                                    let lang = get_language();
-                                    let loc_map = HoYoLABLabelCatalog::get_map_name(
-                                        mid,
-                                        Some(&lang),
-                                        res.map_name.as_deref().unwrap_or(""),
-                                    );
-                                    let mut bcast = match res.to_json_value() {
-                                        Value::Object(m) => m,
-                                        _ => Map::new(),
-                                    };
-                                    bcast.insert(
-                                        "type".to_owned(),
-                                        Value::String("SYNC_POSITION_ONLY".to_owned()),
-                                    );
-                                    bcast.insert("map_name".to_owned(), Value::String(loc_map));
-                                    let seq =
-                                        state.server.broadcast(Value::Object(bcast), false, false);
+                                    let seq = state.server.broadcast(payload.clone(), false, false);
                                     state.record_session_event_with("sync_broadcast", || {
                                         json!({
                                             "seq": seq,
@@ -827,6 +835,7 @@ pub fn apply_tick_output(
                                 }
                                 state.apply_map_m_anchor(&res);
                                 summary.map_m_synced = true;
+                                summary.map_m_sync_payload = Some(payload);
                                 if let (Some(wx), Some(wy)) = (res.world_x, res.world_y) {
                                     summary.map_m_anchor = Some((mid, wx, wy, res.is_underground));
                                 }
@@ -869,24 +878,11 @@ pub fn apply_tick_output(
                                     || (!same_layer && v_inl >= p_inl)
                                 {
                                     let mid = v_res.map_id.unwrap_or(2);
+                                    let lang = get_language();
+                                    let payload = build_sync_position_only_payload(&v_res, &lang);
                                     if emit_ui {
-                                        let lang = get_language();
-                                        let loc_map = HoYoLABLabelCatalog::get_map_name(
-                                            mid,
-                                            Some(&lang),
-                                            v_res.map_name.as_deref().unwrap_or(""),
-                                        );
-                                        let mut bcast = match v_res.to_json_value() {
-                                            Value::Object(m) => m,
-                                            _ => Map::new(),
-                                        };
-                                        bcast.insert(
-                                            "type".to_owned(),
-                                            Value::String("SYNC_POSITION_ONLY".to_owned()),
-                                        );
-                                        bcast.insert("map_name".to_owned(), Value::String(loc_map));
                                         let seq = state.server.broadcast(
-                                            Value::Object(bcast),
+                                            payload.clone(),
                                             false,
                                             false,
                                         );
@@ -903,6 +899,7 @@ pub fn apply_tick_output(
                                     summary.pending_verify_corrected = true;
                                     summary.map_m_anchor =
                                         Some((mid, vwx, vwy, v_res.is_underground));
+                                    summary.map_m_sync_payload = Some(payload);
                                 }
                             }
                         }
@@ -2525,5 +2522,77 @@ mod tests {
         assert_eq!(rects[1], (0, 0, hud.width as i32, hud.height as i32));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn build_sync_position_only_payload_matches_legacy_inline_json() {
+        let sample = LocateResult {
+            detected: true,
+            has_world_coords: true,
+            map_id: Some(34),
+            map_name: Some("Sea of Bygone Eras".to_owned()),
+            area_id: Some(9),
+            area_name: Some("Fontaine".to_owned()),
+            world_x: Some(123.5),
+            world_y: Some(-456.25),
+            lat: Some(456.25),
+            lng: Some(123.5),
+            pixel_x: 1280.0,
+            pixel_y: 720.0,
+            heading: 90.0,
+            scale: Some(1.25),
+            inliers_count: Some(6),
+            rmse: Some(1.1),
+            is_underground: true,
+            in_game_is_underground: Some(true),
+            floor_idx: 1,
+            total_floors: 2,
+            active_floor_idx: 1,
+            surface_idx: 0,
+            floor_name: "Lower".to_owned(),
+            floor_short: "L2".to_owned(),
+            hoyolab_floor_name: Some("Lower Level".to_owned()),
+            group_id: Some(101),
+            group_name: Some("Cavern".to_owned()),
+            floor_id: Some(202),
+            has_layers: true,
+            zoom_ratio_t: Some(0.45),
+            candidates: None,
+            inliers: None,
+            slider_res: None,
+            region_text: None,
+            target_map_id: None,
+            target_area_id: None,
+            slot_types: None,
+            reason: None,
+            debug_included: false,
+        };
+
+        for lang in ["en", "vi"] {
+            let mid = sample.map_id.unwrap_or(2);
+            let loc_map = HoYoLABLabelCatalog::get_map_name(
+                mid,
+                Some(lang),
+                sample.map_name.as_deref().unwrap_or(""),
+            );
+            let mut expected = match sample.to_json_value() {
+                Value::Object(m) => m,
+                _ => Map::new(),
+            };
+            expected.insert(
+                "type".to_owned(),
+                Value::String("SYNC_POSITION_ONLY".to_owned()),
+            );
+            expected.insert("map_name".to_owned(), Value::String(loc_map.clone()));
+
+            let actual = build_sync_position_only_payload(&sample, lang);
+            assert_eq!(actual, Value::Object(expected));
+            assert_eq!(actual["type"], "SYNC_POSITION_ONLY");
+            assert_eq!(actual["map_name"], loc_map);
+            assert_eq!(actual["map_id"], 34);
+            assert_eq!(actual["has_world_coords"], true);
+            assert_eq!(actual["lat"], 456.25);
+            assert_eq!(actual["lng"], 123.5);
+        }
     }
 }

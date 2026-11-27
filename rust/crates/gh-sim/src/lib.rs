@@ -7,3 +7,4 @@ pub mod import_diag;
 pub mod qa;
 pub mod replay;
 pub mod verified_gt;
+pub mod web_bench;

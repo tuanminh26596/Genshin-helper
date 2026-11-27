@@ -239,6 +239,14 @@ pub struct ObservedFrame {
     pub is_underground: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MapMSyncRecord {
+    pub frame_idx: usize,
+    pub ts: f64,
+    pub map_id: i32,
+    pub payload: Value,
+}
+
 struct TempSandboxDir(PathBuf);
 
 impl TempSandboxDir {
@@ -914,6 +922,12 @@ pub fn run_replay(opts: &ReplayOptions) -> Result<ReplayReport, String> {
 pub fn run_replay_with_poses(
     opts: &ReplayOptions,
 ) -> Result<(ReplayReport, Vec<ObservedFrame>), String> {
+    run_replay_full(opts).map(|(report, poses, _)| (report, poses))
+}
+
+pub fn run_replay_full(
+    opts: &ReplayOptions,
+) -> Result<(ReplayReport, Vec<ObservedFrame>, Vec<MapMSyncRecord>), String> {
     let kind = detect_session_kind(&opts.source_dir)?;
     let session_name = opts
         .source_dir
@@ -1037,6 +1051,7 @@ pub fn run_replay_with_poses(
     let mut post_tick = PostTickTelemetry::default();
     let mut tick_ms = Vec::with_capacity(records.len());
     let mut observed = Vec::with_capacity(records.len());
+    let mut map_m_syncs: Vec<MapMSyncRecord> = Vec::new();
     let mut last_rendered_idx: Option<usize> = None;
     let wall_t0 = Instant::now();
 
@@ -1266,6 +1281,19 @@ pub fn run_replay_with_poses(
                 obs.is_underground = ug;
             }
         }
+        if let Some(payload) = summary.map_m_sync_payload {
+            let map_id = summary
+                .map_m_anchor
+                .map(|(mid, _, _, _)| mid)
+                .or_else(|| payload.get("map_id").and_then(Value::as_i64).map(|v| v as i32))
+                .unwrap_or(2);
+            map_m_syncs.push(MapMSyncRecord {
+                frame_idx: rec.idx,
+                ts: rec.ts,
+                map_id,
+                payload,
+            });
+        }
         if summary.pending_verify_scheduled {
             post_tick.pending_verify_scheduled += 1;
         }
@@ -1351,7 +1379,7 @@ pub fn run_replay_with_poses(
             .map_err(|e| format!("failed to write {}: {e}", out_path.display()))?;
     }
 
-    Ok((report, observed))
+    Ok((report, observed, map_m_syncs))
 }
 
 fn apply_pose_to_obs(pose: &MinimapPose, obs: &mut ObservedFrame) {

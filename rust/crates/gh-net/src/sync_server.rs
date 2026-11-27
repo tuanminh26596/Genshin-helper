@@ -612,6 +612,15 @@ impl SyncServer {
         }
     }
 
+    /// Number of clients currently waiting inside a `/poll` long-poll request.
+    pub fn active_poll_waiters(&self) -> usize {
+        self.inner
+            .poll_state
+            .lock()
+            .expect("poll_state lock poisoned")
+            .active_waiters
+    }
+
     /// Whether the user can currently see a HoYoLAB map tab (fresh `visible` report from any
     /// tab). Drives who owns sync feedback: the web page when visible, the in-game HUD otherwise.
     pub fn any_map_tab_visible(&self) -> bool {
