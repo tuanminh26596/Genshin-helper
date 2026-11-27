@@ -815,7 +815,15 @@ pub fn apply_tick_output(
                                         Value::String("SYNC_POSITION_ONLY".to_owned()),
                                     );
                                     bcast.insert("map_name".to_owned(), Value::String(loc_map));
-                                    state.server.broadcast(Value::Object(bcast), false, false);
+                                    let seq =
+                                        state.server.broadcast(Value::Object(bcast), false, false);
+                                    state.record_session_event_with("sync_broadcast", || {
+                                        json!({
+                                            "seq": seq,
+                                            "msg_type": "SYNC_POSITION_ONLY",
+                                            "map_id": mid,
+                                        })
+                                    });
                                 }
                                 state.apply_map_m_anchor(&res);
                                 summary.map_m_synced = true;
@@ -877,7 +885,18 @@ pub fn apply_tick_output(
                                             Value::String("SYNC_POSITION_ONLY".to_owned()),
                                         );
                                         bcast.insert("map_name".to_owned(), Value::String(loc_map));
-                                        state.server.broadcast(Value::Object(bcast), false, false);
+                                        let seq = state.server.broadcast(
+                                            Value::Object(bcast),
+                                            false,
+                                            false,
+                                        );
+                                        state.record_session_event_with("sync_broadcast", || {
+                                            json!({
+                                                "seq": seq,
+                                                "msg_type": "SYNC_POSITION_ONLY",
+                                                "map_id": mid,
+                                            })
+                                        });
                                     }
                                     state.apply_map_m_anchor(&v_res);
                                     summary.map_m_synced = true;

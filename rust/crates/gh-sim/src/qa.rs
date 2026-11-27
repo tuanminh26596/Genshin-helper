@@ -288,6 +288,30 @@ pub struct HeadingStabilityGateOutcome {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MMapOpenLatency {
+    pub open_ts: f64,
+    pub map_id: Option<i32>,
+    pub engine_synced_s: Option<f64>,
+    pub broadcast_s: Option<f64>,
+    pub hud_s: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MMapLatencySummary {
+    pub count: usize,
+    pub median_hud_s: Option<f64>,
+    pub max_hud_s: Option<f64>,
+    pub no_hud_count: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LiveMMapLatency {
+    pub available: bool,
+    pub opens: Vec<MMapOpenLatency>,
+    pub summary: MMapLatencySummary,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QaSessionResult {
     pub session_name: String,
@@ -314,6 +338,8 @@ pub struct QaSessionResult {
     pub vs_meta_ref: MetaReferenceSummary,
     #[serde(default)]
     pub heading_stability: SessionHeadingStability,
+    #[serde(default)]
+    pub live_mmap_latency: LiveMMapLatency,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -623,6 +649,225 @@ pub fn load_live_meta_heading_stability(meta_path: &Path) -> Option<HeadingStabi
     })
 }
 
+fn median_f64(vals: &[f64]) -> Option<f64> {
+    let mut clean: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
+    if clean.is_empty() {
+        return None;
+    }
+    clean.sort_by(f64::total_cmp);
+    let n = clean.len();
+    if n % 2 == 1 {
+        Some(clean[n / 2])
+    } else {
+        Some((clean[n / 2 - 1] + clean[n / 2]) * 0.5)
+    }
+}
+
+fn parse_event_seq(v: Option<&Value>) -> u64 {
+    match v {
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .or_else(|| n.as_i64().and_then(|i| u64::try_from(i).ok()))
+            .unwrap_or(0),
+        Some(Value::String(s)) => s.trim().parse::<u64>().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+struct MetaFrameRow {
+    ts: f64,
+    mode: Option<String>,
+    state: Option<String>,
+    map_id: Option<i32>,
+}
+
+struct MetaAppEvent {
+    ts: f64,
+    kind: String,
+    seq: u64,
+    status: Option<String>,
+}
+
+struct MMapOpenSpan {
+    open_ts: f64,
+    end_frame_idx: usize,
+    end_ts: f64,
+    engine_synced_ts: Option<f64>,
+}
+
+/// Computes per-M-open live latency breakdown (`engine_synced_s`, `broadcast_s`, `hud_s`) and
+/// summary from parsed `meta.jsonl` frame objects.
+///
+/// Informational only: returns `available: false` when no `events` array appears in `meta.jsonl`.
+pub fn compute_live_mmap_latency(records: &[Value]) -> LiveMMapLatency {
+    let mut frames: Vec<MetaFrameRow> = Vec::with_capacity(records.len());
+    let mut events: Vec<MetaAppEvent> = Vec::new();
+    let mut has_events = false;
+
+    for v in records {
+        if let Some(arr) = v.get("events").and_then(Value::as_array) {
+            has_events = true;
+            for ev in arr {
+                let Some(ts) = ev.get("ts").and_then(Value::as_f64).filter(|f| f.is_finite())
+                else {
+                    continue;
+                };
+                let Some(kind) = ev.get("kind").and_then(Value::as_str) else {
+                    continue;
+                };
+                events.push(MetaAppEvent {
+                    ts,
+                    kind: kind.to_owned(),
+                    seq: parse_event_seq(ev.get("seq")),
+                    status: ev.get("status").and_then(Value::as_str).map(str::to_owned),
+                });
+            }
+        }
+        let Some(ts) = v.get("ts").and_then(Value::as_f64).filter(|f| f.is_finite()) else {
+            continue;
+        };
+        let mode = v.get("mode").and_then(Value::as_str).map(str::to_owned);
+        let state = v.get("state").and_then(Value::as_str).map(str::to_owned);
+        let map_id = v
+            .get("map_id")
+            .and_then(Value::as_i64)
+            .and_then(|n| i32::try_from(n).ok());
+        frames.push(MetaFrameRow {
+            ts,
+            mode,
+            state,
+            map_id,
+        });
+    }
+
+    if !has_events {
+        return LiveMMapLatency::default();
+    }
+
+    events.sort_by(|a, b| a.ts.total_cmp(&b.ts));
+
+    let mut seen_non_map_m = false;
+    let mut cur_open: Option<MMapOpenSpan> = None;
+    let mut spans: Vec<MMapOpenSpan> = Vec::new();
+
+    for (idx, frame) in frames.iter().enumerate() {
+        let is_map_m = frame.mode.as_deref() == Some("map_m");
+        if is_map_m {
+            let is_synced_state = matches!(
+                frame.state.as_deref(),
+                Some("MAP_M_SyncedIdle") | Some("MAP_M_Panning")
+            );
+            if let Some(ref mut open) = cur_open {
+                open.end_frame_idx = idx;
+                open.end_ts = frame.ts;
+                if open.engine_synced_ts.is_none() && is_synced_state {
+                    open.engine_synced_ts = Some(frame.ts);
+                }
+            } else if seen_non_map_m {
+                cur_open = Some(MMapOpenSpan {
+                    open_ts: frame.ts,
+                    end_frame_idx: idx,
+                    end_ts: frame.ts,
+                    engine_synced_ts: is_synced_state.then_some(frame.ts),
+                });
+            }
+        } else {
+            if let Some(open) = cur_open.take() {
+                spans.push(open);
+            }
+            seen_non_map_m = true;
+        }
+    }
+    if let Some(open) = cur_open.take() {
+        spans.push(open);
+    }
+
+    let mut opens = Vec::with_capacity(spans.len());
+    for span in spans {
+        let broadcast_ev = events.iter().find(|e| {
+            e.kind == "sync_broadcast" && e.ts >= span.open_ts && e.ts <= span.end_ts + 10.0
+        });
+        let hud_ev = broadcast_ev.and_then(|bc| {
+            if bc.seq != 0
+                && let Some(by_seq) = events.iter().find(|e| {
+                    e.kind == "web_feedback"
+                        && e.status
+                            .as_deref()
+                            .is_some_and(|s| s.eq_ignore_ascii_case("synced"))
+                        && e.seq == bc.seq
+                })
+            {
+                return Some(by_seq);
+            }
+            events.iter().find(|e| {
+                e.kind == "web_feedback"
+                    && e.status
+                        .as_deref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case("synced"))
+                    && (bc.seq == 0 || e.seq == 0)
+                    && e.ts >= bc.ts
+                    && e.ts <= bc.ts + 15.0
+            })
+        });
+        let map_id = frames[span.end_frame_idx + 1..]
+            .iter()
+            .take_while(|f| f.mode.as_deref() != Some("map_m"))
+            .find(|f| {
+                matches!(f.mode.as_deref(), Some("minimap") | Some("minimap_fast"))
+                    && f.state.as_deref() == Some("TRACKING")
+                    && f.map_id.is_some()
+            })
+            .and_then(|f| f.map_id);
+
+        opens.push(MMapOpenLatency {
+            open_ts: span.open_ts,
+            map_id,
+            engine_synced_s: span.engine_synced_ts.map(|t| round3(t - span.open_ts)),
+            broadcast_s: broadcast_ev.map(|e| round3(e.ts - span.open_ts)),
+            hud_s: hud_ev.map(|e| round3(e.ts - span.open_ts)),
+        });
+    }
+
+    let hud_vals: Vec<f64> = opens.iter().filter_map(|o| o.hud_s).collect();
+    let count = opens.len();
+    let no_hud_count = count.saturating_sub(hud_vals.len());
+    let summary = MMapLatencySummary {
+        count,
+        median_hud_s: median_f64(&hud_vals).map(round3),
+        max_hud_s: hud_vals.iter().copied().reduce(f64::max).map(round3),
+        no_hud_count,
+    };
+
+    LiveMMapLatency {
+        available: true,
+        opens,
+        summary,
+    }
+}
+
+/// Loads `meta.jsonl` and computes live M-Map HUD latency stats (informational only).
+pub fn load_live_mmap_latency(meta_path: &Path) -> LiveMMapLatency {
+    let Ok(file) = std::fs::File::open(meta_path) else {
+        return LiveMMapLatency::default();
+    };
+    let reader = BufReader::new(file);
+    let mut records = Vec::new();
+    for line_res in reader.lines() {
+        let Ok(line) = line_res else {
+            return LiveMMapLatency::default();
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+            return LiveMMapLatency::default();
+        };
+        records.push(v);
+    }
+    compute_live_mmap_latency(&records)
+}
+
 /// Evaluates heading stability of `replay` against `blessed` (when available).
 ///
 /// - When `blessed` is `Some(b)`: fails if replay flips or spikes (body or camera) exceed the
@@ -850,7 +1095,7 @@ fn fmt_opt_w(v: Option<f64>) -> String {
 
 pub fn format_qa_header() -> String {
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:>6}  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:>6}  {}",
         "Session",
         "Status",
         "Frames",
@@ -859,6 +1104,7 @@ pub fn format_qa_header() -> String {
         "MMap(sync/acq)",
         "vs Meta[ref]",
         "Arrow (b/c flips)",
+        "HUD(p50/max)",
         "Time",
         "Reason"
     )
@@ -894,8 +1140,16 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
             hs.replay.body.flips, hs.replay.camera.flips
         ),
     };
+    let hud_col = match (
+        r.live_mmap_latency.available,
+        r.live_mmap_latency.summary.median_hud_s,
+        r.live_mmap_latency.summary.max_hud_s,
+    ) {
+        (true, Some(med), Some(max)) => format!("{med:.1}/{max:.1}s"),
+        _ => "n/a".to_owned(),
+    };
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:>5.1}s  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:>5.1}s  {}",
         r.session_name,
         r.status,
         r.frames,
@@ -904,6 +1158,7 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
         mmap_col,
         meta_col,
         arrow_col,
+        hud_col,
         r.wall_elapsed_s,
         r.reason
     )
@@ -937,7 +1192,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
     let total_t0 = Instant::now();
 
     let header = format_qa_header();
-    let sep = "-".repeat(header.len().min(172));
+    let sep = "-".repeat(header.len().min(186));
     println!("{header}");
     println!("{sep}");
     let _ = std::io::stdout().flush();
@@ -970,8 +1225,9 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
         let (report, poses) = run_replay_with_poses(&replay_opts)?;
         let meta_ref = meta_ref_from_report(&report);
         let replay_heading_stability = compute_observed_heading_stability(&poses);
-        let live_meta_heading_stability =
-            load_live_meta_heading_stability(&sdir.join("meta.jsonl"));
+        let meta_path = sdir.join("meta.jsonl");
+        let live_meta_heading_stability = load_live_meta_heading_stability(&meta_path);
+        let live_mmap_latency = load_live_mmap_latency(&meta_path);
         let blessed_path = sdir.join(BLESSED_POSES_FILENAME);
 
         let result = if opts.bless {
@@ -1042,6 +1298,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                     blessed: Some(replay_heading_stability),
                     live_meta: live_meta_heading_stability,
                 },
+                live_mmap_latency,
             }
         } else {
             match baseline.sessions.get(&session_name) {
@@ -1072,6 +1329,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                         blessed: None,
                         live_meta: live_meta_heading_stability,
                     },
+                    live_mmap_latency,
                 },
                 Some(base_sess) => {
                     let mut reasons = Vec::new();
@@ -1169,6 +1427,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                             blessed: blessed_heading_stability,
                             live_meta: live_meta_heading_stability,
                         },
+                        live_mmap_latency,
                     }
                 }
             }
@@ -2150,11 +2409,135 @@ mod tests {
                     },
                 }),
             },
+            live_mmap_latency: LiveMMapLatency::default(),
         };
         let formatted = format_qa_row(&row_with_live);
         assert!(
             formatted.contains("b8/c0 live b8/c0"),
             "unexpected row: {formatted}"
         );
+        assert!(hdr.contains("HUD"), "header missing HUD: {hdr}");
+        assert!(formatted.contains("n/a"), "unavailable latency should print n/a: {formatted}");
+
+        let mut row_with_hud = row_with_live;
+        row_with_hud.live_mmap_latency = LiveMMapLatency {
+            available: true,
+            opens: vec![],
+            summary: MMapLatencySummary {
+                count: 2,
+                median_hud_s: Some(0.9),
+                max_hud_s: Some(4.2),
+                no_hud_count: 0,
+            },
+        };
+        let formatted_hud = format_qa_row(&row_with_hud);
+        assert!(
+            formatted_hud.contains("0.9/4.2s"),
+            "unexpected HUD column in row: {formatted_hud}"
+        );
+    }
+
+    #[test]
+    fn live_mmap_latency_synthetic_seq_match_time_fallback_missing_feedback_and_unavailable() {
+        let tmp = TempDir::new("gh_sim_mmap_lat");
+        let mp = tmp.0.join("meta.jsonl");
+
+        // 3 M-opens:
+        // - Open #1 (ts=10.0..12.0): engine_synced at 10.25 (+0.25s), broadcast seq=10 at 10.30 (+0.30s),
+        //   hud feedback matched by seq=10 at 10.90 (+0.90s), followed by minimap map_id=40.
+        // - Open #2 (ts=30.0..32.0): engine_synced at 30.40 (+0.40s, MAP_M_Panning),
+        //   broadcast seq=20 at 30.50 (+0.50s), feedback has seq=0 at 34.20 (+4.20s, matched via time fallback),
+        //   followed by minimap map_id=34.
+        // - Open #3 (ts=60.0..61.0): engine_synced at 60.20 (+0.20s), broadcast seq=30 at 60.25 (+0.25s),
+        //   no matching feedback (only an unrelated status="marked" and another non-zero seq=99),
+        //   followed by minimap map_id=2.
+        let lines = vec![
+            json!({"i": 1, "ts": 9.5, "mode": "minimap", "state": "TRACKING", "map_id": 2}),
+            // Open #1
+            json!({"i": 2, "ts": 10.0, "mode": "map_m", "state": "MAP_M_Settling"}),
+            json!({"i": 3, "ts": 10.25, "mode": "map_m", "state": "MAP_M_SyncedIdle", "events": [
+                {"ts": 10.30, "kind": "sync_broadcast", "seq": 10, "msg_type": "SYNC_POSITION_ONLY", "map_id": 40}
+            ]}),
+            json!({"i": 4, "ts": 12.0, "mode": "map_m", "state": "MAP_M_Closed", "events": [
+                {"ts": 10.90, "kind": "web_feedback", "event_type": "SYNC_POSITION_ONLY", "status": "synced", "seq": 10}
+            ]}),
+            json!({"i": 5, "ts": 12.1, "mode": "minimap", "state": "RELOCALIZING", "map_id": null}),
+            json!({"i": 6, "ts": 12.2, "mode": "minimap", "state": "TRACKING", "map_id": 40}),
+            // Open #2
+            json!({"i": 7, "ts": 30.0, "mode": "map_m", "state": "MAP_M_Settling"}),
+            json!({"i": 8, "ts": 30.4, "mode": "map_m", "state": "MAP_M_Panning"}),
+            json!({"i": 9, "ts": 32.0, "mode": "map_m", "state": "MAP_M_Closed", "events": [
+                {"ts": 30.5, "kind": "sync_broadcast", "seq": 20, "msg_type": "SYNC_POSITION_ONLY", "map_id": 34}
+            ]}),
+            json!({"i": 10, "ts": 34.3, "mode": "minimap", "state": "TRACKING", "map_id": 34, "events": [
+                {"ts": 34.2, "kind": "web_feedback", "event_type": "SYNC_POSITION_ONLY", "status": "synced", "seq": 0}
+            ]}),
+            // Open #3 (no matching feedback)
+            json!({"i": 11, "ts": 60.0, "mode": "map_m", "state": "MAP_M_Settling"}),
+            json!({"i": 12, "ts": 60.2, "mode": "map_m", "state": "MAP_M_SyncedIdle"}),
+            json!({"i": 13, "ts": 61.0, "mode": "map_m", "state": "MAP_M_Closed", "events": [
+                {"ts": 60.25, "kind": "sync_broadcast", "seq": 30, "msg_type": "SYNC_POSITION_ONLY", "map_id": 2}
+            ]}),
+            json!({"i": 14, "ts": 61.5, "mode": "minimap", "state": "TRACKING", "map_id": 2, "events": [
+                {"ts": 61.1, "kind": "web_feedback", "event_type": "NAV_MARK", "status": "marked", "seq": 30},
+                {"ts": 61.2, "kind": "web_feedback", "event_type": "SYNC_POSITION_ONLY", "status": "synced", "seq": 99}
+            ]}),
+        ];
+
+        let mut content = String::new();
+        for l in &lines {
+            content.push_str(&serde_json::to_string(l).unwrap());
+            content.push('\n');
+        }
+        std::fs::write(&mp, content).unwrap();
+
+        let lat = load_live_mmap_latency(&mp);
+        assert!(lat.available);
+        assert_eq!(lat.opens.len(), 3);
+
+        // Open #1 (seq match)
+        assert_eq!(lat.opens[0].open_ts, 10.0);
+        assert_eq!(lat.opens[0].map_id, Some(40));
+        assert_eq!(lat.opens[0].engine_synced_s, Some(0.25));
+        assert_eq!(lat.opens[0].broadcast_s, Some(0.3));
+        assert_eq!(lat.opens[0].hud_s, Some(0.9));
+
+        // Open #2 (time fallback with seq=0)
+        assert_eq!(lat.opens[1].open_ts, 30.0);
+        assert_eq!(lat.opens[1].map_id, Some(34));
+        assert_eq!(lat.opens[1].engine_synced_s, Some(0.4));
+        assert_eq!(lat.opens[1].broadcast_s, Some(0.5));
+        assert_eq!(lat.opens[1].hud_s, Some(4.2));
+
+        // Open #3 (no matching feedback)
+        assert_eq!(lat.opens[2].open_ts, 60.0);
+        assert_eq!(lat.opens[2].map_id, Some(2));
+        assert_eq!(lat.opens[2].engine_synced_s, Some(0.2));
+        assert_eq!(lat.opens[2].broadcast_s, Some(0.25));
+        assert_eq!(lat.opens[2].hud_s, None);
+
+        // Summary: count=3, hud_s=[0.9, 4.2] -> median=2.55, max=4.2, no_hud_count=1
+        assert_eq!(lat.summary.count, 3);
+        assert_eq!(lat.summary.median_hud_s, Some(2.55));
+        assert_eq!(lat.summary.max_hud_s, Some(4.2));
+        assert_eq!(lat.summary.no_hud_count, 1);
+
+        // Legacy meta with no `events` key reports unavailable
+        let mp_legacy = tmp.0.join("meta_legacy.jsonl");
+        std::fs::write(
+            &mp_legacy,
+            concat!(
+                "{\"i\":1,\"ts\":1.0,\"mode\":\"minimap\",\"state\":\"TRACKING\",\"map_id\":2}\n",
+                "{\"i\":2,\"ts\":2.0,\"mode\":\"map_m\",\"state\":\"MAP_M_SyncedIdle\"}\n"
+            ),
+        )
+        .unwrap();
+        let legacy = load_live_mmap_latency(&mp_legacy);
+        assert!(!legacy.available);
+        assert!(legacy.opens.is_empty());
+        assert_eq!(legacy.summary.count, 0);
+        assert_eq!(legacy.summary.median_hud_s, None);
+        assert_eq!(legacy.summary.max_hud_s, None);
+        assert_eq!(legacy.summary.no_hud_count, 0);
     }
 }

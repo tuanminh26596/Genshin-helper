@@ -250,6 +250,25 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn record_session_event_with<F>(&self, kind: &str, build_fields: F)
+    where
+        F: FnOnce() -> Value,
+    {
+        if let Some(srec) = self
+            .session_recorder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            && srec.active()
+        {
+            srec.record_event(
+                self.start_instant.elapsed().as_secs_f64(),
+                kind,
+                build_fields(),
+            );
+        }
+    }
+
     pub fn floor_resolver(&self) -> AppFloorResolver {
         AppFloorResolver {
             locator: self.locator.clone(),
