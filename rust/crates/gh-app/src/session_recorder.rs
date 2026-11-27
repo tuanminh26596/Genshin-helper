@@ -36,6 +36,9 @@ pub const DEFAULT_SESSION_FPS: f64 = 20.0;
 const DEFAULT_SESSION_QUEUE: usize = 64;
 pub const WEB_INPUTS_FILENAME: &str = "web_inputs.jsonl";
 
+/// Callback name for the initial navigation/HUD snapshot captured when session recording starts.
+pub const INITIAL_STATE_CALLBACK: &str = "initial_state";
+
 /// Callbacks whose raw payloads are recorded to `web_inputs.jsonl` while session recording is active.
 pub const RECORDED_WEB_CALLBACKS: &[&str] = &[
     "on_nearby_pins",
@@ -455,6 +458,26 @@ impl SessionRecorder {
         sh.pending_web_inputs.push_back(WebInputRecord {
             ts: ((ts * 10_000.0).round()) / 10_000.0,
             callback: callback.to_owned(),
+            payload: clean,
+        });
+        cv.notify_one();
+        true
+    }
+
+    /// Sanitizes and queues an initial-state snapshot at session recording start into `web_inputs.jsonl`.
+    ///
+    /// Does not participate in per-callback duplicate suppression so live web callbacks remain
+    /// unaffected, and is applied by offline replay before frame 1.
+    pub fn record_initial_state(&self, ts: f64, payload: &Value) -> bool {
+        if !self.active() {
+            return false;
+        }
+        let clean = sanitize_web_input_payload(payload);
+        let (lock, cv) = &*self.shared;
+        let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+        sh.pending_web_inputs.push_back(WebInputRecord {
+            ts: ((ts * 10_000.0).round()) / 10_000.0,
+            callback: INITIAL_STATE_CALLBACK.to_owned(),
             payload: clean,
         });
         cv.notify_one();

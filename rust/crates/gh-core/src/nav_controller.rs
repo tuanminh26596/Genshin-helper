@@ -6,7 +6,7 @@ use crate::route_doc::{RouteDocument, RouteStopKind};
 use crate::{CoreError, CoreResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;
 use std::sync::Arc;
 use std::time::Instant;
@@ -208,7 +208,7 @@ fn opt_f64(val: Option<&Value>) -> Option<f64> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SpaceKey {
     pub map_id: i32,
     pub floor_tag: String,
@@ -1152,7 +1152,30 @@ pub struct NavigationController {
     last_guidance: Option<NavGuidance>,
 
     history_pins: HashMap<String, NavPin>,
-    protected_until: HashMap<String, f64>,
+    protected_until: BTreeMap<String, f64>,
+}
+
+/// Serializable snapshot of `NavigationController` state captured at session recording start
+/// so offline replay can restore carried-over pins, locks, route state, and exclusions before frame 1.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InitialNavControllerState {
+    pub pins: Vec<NavPin>,
+    pub active_space: Option<SpaceKey>,
+    pub selected_by_space: Vec<(SpaceKey, String)>,
+    pub target_id: Option<String>,
+    pub locked_target_pin: Option<NavPin>,
+    pub user_locked_id: Option<String>,
+    pub pinned_override_id: Option<String>,
+    pub collected_ids: Vec<String>,
+    pub skipped_ids: Vec<String>,
+    pub blacklisted_ids: Vec<String>,
+    pub passed_waypoint_ids: Vec<String>,
+    pub active_route_doc: Option<RouteDocument>,
+    pub active_section_idx: usize,
+    pub route_queue: Option<Vec<String>>,
+    pub route_index: usize,
+    pub last_guidance: Option<NavGuidance>,
 }
 
 impl Default for NavigationController {
@@ -1198,8 +1221,14 @@ impl NavigationController {
             selection_ready: true,
             last_guidance: None,
             history_pins: HashMap::new(),
-            protected_until: HashMap::new(),
+            protected_until: BTreeMap::new(),
         }
+    }
+
+    pub fn with_clock(clock: impl Fn() -> f64 + Send + Sync + 'static) -> Self {
+        let mut ctrl = Self::new();
+        ctrl.set_clock(clock);
+        ctrl
     }
 
     pub fn with_pins(pins: Vec<NavPin>) -> Self {
@@ -1251,6 +1280,135 @@ impl NavigationController {
 
     pub fn set_clock(&mut self, clock: impl Fn() -> f64 + Send + Sync + 'static) {
         self.clock = Arc::new(clock);
+    }
+
+    /// Returns the current controller timestamp in seconds from its configured clock.
+    pub fn now_s(&self) -> f64 {
+        (self.clock)()
+    }
+
+    /// Captures a deterministic, serializable snapshot of carried-over navigation state.
+    pub fn export_initial_state(&self) -> InitialNavControllerState {
+        let mut selected_by_space: Vec<(SpaceKey, String)> = self
+            .selected_by_space
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        selected_by_space.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        let sorted_vec = |set: &HashSet<String>| -> Vec<String> {
+            let mut v: Vec<String> = set.iter().cloned().collect();
+            v.sort();
+            v
+        };
+
+        let target_id = self
+            .target_lock_pin
+            .as_ref()
+            .map(|p| p.id.clone())
+            .or_else(|| {
+                self.last_guidance
+                    .as_ref()
+                    .and_then(|g| g.target.as_ref().map(|t| t.id.clone()))
+            })
+            .or_else(|| {
+                self.active_space
+                    .as_ref()
+                    .and_then(|sp| self.selected_by_space.get(sp).cloned())
+            });
+
+        InitialNavControllerState {
+            pins: self.pins().into_iter().cloned().collect(),
+            active_space: self.active_space.clone(),
+            selected_by_space,
+            target_id,
+            locked_target_pin: self.target_lock_pin.clone(),
+            user_locked_id: self.user_locked_id.clone(),
+            pinned_override_id: self.pinned_override_id.clone(),
+            collected_ids: sorted_vec(&self.collected_ids),
+            skipped_ids: sorted_vec(&self.skipped_ids),
+            blacklisted_ids: sorted_vec(&self.blacklisted_ids),
+            passed_waypoint_ids: sorted_vec(&self.passed_waypoint_ids),
+            active_route_doc: self.active_route.clone(),
+            active_section_idx: self.active_section_idx,
+            route_queue: self.route_queue.clone(),
+            route_index: self.route_index,
+            last_guidance: self.last_guidance.clone(),
+        }
+    }
+
+    /// Restores a snapshot produced by [`Self::export_initial_state`] before replay frame 1.
+    pub fn restore_initial_state(&mut self, st: InitialNavControllerState) {
+        self.pins_by_id.clear();
+        self.pin_order.clear();
+        self.selected_by_space.clear();
+        self.orders.clear();
+        self.last_pos_by_space.clear();
+        self.last_heading_by_space.clear();
+        self.pending_space = None;
+        self.pending_space_frames = 0;
+        self.closer_candidate = None;
+        self.closer_since = 0.0;
+        self.history.clear();
+        self.history_pins.clear();
+        self.protected_until.clear();
+        self.active_route = None;
+        self.active_section_idx = 0;
+        self.route_queue = None;
+        self.route_index = 0;
+        self.target_lock_pin = None;
+        self.user_locked_id = None;
+        self.pinned_override_id = None;
+        self.active_space = None;
+        self.last_guidance = None;
+
+        self.collected_ids = st.collected_ids.into_iter().collect();
+        self.skipped_ids = st.skipped_ids.into_iter().collect();
+        self.blacklisted_ids = st.blacklisted_ids.into_iter().collect();
+        self.passed_waypoint_ids = st.passed_waypoint_ids.into_iter().collect();
+
+        if let Some(doc) = st.active_route_doc {
+            let sec_idx = if doc.sections.is_empty() {
+                None
+            } else {
+                Some(st.active_section_idx.min(doc.sections.len().saturating_sub(1)))
+            };
+            let _ = self.load_route_document(doc, sec_idx, &[]);
+        }
+
+        if !st.pins.is_empty() {
+            self.set_pins(st.pins, false, None);
+        }
+
+        if let Some(rq) = st.route_queue {
+            let clamped = st.route_index.min(rq.len());
+            self.route_queue = Some(rq);
+            self.route_index = clamped;
+        }
+
+        if let Some(mut locked) = st.locked_target_pin {
+            locked.normalize();
+            if !self.pins_by_id.contains_key(&locked.id) {
+                self.pin_order.push(locked.id.clone());
+                self.pins_by_id.insert(locked.id.clone(), locked.clone());
+            }
+            self.target_lock_pin = Some(locked);
+        }
+
+        for (sp, pid) in st.selected_by_space {
+            self.selected_by_space.insert(sp, pid);
+        }
+        self.active_space = st.active_space;
+        if let (Some(sp), Some(tid)) = (&self.active_space, &st.target_id)
+            && !self.selected_by_space.contains_key(sp)
+            && self.pins_by_id.contains_key(tid)
+        {
+            self.selected_by_space.insert(sp.clone(), tid.clone());
+        }
+        self.user_locked_id = st.user_locked_id;
+        self.pinned_override_id = st.pinned_override_id;
+        self.last_guidance = st.last_guidance;
+        self.selection_ready = true;
     }
 
     pub fn pins(&self) -> Vec<&NavPin> {
@@ -1306,7 +1464,7 @@ impl NavigationController {
     }
 
     fn retained_ids(&mut self) -> Vec<String> {
-        let mut keep: HashSet<String> = self.selected_by_space.values().cloned().collect();
+        let mut keep: BTreeSet<String> = self.selected_by_space.values().cloned().collect();
         let prot_keys: Vec<String> = self.protected_until.keys().cloned().collect();
         for pid in prot_keys {
             if self.is_protected(&pid) {
@@ -2433,7 +2591,7 @@ impl NavigationController {
                 }
             })
             .collect();
-        rows.sort_by(|a, b| a.distance_m.total_cmp(&b.distance_m));
+        rows.sort_by(|a, b| a.distance_m.total_cmp(&b.distance_m).then_with(|| a.id.cmp(&b.id)));
         rows.truncate(limit);
         rows
     }

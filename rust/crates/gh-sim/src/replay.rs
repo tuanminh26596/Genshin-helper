@@ -8,7 +8,7 @@ use crate::compositor::{
 };
 use crate::timeline::{
     InputReplayReport, InputTimeline, TimelineInput, TimelineInputKind, dispatch_timeline_input,
-    load_web_inputs_jsonl, record_nav_comparison,
+    load_web_inputs_jsonl, record_nav_comparison_with_carryover,
 };
 use crate::verified_gt::{SessionCheckpointGt, VerifiedGtFile};
 use gh_app::BUILD_GIT_COMMIT;
@@ -17,7 +17,7 @@ use gh_app::capture_backend::FrameCapturer;
 use gh_app::diagnostics::{DiagnosticManager, MinimapPreLostRingBuffer};
 use gh_app::log_buffer::LogRingBuffer;
 use gh_app::mmap_view::{LocatorRegistrar, MMapViewEngine};
-use gh_app::session_recorder::{NavFrameSnapshot, WEB_INPUTS_FILENAME};
+use gh_app::session_recorder::{INITIAL_STATE_CALLBACK, NavFrameSnapshot, WEB_INPUTS_FILENAME};
 use gh_app::state::{AppState, GameState, NavMarkConfirm, RouteState, UiFrameSnapshot};
 use gh_app::tracking_loop::{
     LoopRuntimeState, PostTickContext, TickMode, TickParams, apply_tick_output,
@@ -58,7 +58,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
@@ -603,6 +603,13 @@ pub(crate) fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0
 }
 
+struct OfflineReplayState {
+    state: Arc<AppState>,
+    tile_cache: Arc<LruTerrainTileCache>,
+    relocator_ready: bool,
+    sim_clock_bits: Arc<AtomicU64>,
+}
+
 fn build_offline_replay_state(
     sandbox_root: &Path,
     data_dir: &Path,
@@ -611,7 +618,7 @@ fn build_offline_replay_state(
     paimon_cache_path: PathBuf,
     capturer: Arc<ReplayCapturer>,
     enable_mmap_view: bool,
-) -> Result<(Arc<AppState>, Arc<LruTerrainTileCache>, AppConfig, bool), String> {
+) -> Result<OfflineReplayState, String> {
     let paths = AppPaths {
         mode: RuntimeMode::Installed,
         config_path: sandbox_root.join("config.json"),
@@ -687,6 +694,13 @@ fn build_offline_replay_state(
         .with_minimap_ring(minimap_ring.clone()),
     );
 
+    let sim_clock_bits = Arc::new(AtomicU64::new(0.0f64.to_bits()));
+    let sim_clock_reader = Arc::clone(&sim_clock_bits);
+    let nav_ctrl = NavigationController::with_clock(move || {
+        f64::from_bits(sim_clock_reader.load(Ordering::Acquire))
+    })
+    .with_space_debounce_frames(4);
+
     let (stop_tx, _stop_rx) = watch::channel(false);
     let offline_catalog = HoYoLABLabelCatalog::new_offline();
     let state = Arc::new(AppState {
@@ -702,7 +716,7 @@ fn build_offline_replay_state(
         anchor_seq: AtomicU64::new(0),
         game_state: Mutex::new(GameState::default()),
         nav_state_snapshot: Mutex::new(None),
-        nav_controller: Mutex::new(NavigationController::new().with_space_debounce_frames(4)),
+        nav_controller: Mutex::new(nav_ctrl),
         route_state: Mutex::new(RouteState::default()),
         nav_mark_confirm: Mutex::new(NavMarkConfirm::default()),
         tracker: Mutex::new(Some((stack.minimap_tracker, 0.0))),
@@ -755,7 +769,12 @@ fn build_offline_replay_state(
         stop_tx,
         start_instant: Instant::now(),
     });
-    Ok((state, tile_cache, cfg, relocator_ready))
+    Ok(OfflineReplayState {
+        state,
+        tile_cache,
+        relocator_ready,
+        sim_clock_bits,
+    })
 }
 
 fn evaluate_session_accuracy(
@@ -1319,7 +1338,12 @@ pub fn run_replay_with_hook(
 
     let enable_mmap_view = opts.verify_mmap_view || opts.render_out.is_some();
     let capturer = Arc::new(ReplayCapturer::new());
-    let (state, tile_cache, _cfg_init, relocator_ready) = build_offline_replay_state(
+    let OfflineReplayState {
+        state,
+        tile_cache,
+        relocator_ready,
+        sim_clock_bits,
+    } = build_offline_replay_state(
         &sandbox.0,
         &effective_data_dir,
         tiles_dir.clone(),
@@ -1406,7 +1430,21 @@ pub fn run_replay_with_hook(
         records.truncate(cut);
     }
 
-    let mut web_inputs = load_web_inputs_jsonl(&opts.source_dir.join(WEB_INPUTS_FILENAME))?;
+    let loaded_web_inputs = load_web_inputs_jsonl(&opts.source_dir.join(WEB_INPUTS_FILENAME))?;
+    let mut initial_state_record = None;
+    let mut web_inputs = Vec::with_capacity(loaded_web_inputs.len());
+    for w in loaded_web_inputs {
+        if w.callback == INITIAL_STATE_CALLBACK {
+            initial_state_record = Some(w);
+        } else {
+            web_inputs.push(w);
+        }
+    }
+    let first_web_input_ts: Option<f64> = web_inputs
+        .iter()
+        .filter(|w| w.ts.is_finite())
+        .map(|w| w.ts)
+        .reduce(f64::min);
     if opts.max_frames.is_some() || hook.and_then(|h| h.stop_at_frame).is_some() {
         let cutoff_ts = records.last().map_or(f64::NEG_INFINITY, |r| r.ts);
         web_inputs.retain(|w| w.ts <= cutoff_ts);
@@ -1415,6 +1453,32 @@ pub fn run_replay_with_hook(
         .iter()
         .flat_map(|r| r.hotkeys.iter().cloned())
         .collect();
+
+    let base_ts = records.first().map_or(0.0, |r| r.ts);
+    let clock_origin = [
+        records.first().map(|r| r.ts),
+        initial_state_record.as_ref().map(|w| w.ts),
+        first_web_input_ts,
+        hotkeys
+            .iter()
+            .filter(|(ts, _)| ts.is_finite())
+            .map(|(ts, _)| *ts)
+            .reduce(f64::min),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|t| t.is_finite())
+    .reduce(f64::min)
+    .unwrap_or(0.0);
+    let set_sim_clock = |ts: f64| {
+        let s = if ts.is_finite() {
+            (ts - clock_origin).max(0.0)
+        } else {
+            0.0
+        };
+        sim_clock_bits.store(s.to_bits(), Ordering::Release);
+    };
+
     let mut timeline = if let Some(extra) = hook
         .map(|h| h.extra_inputs.as_slice())
         .filter(|e| !e.is_empty())
@@ -1448,13 +1512,17 @@ pub fn run_replay_with_hook(
     };
     let callbacks = AppServerCallbacks::new_offline_replay(Arc::clone(&state));
     let mut input_replay = InputReplayReport::default();
+    if let Some(ref init_rec) = initial_state_record {
+        set_sim_clock(init_rec.ts);
+        if state.apply_initial_nav_state(&init_rec.payload) {
+            input_replay.initial_state_applied = true;
+        }
+    }
     let capture_nav_snapshots = hook.is_some_and(|h| h.capture_nav_snapshots);
     let capture_ui_snapshots =
         hook.is_some_and(|h| h.capture_ui_snapshots || h.capture_nav_snapshots);
     let mut nav_snapshots: BTreeMap<usize, NavFrameSnapshot> = BTreeMap::new();
     let mut ui_snapshots: BTreeMap<usize, UiFrameSnapshot> = BTreeMap::new();
-
-    let base_ts = records.first().map_or(0.0, |r| r.ts);
     let mut rt = LoopRuntimeState::new();
     let mut modes = ModeCounts::default();
     let mut match_methods: BTreeMap<String, usize> = BTreeMap::new();
@@ -1493,8 +1561,10 @@ pub fn run_replay_with_hook(
         };
 
         for ev in timeline.drain_before_frame(rec.ts) {
+            set_sim_clock(ev.ts);
             dispatch_timeline_input(&state, &callbacks, &ev, &mut input_replay);
         }
+        set_sim_clock(rec.ts);
         let cfg_snap = state.config.read().expect("config lock poisoned").clone();
 
         let render_clone = if opts.render_out.is_some()
@@ -1731,7 +1801,15 @@ pub fn run_replay_with_hook(
         if rec.live_nav.is_some() || capture_nav_snapshots {
             let replay_nav = state.snapshot_nav_state();
             if let Some(ref live_nav) = rec.live_nav {
-                record_nav_comparison(rec.idx, live_nav, &replay_nav, &mut input_replay);
+                record_nav_comparison_with_carryover(
+                    rec.idx,
+                    rec.ts,
+                    first_web_input_ts,
+                    input_replay.initial_state_applied,
+                    live_nav,
+                    &replay_nav,
+                    &mut input_replay,
+                );
             }
             if capture_nav_snapshots {
                 nav_snapshots.insert(rec.idx, replay_nav);
@@ -1746,6 +1824,7 @@ pub fn run_replay_with_hook(
     }
 
     for ev in timeline.drain_remaining() {
+        set_sim_clock(ev.ts);
         dispatch_timeline_input(&state, &callbacks, &ev, &mut input_replay);
     }
 
@@ -2292,7 +2371,9 @@ mod tests {
         let rec_sandbox = sandbox.0.join("rec_state");
         std::fs::create_dir_all(&rec_sandbox).unwrap();
         let rec_capturer = Arc::new(ReplayCapturer::new());
-        let (rec_state, _, _, _) = build_offline_replay_state(
+        let OfflineReplayState {
+            state: rec_state, ..
+        } = build_offline_replay_state(
             &rec_sandbox,
             &data_dir,
             rec_sandbox.join("tiles"),
@@ -2702,5 +2783,330 @@ mod tests {
         );
         assert_eq!(p_missing.same_commit, Some(false));
         assert_eq!(p_missing.engine_code_unchanged, None);
+    }
+
+    #[test]
+    fn e1_initial_state_restores_carried_over_nav_before_frame_1_and_legacy_separates_pre_web() {
+        use gh_app::session_recorder::{SessionCodec, SessionRecorder, SessionRecorderConfig};
+        use gh_core::traits::ServerCallbacks;
+        use serde_json::json;
+
+        let tmp = TempSandboxDir::new("gh_sim_e1_init_state").unwrap();
+        let data_dir = tmp.0.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("multimap_v4.json"), r#"{"maps":{}}"#).unwrap();
+
+        let gt_path = tmp.0.join("verified_gt.json");
+        std::fs::write(&gt_path, r#"{"schema_version":1,"sessions":{}}"#).unwrap();
+
+        let make_session_dir = |name: &str| -> PathBuf {
+            let dir = tmp.0.join(name);
+            let fdir = dir.join("frames");
+            std::fs::create_dir_all(&fdir).unwrap();
+            let frame = FrameBuf::new_zeroed(2560, 1440, PixelFormat::Bgra8);
+            for i in 1..=4usize {
+                save_bgra_png(&frame, &fdir.join(format!("{i:06}.png"))).unwrap();
+            }
+            dir
+        };
+
+        // Build live state with carried-over nav target "23075" BEFORE recording starts.
+        let rec_sandbox = tmp.0.join("rec_sb");
+        std::fs::create_dir_all(rec_sandbox.join("tiles")).unwrap();
+        std::fs::create_dir_all(rec_sandbox.join("ug")).unwrap();
+        let rec_capturer = Arc::new(ReplayCapturer::new());
+        let OfflineReplayState {
+            state: rec_state, ..
+        } = build_offline_replay_state(
+            &rec_sandbox,
+            &data_dir,
+            rec_sandbox.join("tiles"),
+            rec_sandbox.join("ug"),
+            rec_sandbox.join("paimon.npz"),
+            Arc::clone(&rec_capturer),
+            false,
+        )
+        .unwrap();
+        let rec_cb = AppServerCallbacks::new_offline_replay(Arc::clone(&rec_state));
+        let _ = rec_cb
+            .on_nearby_pins(&json!({
+                "map_id": 7,
+                "pins": [
+                    {"id": "23075", "lat": 100.0, "lng": 200.0, "name": "Carried Pin"}
+                ]
+            }))
+            .unwrap();
+        // Select target "23075" via lock_target or update so snapshot_nav_state reports "23075"
+        {
+            let mut nav = rec_state.nav_controller.lock().unwrap();
+            let _ = nav.select_target("23075");
+        }
+        assert_eq!(rec_state.snapshot_nav_state().target_id.as_deref(), Some("23075"));
+
+        // Attach SessionRecorder -> automatically captures sanitized initial_state record!
+        let srec = SessionRecorder::new(
+            SessionRecorderConfig {
+                seconds: 0.0,
+                fps: 20.0,
+                codec: SessionCodec::Libx264Rgb,
+                ffmpeg_path: std::env::current_exe().unwrap(),
+                out_root: rec_sandbox.join("out"),
+                tiles_dir: rec_sandbox.join("tiles"),
+                ug_overlays_dir: rec_sandbox.join("ug"),
+                paimon_cache_path: rec_sandbox.join("paimon.npz"),
+                data_dir: data_dir.clone(),
+                data_source: "dev".to_owned(),
+                maps_db: Arc::clone(&rec_state.maps_db),
+                max_queue: 16,
+            },
+            None,
+        )
+        .unwrap();
+        rec_state.attach_session_recorder(Arc::clone(&srec));
+        let mut init_records = srec.drain_pending_web_inputs();
+        assert_eq!(init_records.len(), 1);
+        assert_eq!(init_records[0].callback, INITIAL_STATE_CALLBACK);
+        init_records[0].ts = 100.0;
+
+        // Also record a later web input at ts=110.0 (between frame 2 and frame 3) clearing pins via filter_changed=true.
+        let _ = rec_cb
+            .on_nearby_pins(&json!({
+                "map_id": 7,
+                "filter_changed": true,
+                "pins": []
+            }))
+            .unwrap();
+        let mut later_web = srec.drain_pending_web_inputs();
+        assert_eq!(later_web.len(), 1);
+        later_web[0].ts = 110.0;
+
+        // Frames 1..2 (ts 101.0, 102.0): carried-over target "23075" before first web input at 110.0.
+        // Frame 3 (ts 111.0): after filter_changed=true empty pins, target becomes null.
+        // Frame 4 (ts 112.0): intentionally inject a live target "99999" (mismatch after first web input).
+        let meta_with_init = [
+            json!({"i": 1, "ts": 101.0, "frame_w": 2560, "frame_h": 1440, "state": "UNLOCALIZED", "nav": {"target_id": "23075", "locked_target_id": null, "user_locked_id": "23075", "state": "idle"}}),
+            json!({"i": 2, "ts": 102.0, "frame_w": 2560, "frame_h": 1440, "state": "UNLOCALIZED", "nav": {"target_id": "23075", "locked_target_id": null, "user_locked_id": "23075", "state": "idle"}}),
+            json!({"i": 3, "ts": 111.0, "frame_w": 2560, "frame_h": 1440, "state": "UNLOCALIZED", "nav": {"target_id": null, "locked_target_id": null, "user_locked_id": null, "state": "idle"}}),
+            json!({"i": 4, "ts": 112.0, "frame_w": 2560, "frame_h": 1440, "state": "UNLOCALIZED", "nav": {"target_id": null, "locked_target_id": null, "user_locked_id": null, "state": "idle"}}),
+        ];
+
+        // (a) Session WITH initial_state -> restores "23075" before frame 1 with 0 nav mismatches!
+        let sess_with_init = make_session_dir("sess_with_init");
+        std::fs::write(
+            sess_with_init.join("meta.jsonl"),
+            meta_with_init
+                .iter()
+                .map(|r| serde_json::to_string(r).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let all_web: Vec<_> = init_records.into_iter().chain(later_web.iter().cloned()).collect();
+        std::fs::write(
+            sess_with_init.join(WEB_INPUTS_FILENAME),
+            all_web
+                .iter()
+                .map(|r| serde_json::to_string(r).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let rep_init = run_replay(&ReplayOptions {
+            source_dir: sess_with_init,
+            data_dir: data_dir.clone(),
+            gt_file: gt_path.clone(),
+            tiles_dir: None,
+            ug_dir: None,
+            paimon_cache_path: None,
+            ffmpeg_path: None,
+            max_frames: None,
+            drift_threshold_w: DEFAULT_DRIFT_THRESHOLD_W,
+            verify_mmap_view: false,
+            render_out: None,
+            out_report: None,
+        })
+        .unwrap();
+        assert!(rep_init.input_replay.initial_state_applied);
+        assert_eq!(rep_init.input_replay.nav_frames_compared, 4);
+        assert_eq!(rep_init.input_replay.nav_mismatches, 0);
+        assert_eq!(rep_init.input_replay.nav_carried_over_mismatches, 0);
+
+        // (b) Legacy session WITHOUT initial_state -> frames 1..2 (ts < 110.0) counted in
+        // nav_carried_over_mismatches (2), frame 4 post-web mismatch counted in nav_mismatches (1).
+        let sess_legacy = make_session_dir("sess_legacy");
+        let meta_legacy = [
+            meta_with_init[0].clone(),
+            meta_with_init[1].clone(),
+            meta_with_init[2].clone(),
+            json!({"i": 4, "ts": 112.0, "frame_w": 2560, "frame_h": 1440, "state": "UNLOCALIZED", "nav": {"target_id": "99999", "locked_target_id": null, "user_locked_id": null, "state": "idle"}}),
+        ];
+        std::fs::write(
+            sess_legacy.join("meta.jsonl"),
+            meta_legacy
+                .iter()
+                .map(|r| serde_json::to_string(r).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sess_legacy.join(WEB_INPUTS_FILENAME),
+            later_web
+                .iter()
+                .map(|r| serde_json::to_string(r).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let rep_legacy = run_replay(&ReplayOptions {
+            source_dir: sess_legacy,
+            data_dir,
+            gt_file: gt_path,
+            tiles_dir: None,
+            ug_dir: None,
+            paimon_cache_path: None,
+            ffmpeg_path: None,
+            max_frames: None,
+            drift_threshold_w: DEFAULT_DRIFT_THRESHOLD_W,
+            verify_mmap_view: false,
+            render_out: None,
+            out_report: None,
+        })
+        .unwrap();
+        assert!(!rep_legacy.input_replay.initial_state_applied);
+        assert_eq!(rep_legacy.input_replay.nav_frames_compared, 4);
+        assert_eq!(rep_legacy.input_replay.nav_carried_over_mismatches, 2);
+        assert_eq!(rep_legacy.input_replay.nav_mismatches, 1);
+        assert_eq!(rep_legacy.input_replay.first_nav_mismatch_idx, Some(4));
+    }
+
+    #[test]
+    fn e3_replay_nav_uses_simulated_clock_not_wall_clock() {
+        use gh_core::nav_controller::{CLOSER_DWELL_S, NavPin};
+
+        let tmp = TempSandboxDir::new("gh_sim_e3_sim_clock").unwrap();
+        let data_dir = tmp.0.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("multimap_v4.json"), r#"{"maps":{}}"#).unwrap();
+        std::fs::create_dir_all(tmp.0.join("tiles")).unwrap();
+        std::fs::create_dir_all(tmp.0.join("ug")).unwrap();
+
+        let capturer = Arc::new(ReplayCapturer::new());
+        let OfflineReplayState {
+            state,
+            sim_clock_bits,
+            ..
+        } = build_offline_replay_state(
+            &tmp.0,
+            &data_dir,
+            tmp.0.join("tiles"),
+            tmp.0.join("ug"),
+            tmp.0.join("paimon.npz"),
+            capturer,
+            false,
+        )
+        .unwrap();
+
+        let set_sim_s = |s: f64| sim_clock_bits.store(s.to_bits(), Ordering::Release);
+
+        // 1. Proximity takeover (`CLOSER_DWELL_S = 0.5s`): two updates separated by 0.6s in
+        // simulated time executed back-to-back in < 5ms wall time MUST switch target.
+        let t_wall = Instant::now();
+        {
+            let mut nav = state.nav_controller.lock().unwrap();
+            nav.set_pins(
+                vec![
+                    NavPin {
+                        id: "pin_a".to_owned(),
+                        map_id: 2,
+                        lat: 0.0,
+                        lng: 100.0,
+                        name: "Pin A".to_owned(),
+                        ..Default::default()
+                    },
+                    NavPin {
+                        id: "pin_b".to_owned(),
+                        map_id: 2,
+                        lat: 0.0,
+                        lng: 163.0,
+                        name: "Pin B".to_owned(),
+                        ..Default::default()
+                    },
+                ],
+                true,
+                None,
+            );
+            set_sim_s(1.0);
+            let g0 = nav.compute_guidance(0.0, 100.0, None, 2, None, false, "TRACKING", "G");
+            assert_eq!(g0.target.as_ref().map(|p| p.id.as_str()), Some("pin_a"));
+
+            // Move player 45m (< TELEPORT_JUMP_M=50m) to (0, 145): 45m from pin_a, 18m (> PROXIMITY_TAKEOVER_M=12m) from pin_b.
+            set_sim_s(1.1);
+            let g1 = nav.compute_guidance(0.0, 145.0, None, 2, None, false, "TRACKING", "G");
+            assert_eq!(
+                g1.target.as_ref().map(|p| p.id.as_str()),
+                Some("pin_a"),
+                "dwell just started at t=1.1s, must not switch yet"
+            );
+
+            // Advance simulated clock past CLOSER_DWELL_S (0.5s) while wall elapsed is < 50ms.
+            set_sim_s(1.1 + CLOSER_DWELL_S + 0.15);
+            let g2 = nav.compute_guidance(0.0, 145.0, None, 2, None, false, "TRACKING", "G");
+            assert!(
+                t_wall.elapsed().as_secs_f64() < CLOSER_DWELL_S,
+                "sanity: test must complete faster than wall-clock dwell"
+            );
+            assert_eq!(
+                g2.target.as_ref().map(|p| p.id.as_str()),
+                Some("pin_b"),
+                "simulated clock advanced past CLOSER_DWELL_S so proximity takeover must fire"
+            );
+        }
+
+        // 2. NavMarkConfirm 3.0s expiry: two nav_mark presses separated by 4.0s simulated time
+        // (and < 50ms wall time) on a far target (> 25m) must NOT confirm on the 2nd press.
+        {
+            let mut nav = state.nav_controller.lock().unwrap();
+            nav.set_pins(
+                vec![NavPin {
+                    id: "far_pin".to_owned(),
+                    map_id: 2,
+                    lat: 0.0,
+                    lng: 500.0,
+                    name: "Far Pin".to_owned(),
+                    ..Default::default()
+                }],
+                true,
+                None,
+            );
+            set_sim_s(10.0);
+            let _ = nav.compute_guidance(0.0, 0.0, None, 2, None, false, "TRACKING", "G");
+        }
+        set_sim_s(10.0);
+        gh_app::dispatch_hotkey_action(&state, "nav_mark");
+        assert!(
+            !state.nav_controller.lock().unwrap().collected_ids.contains("far_pin"),
+            "first far press arms 3s confirmation"
+        );
+        // Advance simulated clock +4.0s (> 3.0s confirm window) in < 50ms wall time -> window expired.
+        set_sim_s(14.0);
+        gh_app::dispatch_hotkey_action(&state, "nav_mark");
+        assert!(
+            !state.nav_controller.lock().unwrap().collected_ids.contains("far_pin"),
+            "4.0s simulated gap exceeds 3.0s confirm window; wall-clock bug would falsely mark collected"
+        );
+        // Press again +1.0s later (< 3.0s window from 14.0s) -> must confirm and mark collected!
+        set_sim_s(15.0);
+        gh_app::dispatch_hotkey_action(&state, "nav_mark");
+        assert!(
+            state.nav_controller.lock().unwrap().collected_ids.contains("far_pin"),
+            "1.0s simulated gap within 3.0s confirm window must confirm collection"
+        );
     }
 }
