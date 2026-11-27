@@ -361,6 +361,25 @@ assert.strictEqual(unwrapAngle(1, 359), -1);
 assert.strictEqual(unwrapAngle(-1, 358), -2);
 assert.strictEqual(unwrapAngle(-719, 359), -721);
 
+// Extract the map popup button classifiers and verify English/Vietnamese labels.
+const markLabelMatch = pageSrc.match(/function isMarkButtonLabel\([\s\S]*?\n    \}/);
+assert(markLabelMatch, 'isMarkButtonLabel function not found');
+const isMarkButtonLabel = new Function(markLabelMatch[0] + '; return isMarkButtonLabel;')();
+const markedLabelMatch = pageSrc.match(/function isAlreadyMarkedButtonLabel\([\s\S]*?\n    \}/);
+assert(markedLabelMatch, 'isAlreadyMarkedButtonLabel function not found');
+const isAlreadyMarkedButtonLabel = new Function(markedLabelMatch[0] + '; return isAlreadyMarkedButtonLabel;')();
+
+for (const label of ['pin', 'mark', 'ghim', 'mark pin']) {
+  assert.strictEqual(isMarkButtonLabel(label), true, `Expected mark label: ${label}`);
+}
+for (const label of ['unpin', 'unmark', 'marked', 'bỏ ghim', 'đã ghim']) {
+  assert.strictEqual(isMarkButtonLabel(label), false, `Expected non-mark label: ${label}`);
+}
+for (const label of ['unpin', 'pinned', 'unmark', 'marked', 'bỏ ghim', 'đã ghim']) {
+  assert.strictEqual(isAlreadyMarkedButtonLabel(label), true, `Expected already-marked label: ${label}`);
+}
+assert.strictEqual(isAlreadyMarkedButtonLabel('pin'), false);
+
 // Runtime verification of continuous minimap area & layer switching in page_main.js
 const extractFn = (name) => {
   const re = new RegExp(`function ${name}\\([\\s\\S]*?\\n    \\}`);

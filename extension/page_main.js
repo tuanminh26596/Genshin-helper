@@ -4662,28 +4662,48 @@
         return getText(el).replace(/\s+/g, ' ').trim().toLowerCase();
     }
 
+    function isMarkButtonLabel(norm) {
+        if (!norm) return false;
+        if (
+            norm.includes('bỏ ghim') ||
+            norm.includes('hủy ghim') ||
+            norm.includes('huỷ ghim') ||
+            norm.includes('đã ghim') ||
+            norm.includes('unpin') ||
+            norm.includes('unmark') ||
+            norm.includes('marked')
+        ) {
+            return false;
+        }
+        return (
+            norm === 'ghim' ||
+            norm === 'mark' ||
+            norm === 'pin' ||
+            norm === 'mark pin'
+        );
+    }
+
+    function isAlreadyMarkedButtonLabel(norm) {
+        if (!norm) return false;
+        return (
+            norm === 'bỏ ghim' ||
+            norm === 'hủy ghim' ||
+            norm === 'huỷ ghim' ||
+            norm === 'đã ghim' ||
+            norm === 'unmark' ||
+            norm === 'marked' ||
+            norm === 'unpin' ||
+            norm === 'pinned'
+        );
+    }
+
     function findGhimButton() {
         try {
             const popup = findPopupContainer() || document;
             const candidates = Array.from(popup.querySelectorAll('.map-popup__btn, button, [role="button"]'));
             return candidates.find(el => {
                 if (el.offsetWidth === 0 || el.offsetHeight === 0 || isButtonDisabled(el)) return false;
-                const norm = normalizeBtnText(el);
-                if (!norm) return false;
-                if (
-                    norm.includes('nhiều') ||
-                    norm.includes('trong game') ||
-                    norm.includes('mới') ||
-                    norm.includes('đã') ||
-                    norm.includes('bỏ') ||
-                    norm.includes('hủy') ||
-                    norm.includes('huỷ') ||
-                    norm.includes('unmark') ||
-                    norm.includes('marked')
-                ) {
-                    return false;
-                }
-                return norm === 'ghim' || norm === 'mark';
+                return isMarkButtonLabel(normalizeBtnText(el));
             });
         } catch (e) { return null; }
     }
@@ -4705,15 +4725,7 @@
             const candidates = Array.from(popup.querySelectorAll('.map-popup__btn, button, [role="button"]'));
             return candidates.find(el => {
                 if (el.offsetWidth === 0 || el.offsetHeight === 0 || isButtonDisabled(el)) return false;
-                const norm = normalizeBtnText(el);
-                return (
-                    norm === 'bỏ ghim' ||
-                    norm === 'hủy ghim' ||
-                    norm === 'huỷ ghim' ||
-                    norm === 'đã ghim' ||
-                    norm === 'unmark' ||
-                    norm === 'marked'
-                );
+                return isAlreadyMarkedButtonLabel(normalizeBtnText(el));
             });
         } catch (e) { return null; }
     }
