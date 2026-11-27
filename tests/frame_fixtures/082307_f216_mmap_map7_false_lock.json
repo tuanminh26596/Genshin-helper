@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "082307_f216_mmap_map7_false_lock",
+  "description": "Enkanomiya (Map 7) M-Map capture right after a teleport: the player stands on the waypoint at the tip of the green Serpent's Bowels island with 7 waypoints visible, but locate false-locks with 2 inliers.",
+  "notes": "Exported from sess_20261127_082307 frame i=216 (0-based n=215, 2560x1440, crf-18 qa copy). Truth from the waypoint layout: all 7 on-screen waypoint pins fit the multimap_v4.json Map 7 waypoints with the player on WP (-927.1, 135.2) at 1.6 px/w, north-up, residual 14.7 px total; the arrow sits ~(-9, -10) w from that pin. Cold locate gives (-242.8, -425.8) with 2 inliers on both 79d45c5 and the map-40 fix branch; the replay with the prior from f179 gives (99.4, -47.5) on 79d45c5 (live synced there too).",
+  "image": "scratch/frame_fixtures/sess_20261127_082307_f216.png",
+  "width": 2560,
+  "height": 1440,
+  "is_gamepad": false,
+  "known_bug": "M-Map locate on Enkanomiya (Map 7) false-locks with 2 inliers (~790w off true -935,126) although 7 waypoints are visible.",
+  "mmap_locate": {
+    "expected_map_id": 7,
+    "expected_world_x": -935.0,
+    "expected_world_y": 126.0,
+    "pos_tolerance_w": 50.0,
+    "perturb_seeds": [
+      717,
+      818
+    ]
+  }
+}

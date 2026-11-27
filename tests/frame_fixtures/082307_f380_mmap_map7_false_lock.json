@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "082307_f380_mmap_map7_false_lock",
+  "description": "Enkanomiya (Map 7) M-Map capture next to Evernight Temple with 8 waypoints visible; locate false-locks with 2 inliers.",
+  "notes": "Exported from sess_20261127_082307 frame i=380 (0-based n=379, 2560x1440, crf-18 qa copy). Truth from the waypoint layout: all 8 on-screen waypoint pins fit the multimap_v4.json Map 7 waypoints with the player at (508, -150) at 1.6 px/w, north-up, residual 26.7 px total; corroborated by minimap hd_sift at f358 (506.7, -159.4) on 79d45c5. Cold locate gives (-370.0, -412.1) with 2 inliers on 79d45c5 and the map-40 fix branch; the 79d45c5 replay synced to (266.9, -104.2) and live to (432.2, -42.5).",
+  "image": "scratch/frame_fixtures/sess_20261127_082307_f380.png",
+  "width": 2560,
+  "height": 1440,
+  "is_gamepad": false,
+  "known_bug": "M-Map locate on Enkanomiya (Map 7) false-locks with 2 inliers (~916w off true 508,-150) although 8 waypoints are visible.",
+  "mmap_locate": {
+    "expected_map_id": 7,
+    "expected_world_x": 508.0,
+    "expected_world_y": -150.0,
+    "pos_tolerance_w": 50.0,
+    "perturb_seeds": [
+      919,
+      1020
+    ]
+  }
+}
