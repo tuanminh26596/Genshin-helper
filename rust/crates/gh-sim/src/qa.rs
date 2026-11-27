@@ -3288,7 +3288,7 @@ mod tests {
                 "schema_version": 1,
                 "name": "synthetic_known_fail",
                 "session": "sess_synth_sc",
-                "description": "synthetic fixture should fail on never-delivered target_id",
+                "description": "nav_unlock should clear user_locked_id from nav_next",
                 "known_bug": "synthetic known-fail fixture (pin never delivered)",
                 "inputs": [
                     pins_input,
