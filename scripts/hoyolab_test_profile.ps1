@@ -8,10 +8,12 @@
 
       -Login    Opens ONE visible window on the HoYoLAB Interactive Map so the maintainer can sign in
                 (the only visible use of this profile). Close the window when you are done.
+                `-Login -Site appsample` opens the AppSample map instead (needed for AppSample marking).
       -Status   Says whether the profile exists, whether a browser is using it right now, and which
                 Chromium it uses. Never reads or prints cookies.
       -Verify   Headless check that the profile is still signed in (scripts/hoyolab_profile_check.mjs):
                 exit 0 = signed in, 3 = signed out (run -Login again), 1 = could not check.
+                `-Verify -Site appsample` checks the AppSample sign-in instead.
       -Path     Prints the profile directory (default for tests: $env:GH_HOYOLAB_PROFILE).
 
     Rules for tests that use it (also in AGENTS.md / CLAUDE.md):
@@ -30,7 +32,11 @@ param(
     [Parameter(ParameterSetName = 'Path')][switch]$Path,
     [Parameter(ParameterSetName = 'Verify')][switch]$Verify,
     [string]$ProfileDir,
-    [string]$Lang = 'en-us'
+    [string]$Lang = 'en-us',
+    # Site to open with -Login. AppSample marking needs its own sign-in (provider_runtime.js
+    # markPin returns authRequired without store.getState().user); Kongying needs none.
+    [ValidateSet('hoyolab', 'appsample')]
+    [string]$Site = 'hoyolab'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -81,14 +87,18 @@ if ($Login) {
         exit 1
     }
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    $url = "https://act.hoyolab.com/ys/app/interactive-map/index.html?lang=$Lang"
+    $url = switch ($Site) {
+        'appsample' { 'https://genshin-impact-map.appsample.com/' }
+        default { "https://act.hoyolab.com/ys/app/interactive-map/index.html?lang=$Lang" }
+    }
     # No extension and no remote debugging here: this window is only for signing in.
     # Start-Process joins arguments with spaces without quoting, so quote the profile path.
     $chromeArgs = @("--user-data-dir=`"$dir`"", '--no-first-run', '--no-default-browser-check', $url)
     $p = Start-Process -FilePath $chrome -ArgumentList $chromeArgs -PassThru
-    Write-Output "Opened the HoYoLAB sign-in window (PID $($p.Id)) on profile:"
+    $siteName = if ($Site -eq 'appsample') { 'AppSample' } else { 'HoYoLAB' }
+    Write-Output "Opened the $siteName sign-in window (PID $($p.Id)) on profile:"
     Write-Output "  $dir"
-    Write-Output 'Sign in to HoYoLAB there, then close the window.'
+    Write-Output "Sign in to $siteName there, then close the window."
     exit 0
 }
 
@@ -103,7 +113,7 @@ if ($Verify) {
         Write-Output "check: profile is in use (PID $($running.ProcessId -join ', ')); wait for it or close it"
         exit 1
     }
-    & node (Join-Path $PSScriptRoot 'hoyolab_profile_check.mjs') $chrome $dir
+    & node (Join-Path $PSScriptRoot 'hoyolab_profile_check.mjs') $chrome $dir $Site
     exit $LASTEXITCODE
 }
 

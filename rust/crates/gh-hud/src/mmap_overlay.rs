@@ -136,7 +136,7 @@ pub fn parse_hex_rgba(hex: &str, alpha: u8) -> [u8; 4] {
     {
         return [r, g, b, alpha];
     }
-    [56, 189, 248, alpha]
+    [211, 188, 142, alpha]
 }
 
 /// UI scale relative to a 1440p client.
@@ -144,10 +144,10 @@ fn ui_scale(game_rect: RectI32) -> f32 {
     (game_rect.height as f32 / 1440.0).clamp(0.65, 1.8)
 }
 
-const PILL_BG: [u8; 4] = [15, 23, 42, 226];
-const TEXT_MAIN: [u8; 4] = [248, 250, 252, 255];
-const TEXT_SUB: [u8; 4] = [203, 213, 225, 255];
-const WARN: [u8; 4] = [251, 191, 36, 255];
+const PILL_BG: [u8; 4] = [26, 30, 40, 236];
+const TEXT_MAIN: [u8; 4] = [242, 236, 224, 255];
+const TEXT_SUB: [u8; 4] = [184, 175, 158, 255];
+const WARN: [u8; 4] = [224, 171, 88, 255];
 const SHADOW: TextEffect = TextEffect::Shadow {
     offset_x: 1,
     offset_y: 1,
@@ -365,6 +365,22 @@ fn draw_card(
     if let Some(path) = rounded_rect_path(b[0], b[1], w, h, 9.0 * s) {
         pm.fill_path(&path, &paint(PILL_BG), FillRule::Winding, t, None);
         pm.stroke_path(&path, &paint(border), &stroke((1.6 * s).max(1.0)), t, None);
+        let ins = 2.5 * s;
+        if let Some(inner) = rounded_rect_path(
+            b[0] + ins,
+            b[1] + ins,
+            (w - ins * 2.0).max(4.0),
+            (h - ins * 2.0).max(4.0),
+            (7.0 * s).max(2.0),
+        ) {
+            pm.stroke_path(
+                &inner,
+                &paint([211, 188, 142, 42]),
+                &stroke((0.9 * s).max(0.7)),
+                t,
+                None,
+            );
+        }
     }
     let mut y = b[1] + pad;
     for (i, (txt, st)) in lines.iter().enumerate() {
@@ -491,26 +507,18 @@ pub fn render_guide_pixmap_into<'a>(
         }
     }
 
-    // Edge arrow: filled chevron pointing at the region.
+    // Edge arrow: unified symmetrical Tinh Tú (Star Dart) pointing at the target region.
     if let Some(a) = &sc.arrow {
-        let (ca, sa) = (a.angle_rad.cos(), a.angle_rad.sin());
-        let len = 34.0 * s;
-        let half = 21.0 * s;
-        let tip = (a.x + ca * len * 0.6, a.y + sa * len * 0.6);
-        let base = (a.x - ca * len * 0.4, a.y - sa * len * 0.4);
-        let notch = (a.x - ca * len * 0.05, a.y - sa * len * 0.05);
-        let (nx, ny) = (-sa, ca);
-        let mut pb = PathBuilder::new();
-        pb.move_to(tip.0, tip.1);
-        pb.line_to(base.0 + nx * half, base.1 + ny * half);
-        pb.line_to(notch.0, notch.1);
-        pb.line_to(base.0 - nx * half, base.1 - ny * half);
-        pb.close();
-        if let Some(path) = pb.finish() {
-            pm.stroke_path(&path, &paint([2, 6, 23, 170]), &stroke(6.0 * s), t, None);
-            pm.fill_path(&path, &paint(with_alpha(accent, 240)), FillRule::Winding, t, None);
-            pm.stroke_path(&path, &paint([255, 255, 255, 235]), &stroke(1.8 * s), t, None);
-        }
+        crate::star_dart::draw_star_dart(
+            pm,
+            a.x,
+            a.y,
+            19.0 * s,
+            a.angle_rad + std::f32::consts::FRAC_PI_2,
+            crate::star_dart::StarDartStyle::EDGE_GOLD,
+            t,
+            None,
+        );
         if let Some(lb) = layout.arrow_label_box {
             draw_card(pm, fonts, lb, &[(&a.label, st_sub)], pad * 0.8, with_alpha(accent, 220), s, t);
         }

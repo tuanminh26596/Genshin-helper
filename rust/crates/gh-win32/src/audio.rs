@@ -78,35 +78,110 @@ pub fn clamp_volume_f64(volume: f64) -> i32 {
     volume.clamp(0.0, 100.0).round_ties_even() as i32
 }
 
-/// Synthesizes a soft 16-bit mono 44.1 kHz PCM RIFF/WAVE chime matching
-/// `src/single_monitor.py::AudioFeedback.synthesize_chime_wav`.
+fn smooth_edge_env(idx: usize, n: usize, sr: f64, attack_s: f64, tail_s: f64) -> f64 {
+    let att_n = ((attack_s * sr).round_ties_even() as usize).clamp(1, n);
+    let tail_n = ((tail_s * sr).round_ties_even() as usize).clamp(2, n);
+    let att = if idx < att_n {
+        0.5 * (1.0 - (PI * (idx as f64) / (att_n as f64)).cos())
+    } else {
+        1.0
+    };
+    let tail_start = n - tail_n;
+    let tail = if idx >= tail_start && tail_n > 1 {
+        1.0 - ((idx - tail_start) as f64 / ((tail_n - 1) as f64))
+    } else {
+        1.0
+    };
+    att * tail
+}
+
+fn mix_silk_pluck(
+    buf: &mut [f64],
+    sr: f64,
+    start_s: f64,
+    freq_hz: f64,
+    dur_s: f64,
+    amp: f64,
+    brightness: f64,
+) {
+    let start_idx = (start_s * sr).round_ties_even().max(0.0) as usize;
+    let note_samples = (dur_s * sr).round_ties_even().max(1.0) as usize;
+    let tau = dur_s * 0.36;
+    let w = 2.0 * PI * freq_hz;
+    let transient_w = 2.0 * PI * (freq_hz * 3.1).min(2800.0);
+    let limit = buf.len().saturating_sub(start_idx).min(note_samples);
+    for i in 0..limit {
+        let t = i as f64 / sr;
+        let env = (-t / tau).exp() * smooth_edge_env(i, note_samples, sr, 0.0022, 0.012);
+        let body = (w * t).sin()
+            + (0.40 * brightness) * (2.0 * w * t).sin() * (-t / 0.055).exp()
+            + (0.18 * brightness) * (3.0 * w * t).sin() * (-t / 0.032).exp()
+            + (0.07 * brightness) * (4.0 * w * t).sin() * (-t / 0.018).exp()
+            + 0.03 * (transient_w * t).sin() * (-t / 0.002).exp();
+        buf[start_idx + i] += amp * env * body;
+    }
+}
+
+/// Synthesizes a soft 16-bit mono 44.1 kHz PCM RIFF/WAVE Liyue silk-guzheng chime.
 pub fn synthesize_chime_wav(kind: &str, volume: i32) -> Vec<u8> {
     let vol = clamp_volume(volume);
     if vol <= 0 {
         return Vec::new();
     }
 
-    let seq = tones_for_kind(kind);
-    let sr = f64::from(SAMPLE_RATE);
-    let gain = 0.56 * (f64::from(vol) / 100.0);
-    let fade_in_samples = ((0.008 * sr).round_ties_even() as usize).max(1);
-    let gap_samples = (0.020 * sr).round_ties_even() as usize;
+    type PluckNote = (f64, f64, f64, f64, f64);
 
-    let mut total_samples = 0usize;
-    let note_counts: Vec<usize> = seq
-        .iter()
-        .map(|note| {
-            let n = ((f64::from(note.dur_ms) / 1000.0) * sr)
-                .round_ties_even()
-                .max(0.0) as usize;
-            let count = n.max(fade_in_samples + 1);
-            total_samples += count;
-            count
-        })
-        .collect();
-    if seq.len() > 1 {
-        total_samples += (seq.len() - 1) * gap_samples;
+    let sr = f64::from(SAMPLE_RATE);
+    let (total_s, target_peak, notes): (f64, f64, &[PluckNote]) =
+        match normalize_kind(kind) {
+            "success" => (
+                0.40,
+                16_500.0,
+                &[
+                    (392.00, 0.000, 0.26, 0.72, 1.0),
+                    (493.88, 0.044, 0.26, 0.76, 1.0),
+                    (587.33, 0.088, 0.26, 0.84, 1.0),
+                    (783.99, 0.132, 0.26, 0.94, 1.0),
+                ],
+            ),
+            "warning" => (
+                0.23,
+                15_400.0,
+                &[
+                    (659.25, 0.000, 0.15, 0.84, 0.45),
+                    (587.33, 0.058, 0.16, 0.88, 0.40),
+                ],
+            ),
+            "error" => (
+                0.24,
+                15_500.0,
+                &[
+                    (196.00, 0.000, 0.14, 0.90, 0.35),
+                    (146.83, 0.066, 0.16, 0.95, 0.30),
+                ],
+            ),
+            _ => (
+                0.25,
+                16_000.0,
+                &[
+                    (587.33, 0.000, 0.17, 0.80, 0.95),
+                    (880.00, 0.048, 0.19, 0.92, 1.0),
+                ],
+            ),
+        };
+
+    let total_samples = (total_s * sr).round_ties_even().max(1.0) as usize;
+    let mut buf = vec![0.0_f64; total_samples];
+    for &(freq_hz, start_s, dur_s, amp, brightness) in notes {
+        mix_silk_pluck(&mut buf, sr, start_s, freq_hz, dur_s, amp, brightness);
     }
+
+    let raw_peak = buf.iter().fold(0.0_f64, |acc, &x| acc.max(x.abs()));
+    let scale = if raw_peak > 1e-9 {
+        (target_peak / 32_767.0) / raw_peak * (f64::from(vol) / 100.0)
+    } else {
+        0.0
+    };
 
     let data_bytes_len = (total_samples * 2) as u32;
     let riff_size = 36u32 + data_bytes_len;
@@ -127,27 +202,11 @@ pub fn synthesize_chime_wav(kind: &str, volume: i32) -> Vec<u8> {
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_bytes_len.to_le_bytes());
 
-    for (note_idx, (note, &n_samples)) in seq.iter().zip(note_counts.iter()).enumerate() {
-        let dur_s = n_samples as f64 / sr;
-        let w = 2.0 * PI * note.freq_hz;
-        for i in 0..n_samples {
-            let t = i as f64 / sr;
-            let attack = if i >= fade_in_samples {
-                1.0
-            } else {
-                0.5 * (1.0 - (PI * (i as f64) / (fade_in_samples as f64)).cos())
-            };
-            let decay = (-4.8 * (t / dur_s)).exp();
-            let env = attack * decay;
-            let wave_val = ((w * t).sin() + 0.16 * (2.0 * w * t).sin()) / 1.16;
-            let sample = (wave_val * env * gain * 32767.0)
-                .round_ties_even()
-                .clamp(-32767.0, 32767.0) as i16;
-            wav.extend_from_slice(&sample.to_le_bytes());
-        }
-        if note_idx + 1 < seq.len() {
-            wav.resize(wav.len() + gap_samples * 2, 0);
-        }
+    for &s in &buf {
+        let sample = (s * scale * 32_767.0)
+            .round_ties_even()
+            .clamp(-32_767.0, 32_767.0) as i16;
+        wav.extend_from_slice(&sample.to_le_bytes());
     }
 
     wav
@@ -453,6 +512,25 @@ mod tests {
             synthesize_chime_wav("unknown_kind", 50),
             synthesize_chime_wav("info", 50)
         );
+    }
+
+    #[test]
+    fn liyue_guzheng_cues_produce_distinct_headphone_safe_peaks() {
+        let cues: Vec<(&str, i32)> = ["success", "info", "warning", "error"]
+            .into_iter()
+            .map(|kind| {
+                let wav = synthesize_chime_wav(kind, 100);
+                assert!(wav.len() > 8000, "{kind} too short");
+                let peak = pcm_peak_i16(&wav);
+                assert!(
+                    (14_000..=18_000).contains(&peak),
+                    "{kind} peak100={peak} outside headphone-safe bounds"
+                );
+                (kind, wav.len() as i32)
+            })
+            .collect();
+        assert_ne!(cues[0].1, cues[1].1);
+        assert_ne!(cues[1].1, cues[2].1);
     }
 
     #[test]

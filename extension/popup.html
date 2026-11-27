@@ -8,75 +8,164 @@
 </head>
 <body>
   <div class="popup-shell">
-    <!-- Observatory Sticky Header -->
+    <div class="popup-bg-nebula" aria-hidden="true"></div>
+    <svg class="popup-rosette-bg" viewBox="0 0 160 160" width="160" height="160" fill="none" stroke="currentColor" aria-hidden="true">
+      <circle cx="80" cy="80" r="64" stroke-width="1" stroke-dasharray="3 3"/>
+      <circle cx="80" cy="80" r="52" stroke-width="1.2"/>
+      <circle cx="80" cy="80" r="18" stroke-width="1.2"/>
+      <path d="M80 8L90 70L152 80L90 90L80 152L70 90L8 80L70 70Z" stroke-width="1.1"/>
+      <path d="M32 32L73 73M128 32L87 73M128 128L87 87M32 128L73 87" stroke-width="1"/>
+      <circle cx="80" cy="80" r="4" fill="currentColor"/>
+    </svg>
+    <span class="popup-corner popup-corner--tl" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
+    <span class="popup-corner popup-corner--tr" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
+    <span class="popup-corner popup-corner--bl" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
+    <span class="popup-corner popup-corner--br" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
+
+    <!-- Sticky Header (44px) -->
     <header class="popup-header">
       <div class="brand">
         <span class="brand-icon" aria-hidden="true">
-          <img src="icons/icon48.png" alt="Genshin Helper" width="24" height="24">
+          <img src="icons/icon128.png" alt="Genshin Helper" width="30" height="30">
         </span>
-        <div class="brand-text">
-          <div class="brand-title-row">
-            <h1>Genshin Helper</h1>
-            <button id="version-badge" type="button" class="version-badge" aria-expanded="false" data-i18n-title="popup.update.badge_title" title="Kiểm tra cập nhật ứng dụng &amp; dữ liệu bản đồ">
-              <svg class="ui-ico version-badge-ico vico-spin" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <polyline points="23 4 23 10 17 10"/>
-                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-              </svg>
-              <svg class="ui-ico version-badge-ico vico-download" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M12 4v13"/><polyline points="6 12 12 18 18 12"/>
-              </svg>
-              <svg class="ui-ico version-badge-ico vico-ready" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <polyline points="20 6 9 17 4 12"/>
-              </svg>
-              <span class="btn-label">v5.7.0</span>
-              <svg class="ui-ico version-badge-ico vico-idle" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <polyline points="6 9 12 15 18 9"/>
-              </svg>
-            </button>
-          </div>
-          <p class="brand-sub" data-i18n="popup.brand_sub">HoYoLAB Map Control Center</p>
-        </div>
+        <h1>Genshin Helper</h1>
+        <button id="version-badge" type="button" class="version-badge" aria-expanded="false" data-i18n-title="popup.update.badge_title" title="Kiểm tra cập nhật ứng dụng &amp; dữ liệu bản đồ">
+          <svg class="ui-ico version-badge-ico vico-idle" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path fill-rule="evenodd" d="M8.3 3H15.7L21 8.3V15.7L15.7 21H8.3L3 15.7V8.3ZM16.8 9.2L15.2 7.6L10.6 12.2L8.6 10.2L7.0 11.8L10.6 15.4Z"/>
+          </svg>
+          <svg class="ui-ico version-badge-ico vico-spin" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 3.2A8.8 8.8 0 0 1 20.5 9.8L17.4 10.6A5.8 5.8 0 0 0 12 6.2V8.2L8.4 4.8L12 1.4Z"/>
+            <path d="M12 20.8A8.8 8.8 0 0 1 3.5 14.2L6.6 13.4A5.8 5.8 0 0 0 12 17.8V15.8L15.6 19.2L12 22.6Z"/>
+            <path d="M12 8.8L13.1 10.9L15.2 12L13.1 13.1L12 15.2L10.9 13.1L8.8 12L10.9 10.9Z"/>
+          </svg>
+          <svg class="ui-ico version-badge-ico vico-download" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M10.4 3.2H13.6V10.6H17.2L12 16.2L6.8 10.6H10.4Z"/>
+            <path d="M3.5 15.4H6.1V18.2H17.9V15.4H20.5V20.8H3.5Z"/>
+          </svg>
+          <svg class="ui-ico version-badge-ico vico-ready" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path fill-rule="evenodd" d="M8.3 3H15.7L21 8.3V15.7L15.7 21H8.3L3 15.7V8.3ZM16.8 9.2L15.2 7.6L10.6 12.2L8.6 10.2L7.0 11.8L10.6 15.4Z"/>
+          </svg>
+          <span class="btn-label">v5.7.0</span>
+        </button>
       </div>
 
-      <div class="header-right">
-        <button id="btn-lang-toggle" type="button" class="lang-toggle" data-lang="vi" data-i18n-title="popup.lang.toggle_title" data-i18n-aria-label="popup.lang.toggle_title" title="Đổi ngôn ngữ giao diện (Tiếng Việt / English)">
-          <svg class="lang-globe" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="9"/>
-            <path d="M3 12h18"/>
-            <path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18"/>
-          </svg>
-          <span class="lang-opt is-active" data-lang-opt="vi">VI</span>
-          <span class="lang-opt" data-lang-opt="en">EN</span>
-        </button>
-        <div id="status-pill" class="status-pill is-offline" data-i18n-title="popup.status_pill.title" title="Trạng thái Desktop App &amp; Engine">
-          <span id="status-dot" class="status-dot"></span>
-          <span id="status-text" data-i18n="popup.status.offline">Offline</span>
-        </div>
-      </div>
+      <button id="btn-lang-toggle" type="button" class="lang-toggle" data-lang="vi" data-i18n-title="popup.lang.toggle_title" data-i18n-aria-label="popup.lang.toggle_title" title="Đổi ngôn ngữ giao diện (Tiếng Việt / English)">
+        <span class="lang-opt is-active" data-lang-opt="vi">VI</span>
+        <span class="lang-opt" data-lang-opt="en">EN</span>
+      </button>
     </header>
 
-    <!-- Sticky Brass-Accented Navigation Tabs -->
+    <!-- Session Band: Unified Status, Telemetry, Engine Power & Primary Capsule CTAs -->
+    <section class="session-band">
+      <svg class="t3-lattice-bg" viewBox="0 0 120 72" width="120" height="72" fill="currentColor" aria-hidden="true">
+        <defs><pattern id="t3-star-tile-prod" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M12 1C13 7.5 16.5 11 23 12C16.5 13 13 16.5 12 23C11 16.5 7.5 13 1 12C7.5 11 11 7.5 12 1Z"/></pattern></defs>
+        <rect width="120" height="72" fill="url(#t3-star-tile-prod)"/>
+      </svg>
+
+      <div class="session-main">
+        <div class="session-left">
+          <div class="session-presence">
+            <div id="status-pill" class="status-pill is-offline" data-i18n-title="popup.status_pill.title" title="Trạng thái Desktop App &amp; Engine">
+              <span id="status-dot" class="status-dot" aria-hidden="true">
+                <svg viewBox="0 0 12 12" width="12" height="12" fill="currentColor" style="display:block;"><path d="M6 0.8L7.5 4.5L11.2 6L7.5 7.5L6 11.2L4.5 7.5L0.8 6L4.5 4.5Z"/></svg>
+              </span>
+              <span id="status-text" data-i18n="popup.status.offline">Offline</span>
+            </div>
+            <span class="sep-dot" aria-hidden="true">·</span>
+            <span id="sync-location" class="sync-location is-empty" data-i18n="popup.telemetry.empty">Chưa có dữ liệu — Mở Map (M)</span>
+            <span id="sync-floor-badge" class="floor-badge" hidden>G</span>
+          </div>
+
+          <div id="sync-coords-row" class="sync-coords-row" hidden>
+            <code id="sync-coords" class="sync-coords">(0.0, 0.0)</code>
+            <span id="sync-time" class="sync-time" data-i18n="popup.time.just_now">Vừa xong</span>
+          </div>
+
+          <div class="power-segmented" role="group" data-i18n-aria-label="popup.power.switch_title" aria-label="Điều khiển nguồn Desktop Engine">
+            <button id="btn-power-toggle" type="button" class="power-seg power-seg--on" aria-pressed="false" data-i18n-title="popup.power.btn_on_title" title="Bật hoặc tiếp tục đồng bộ">
+              <span class="power-seg-gem" aria-hidden="true">
+                <svg class="pwr-gem-hollow" viewBox="0 0 10 10" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.3"><polygon points="5,1 9,5 5,9 1,5"/></svg>
+                <svg class="pwr-gem-fill" viewBox="0 0 10 10" width="8" height="8" fill="currentColor"><path d="M5 0.5L6.2 3.8L9.5 5L6.2 6.2L5 9.5L3.8 6.2L0.5 5L3.8 3.8Z"/></svg>
+              </span>
+              <span class="btn-label" data-i18n="popup.power.active.label">Bật</span>
+            </button>
+            <button id="btn-power-standby" type="button" class="power-seg power-seg--standby" aria-pressed="false" data-i18n-title="popup.power.btn_standby_title" title="Tạm nghỉ 0% CPU — giữ app nền để bật lại tức thì">
+              <span class="power-seg-gem" aria-hidden="true">
+                <svg class="pwr-gem-hollow" viewBox="0 0 10 10" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.3"><polygon points="5,1 9,5 5,9 1,5"/></svg>
+                <svg class="pwr-gem-fill" viewBox="0 0 10 10" width="8" height="8" fill="currentColor"><path d="M5 0.5L6.2 3.8L9.5 5L6.2 6.2L5 9.5L3.8 6.2L0.5 5L3.8 3.8Z"/></svg>
+              </span>
+              <span class="btn-label" data-i18n="popup.power.standby.label">Nghỉ 0%</span>
+            </button>
+            <button id="btn-hard-quit" type="button" class="power-seg power-seg--quit" aria-pressed="false" data-i18n-title="popup.power.btn_quit_title" title="Tắt hoàn toàn Desktop App &amp; biểu tượng khay hệ thống">
+              <span class="power-seg-gem" aria-hidden="true">
+                <svg class="pwr-gem-hollow" viewBox="0 0 10 10" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.3"><polygon points="5,1 9,5 5,9 1,5"/></svg>
+                <svg class="pwr-gem-fill" viewBox="0 0 10 10" width="8" height="8" fill="currentColor"><path d="M5 0.5L6.2 3.8L9.5 5L6.2 6.2L5 9.5L3.8 6.2L0.5 5L3.8 3.8Z"/></svg>
+              </span>
+              <span class="btn-label" data-i18n="popup.power.quit.label">Tắt hẳn</span>
+            </button>
+          </div>
+          <span id="power-title" class="sr-only" data-i18n="popup.power.offline.title">App chưa chạy</span>
+          <span id="power-desc" class="sr-only" data-i18n="popup.power.offline.desc">Bấm BẬT để tự mở app</span>
+        </div>
+
+        <div class="session-actions">
+          <div class="open-map-group">
+            <button id="btn-open-map" type="button" class="pill-btn pill-btn--primary">
+              <span class="pill-disc" aria-hidden="true">
+                <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path fill-rule="evenodd" d="M3 5.6L9 3.2L15 5.6L21 3.2V18.4L15 20.8L9 18.4L3 20.8ZM9.6 8.2L10.7 11.1L13.6 12.2L10.7 13.3L9.6 16.2L8.5 13.3L5.6 12.2L8.5 11.1ZM16.8 7.5V16.5H18.4V7.5Z"/>
+                </svg>
+              </span>
+              <span class="btn-label" data-i18n="popup.action.open_map">Mở Map</span>
+            </button>
+            <select id="select-map-provider" class="provider-select" data-i18n-title="popup.provider.select_title" title="Chọn bản đồ muốn mở">
+              <option value="hoyolab" data-i18n="popup.provider.hoyolab">HoYoLAB</option>
+              <option value="kongying" data-i18n="popup.provider.kongying">Kongying (OS)</option>
+              <option value="appsample" data-i18n="popup.provider.appsample">AppSample</option>
+            </select>
+          </div>
+          <button id="btn-switch-game" type="button" class="pill-btn pill-btn--secondary btn-full">
+            <span class="pill-disc" aria-hidden="true">
+              <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M19.8 2.8L21.2 4.2L19.0 8.0L14.2 12.8L16.3 14.9L15.0 16.2L12.0 13.2L9.0 16.2L7.7 14.9L9.8 12.8L5.0 8.0L2.8 4.2L4.2 2.8L8.0 5.0L12.0 9.0L16.0 5.0ZM6.4 15.8L8.2 17.6L5.6 20.2L4.6 21.2L2.8 19.4L3.8 18.4ZM17.6 15.8L20.2 18.4L21.2 19.4L19.4 21.2L18.4 20.2L15.8 17.6Z"/>
+              </svg>
+            </span>
+            <span class="btn-label" data-i18n="popup.action.switch_game">Chuyển về Game</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="native-host-banner" class="banner-warn" data-i18n="popup.power.native_host_banner" hidden>
+        Không thể tự mở app (thiếu Native Host). Hãy chạy Bộ cài Setup hoặc mở GenshinHelper trên máy.
+      </div>
+    </section>
+
+    <!-- Flush Architectural Navigation Tabs (32px) -->
     <nav class="tab-bar" role="tablist" data-i18n-aria-label="popup.nav.aria_label" aria-label="Điều hướng Control Center">
       <button id="tab-btn-control" class="tab-btn is-active" type="button" role="tab" aria-selected="true" aria-controls="tab-panel-control" data-tab="control">
-        <svg class="ui-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>
-          <line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>
-          <line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>
-          <line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>
+        <svg class="g-tab-star" viewBox="0 0 12 12" width="10" height="10" fill="currentColor" aria-hidden="true"><path d="M6 1.2L7.2 4.8L10.8 6L7.2 7.2L6 10.8L4.8 7.2L1.2 6L4.8 4.8Z"/></svg>
+        <svg class="g-tab-hollow" viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><polygon points="6,1.8 10.2,6 6,10.2 1.8,6"/></svg>
+        <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path fill-rule="evenodd" d="M10.4 2H13.6L14.2 4.6A7.2 7.2 0 0 1 16 5.4L18.2 3.9L20.4 6.1L18.9 8.3A7.2 7.2 0 0 1 19.7 10.1L22 10.7V13.3L19.7 13.9A7.2 7.2 0 0 1 18.9 15.7L20.4 17.9L18.2 20.1L16 18.6A7.2 7.2 0 0 1 14.2 19.4L13.6 22H10.4L9.8 19.4A7.2 7.2 0 0 1 8 18.6L5.8 20.1L3.6 17.9L5.1 15.7A7.2 7.2 0 0 1 4.3 13.9L2 13.3V10.7L4.3 10.1A7.2 7.2 0 0 1 5.1 8.3L3.6 6.1L5.8 3.9L8 5.4A7.2 7.2 0 0 1 9.8 4.6ZM12 8.2A3.8 3.8 0 1 0 15.8 12A3.8 3.8 0 0 0 12 8.2Z"/>
         </svg>
         <span class="btn-label" data-i18n="popup.tab.control">Điều khiển</span>
       </button>
       <button id="tab-btn-tools" class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="tab-panel-tools" data-tab="tools">
-        <svg class="ui-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="9"/>
-          <polygon points="15.5 8.5 13.5 13.5 8.5 15.5 10.5 10.5"/>
+        <svg class="g-tab-star" viewBox="0 0 12 12" width="10" height="10" fill="currentColor" aria-hidden="true"><path d="M6 1.2L7.2 4.8L10.8 6L7.2 7.2L6 10.8L4.8 7.2L1.2 6L4.8 4.8Z"/></svg>
+        <svg class="g-tab-hollow" viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><polygon points="6,1.8 10.2,6 6,10.2 1.8,6"/></svg>
+        <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M4.2 6.8L6.8 4.2L8.1 3.5L10.3 5.7L9.6 7.0L7.0 9.6L5.7 10.3L3.5 8.1Z"/>
+          <path d="M8.6 10.6L10.6 8.6L20.5 18.5L18.5 20.5Z"/>
+          <path d="M15.83 10.05L14.9 11.0L13.0 9.1L13.95 8.17A3.4 3.4 0 0 1 18.21 3.69L16.51 5.39L18.61 7.49L20.31 5.79A3.4 3.4 0 0 1 15.83 10.05Z"/>
+          <path d="M8.6 13.4L10.6 15.4L5.5 20.5L3.5 18.5Z"/>
         </svg>
         <span class="btn-label" data-i18n="popup.tab.tools">Công cụ</span>
       </button>
       <button id="tab-btn-settings" class="tab-btn" type="button" role="tab" aria-selected="false" aria-controls="tab-panel-settings" data-tab="settings">
-        <svg class="ui-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="2" y="6" width="20" height="12" rx="2"/>
-          <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/>
+        <svg class="g-tab-star" viewBox="0 0 12 12" width="10" height="10" fill="currentColor" aria-hidden="true"><path d="M6 1.2L7.2 4.8L10.8 6L7.2 7.2L6 10.8L4.8 7.2L1.2 6L4.8 4.8Z"/></svg>
+        <svg class="g-tab-hollow" viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><polygon points="6,1.8 10.2,6 6,10.2 1.8,6"/></svg>
+        <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path fill-rule="evenodd" d="M4.5 5.2H19.5L21.5 7.2V16.8L19.5 18.8H4.5L2.5 16.8V7.2ZM6.2 8.7V10.7H8.6V8.7ZM10.8 8.7V10.7H13.2V8.7ZM15.4 8.7V10.7H17.8V8.7ZM7.4 13.3V15.3H16.6V13.3Z"/>
         </svg>
         <span class="btn-label" data-i18n="popup.tab.settings">Phím tắt</span>
       </button>
@@ -96,260 +185,240 @@
 
     <!-- Main Content Viewport (Zero scroll on Tab 1 & Tab 2) -->
     <div class="tab-viewport">
-      <!-- TAB 1: CONTROL DECK (2-Column, 0-Scroll) -->
+      <!-- TAB 1: TEYVAT CRAFT 2-SHEET CONTROL DECK -->
       <main id="tab-panel-control" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-control">
-        <!-- Celestial Horizon Strip: 3-State Engine Power + Live Map Telemetry -->
-        <section class="card horizon-strip">
-          <div class="horizon-row">
-            <div class="horizon-power">
-              <div class="power-top-row">
-                <span class="section-label" data-i18n="popup.power.section">NGUỒN ENGINE</span>
-                <span id="power-title" class="power-title" data-i18n="popup.power.offline.title">App chưa chạy</span>
-              </div>
-              <div class="power-segmented" role="group" data-i18n-aria-label="popup.power.switch_title" aria-label="Điều khiển nguồn Desktop Engine">
-                <button id="btn-power-toggle" type="button" class="power-seg power-seg--on" aria-pressed="false" data-i18n-title="popup.power.btn_on_title" title="Bật hoặc tiếp tục đồng bộ">
-                  <span class="power-seg-dot" aria-hidden="true"></span>
-                  <span class="btn-label" data-i18n="popup.power.active.label">Bật</span>
-                </button>
-                <button id="btn-power-standby" type="button" class="power-seg power-seg--standby" aria-pressed="false" data-i18n-title="popup.power.btn_standby_title" title="Tạm nghỉ 0% CPU — giữ app nền để bật lại tức thì">
-                  <span class="power-seg-dot" aria-hidden="true"></span>
-                  <span class="btn-label" data-i18n="popup.power.standby.label">Nghỉ 0%</span>
-                </button>
-                <button id="btn-hard-quit" type="button" class="power-seg power-seg--quit" aria-pressed="false" data-i18n-title="popup.power.btn_quit_title" title="Tắt hoàn toàn Desktop App &amp; biểu tượng khay hệ thống">
-                  <span class="power-seg-dot" aria-hidden="true"></span>
-                  <span class="btn-label" data-i18n="popup.power.quit.label">Tắt hẳn</span>
-                </button>
-              </div>
-              <div id="power-desc" class="power-desc" data-i18n="popup.power.offline.desc">Bấm BẬT để tự mở app</div>
-            </div>
-
-            <div class="horizon-divider" aria-hidden="true"></div>
-
-            <div class="horizon-telemetry">
-              <div class="telemetry-header">
-                <span class="section-label" data-i18n="popup.telemetry.section">ĐỒNG BỘ GẦN NHẤT</span>
-                <span id="sync-floor-badge" class="floor-badge" hidden>G</span>
-              </div>
-              <div id="sync-location" class="sync-location is-empty" data-i18n="popup.telemetry.empty">Chưa có dữ liệu — Mở Map (M)</div>
-              <div id="sync-coords-row" class="sync-coords-row" hidden>
-                <code id="sync-coords" class="sync-coords">(0.0, 0.0)</code>
-                <span id="sync-time" class="sync-time" data-i18n="popup.time.just_now">Vừa xong</span>
-              </div>
-            </div>
-          </div>
-
-          <div id="native-host-banner" class="banner-warn" data-i18n="popup.power.native_host_banner" hidden>
-            Không thể tự mở app (thiếu Native Host). Hãy chạy Bộ cài Setup hoặc mở GenshinHelper trên máy.
-          </div>
-        </section>
-
-        <!-- 2-Column Command Deck -->
-        <div class="command-deck">
-          <!-- Left Column: Tracking & Mini-HUD -->
-          <section class="card deck-col">
-            <h2 class="section-label deck-heading" data-i18n="popup.deck.tracking_hud">THEO DÕI &amp; MINI-HUD</h2>
-
-            <label class="toggle-row" for="toggle-auto-sync" data-i18n-title="popup.auto_sync.tooltip" title="Tự động đồng bộ vị trí và tầng khi mở Map (M) trong game">
-              <div class="toggle-info">
-                <span class="toggle-title">
-                  <svg class="ui-ico ui-ico--sky" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10"/>
+        <section class="t3-sheet">
+          <div class="t3-pair-row">
+            <label class="t3-pair-cell" for="toggle-auto-sync" data-i18n-title="popup.auto_sync.tooltip" title="Tự động đồng bộ vị trí và tầng khi mở Map (M) trong game">
+              <div class="t3-cell-left">
+                <span class="t3-cell-ico" aria-hidden="true">
+                  <svg class="ui-ico" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path d="M6.4 8.0C7.4 4.6 9.6 2.8 12 2.8C14.4 2.8 16.6 4.6 17.6 8.0L15.7 8.9C15 6.6 13.7 5.3 12 5.3C10.3 5.3 9 6.6 8.3 8.9Z"/>
+                    <path d="M12 6.6L14.2 10.4L12 13.2L9.8 10.4Z"/>
+                    <path d="M8.7 13.0L12 15.0L15.3 13.0L13.1 21.2H10.9Z"/>
+                    <path d="M5.1 10.4L6.7 11.2L5.1 12.0L4.3 13.6L3.5 12.0L1.9 11.2L3.5 10.4L4.3 8.8Z"/>
+                    <path d="M19.7 8.8L20.5 10.4L22.1 11.2L20.5 12.0L19.7 13.6L18.9 12.0L17.3 11.2L18.9 10.4Z"/>
                   </svg>
-                  <span data-i18n="popup.auto_sync.title">Tự đồng bộ Map (M)</span>
                 </span>
-                <span class="toggle-desc" data-i18n="popup.auto_sync.desc">Cập nhật vị trí &amp; tầng hang tự động</span>
+                <div class="t3-cell-txt">
+                  <span class="t3-cell-title" data-i18n="popup.auto_sync.title">Tự đồng bộ Map (M)</span>
+                  <span class="t3-cell-desc" data-i18n="popup.auto_sync.desc">Cập nhật vị trí &amp; tầng hang tự động</span>
+                </div>
               </div>
               <span class="switch">
                 <input id="toggle-auto-sync" type="checkbox" checked>
-                <span class="switch-track"></span>
+                <span class="switch-track">
+                  <svg class="sw-star" viewBox="0 0 12 12" width="8" height="8" fill="currentColor" aria-hidden="true"><path d="M6 1L7.3 4.7L11 6L7.3 7.3L6 11L4.7 7.3L1 6L4.7 4.7Z"/></svg>
+                  <svg class="sw-diam" viewBox="0 0 12 12" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><polygon points="6,2 10,6 6,10 2,6"/></svg>
+                  <span class="switch-knob" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle class="knob-outer" cx="8" cy="8" r="7.2" stroke-width="1.2"/><circle class="knob-ring" cx="8" cy="8" r="3.6" fill="none" stroke-width="1.6"/></svg></span>
+                </span>
               </span>
             </label>
 
-            <label class="toggle-row" for="toggle-minimap-tracking" data-i18n-title="popup.minimap.tooltip" title="Bám vị trí và góc xoay camera 360° trực tiếp từ Minimap mà không cần mở Map (M)">
-              <div class="toggle-info">
-                <span class="toggle-title">
-                  <svg class="ui-ico ui-ico--sky" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <circle cx="12" cy="12" r="2"/>
-                    <path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"/>
+            <label class="t3-pair-cell" for="toggle-minimap-tracking" data-i18n-title="popup.minimap.tooltip" title="Bám vị trí và góc xoay camera 360° trực tiếp từ Minimap mà không cần mở Map (M)">
+              <div class="t3-cell-left">
+                <span class="t3-cell-ico" aria-hidden="true">
+                  <svg class="ui-ico" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path fill-rule="evenodd" d="M12 2.2L14 4.4A7.9 7.9 0 0 1 19.6 10L21.8 12L19.6 14A7.9 7.9 0 0 1 14 19.6L12 21.8L10 19.6A7.9 7.9 0 0 1 4.4 14L2.2 12L4.4 10A7.9 7.9 0 0 1 10 4.4ZM12 6.4A5.6 5.6 0 1 0 17.6 12A5.6 5.6 0 0 0 12 6.4Z"/>
+                    <path d="M15.8 8.2L13.3 13.8L8.2 15.8L10.7 10.2Z"/>
                   </svg>
-                  <span data-i18n="popup.minimap.title">Bám Minimap 360°</span>
                 </span>
-                <span class="toggle-desc" data-i18n="popup.minimap.desc">Vị trí &amp; góc xoay camera liên tục</span>
+                <div class="t3-cell-txt">
+                  <span class="t3-cell-title" data-i18n="popup.minimap.title">Bám Minimap 360°</span>
+                  <span class="t3-cell-desc" data-i18n="popup.minimap.desc">Vị trí &amp; góc xoay camera liên tục</span>
+                </div>
               </div>
               <span class="switch">
                 <input id="toggle-minimap-tracking" type="checkbox" checked>
-                <span class="switch-track"></span>
+                <span class="switch-track">
+                  <svg class="sw-star" viewBox="0 0 12 12" width="8" height="8" fill="currentColor" aria-hidden="true"><path d="M6 1L7.3 4.7L11 6L7.3 7.3L6 11L4.7 7.3L1 6L4.7 4.7Z"/></svg>
+                  <svg class="sw-diam" viewBox="0 0 12 12" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><polygon points="6,2 10,6 6,10 2,6"/></svg>
+                  <span class="switch-knob" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle class="knob-outer" cx="8" cy="8" r="7.2" stroke-width="1.2"/><circle class="knob-ring" cx="8" cy="8" r="3.6" fill="none" stroke-width="1.6"/></svg></span>
+                </span>
               </span>
             </label>
+          </div>
 
-            <label class="toggle-row" for="toggle-nav-hud" data-i18n-title="popup.nav_hud.tooltip" title="Hiện Mini-HUD la bàn chỉ hướng tới điểm gần nhất và Thẻ Điểm (Spot Card) có ảnh hướng dẫn">
-              <div class="toggle-info">
-                <span class="toggle-title">
-                  <svg class="ui-ico ui-ico--brass" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <circle cx="12" cy="12" r="9"/>
-                    <polygon points="15.5 8.5 13.5 13.5 8.5 15.5 10.5 10.5"/>
-                  </svg>
-                  <span data-i18n="popup.nav_hud.title">Mini-HUD &amp; Thẻ Điểm</span>
-                </span>
-                <span class="toggle-desc" data-i18n="popup.nav_hud.desc">La bàn chỉ hướng &amp; ảnh hướng dẫn</span>
+          <div class="t3-full-row">
+            <label class="t3-full-left" for="toggle-nav-hud" data-i18n-title="popup.nav_hud.tooltip" title="Hiện Mini-HUD la bàn chỉ hướng tới điểm gần nhất và Thẻ Điểm (Spot Card) có ảnh hướng dẫn">
+              <span class="t3-cell-ico" aria-hidden="true">
+                <svg class="ui-ico" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path fill-rule="evenodd" d="M12 2.8L14.7 5.1H18.5C19.6 5.1 20.5 6.0 20.5 7.1V19.2C20.5 20.3 19.6 21.2 18.5 21.2H5.5C4.4 21.2 3.5 20.3 3.5 19.2V7.1C3.5 6.0 4.4 5.1 5.5 5.1H9.3ZM12 7.6L13.4 9.9L15.7 11.3L13.4 12.7L12 15.0L10.6 12.7L8.3 11.3L10.6 9.9ZM7.5 16.8H16.5V18.4H7.5Z"/>
+                </svg>
+              </span>
+              <div class="t3-cell-txt">
+                <span class="t3-cell-title" data-i18n="popup.nav_hud.title">Mini-HUD &amp; Thẻ Điểm</span>
+                <span class="t3-cell-desc" data-i18n="popup.nav_hud.desc">La bàn chỉ hướng &amp; ảnh hướng dẫn</span>
               </div>
-              <span class="switch switch--brass">
+            </label>
+            <div class="t3-full-right">
+              <span class="switch">
                 <input id="toggle-nav-hud" type="checkbox" checked>
-                <span class="switch-track"></span>
+                <span class="switch-track">
+                  <svg class="sw-star" viewBox="0 0 12 12" width="8" height="8" fill="currentColor" aria-hidden="true"><path d="M6 1L7.3 4.7L11 6L7.3 7.3L6 11L4.7 7.3L1 6L4.7 4.7Z"/></svg>
+                  <svg class="sw-diam" viewBox="0 0 12 12" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><polygon points="6,2 10,6 6,10 2,6"/></svg>
+                  <span class="switch-knob" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle class="knob-outer" cx="8" cy="8" r="7.2" stroke-width="1.2"/><circle class="knob-ring" cx="8" cy="8" r="3.6" fill="none" stroke-width="1.6"/></svg></span>
+                </span>
+              </span>
+            </div>
+          </div>
+
+          <div id="hud-sub-group" class="t3-hud-tray">
+            <div class="t3-hud-tray-row">
+              <label class="t3-hud-lbl" for="select-hud-position" data-i18n="popup.nav_hud.position_label">Vị trí</label>
+              <select id="select-hud-position" class="select-input" style="flex: 0.95;" data-i18n-aria-label="popup.nav_hud.position_label" aria-label="Vị trí HUD">
+                <option value="under_minimap" data-i18n="popup.nav_hud.pos_under_minimap">Dưới minimap</option>
+                <option value="right_of_minimap" data-i18n="popup.nav_hud.pos_right_of_minimap">Cạnh phải minimap</option>
+                <option value="top_center" data-i18n="popup.nav_hud.pos_top_center">Giữa phía trên</option>
+                <option value="bottom_center" data-i18n="popup.nav_hud.pos_bottom_center">Giữa phía dưới</option>
+                <option value="custom" data-i18n="popup.nav_hud.pos_custom">Tùy chỉnh (kéo thả)</option>
+              </select>
+              <button id="btn-hud-edit" type="button" class="pill-btn pill-btn--secondary pill-btn--sm" data-i18n-title="popup.nav_hud.edit_tooltip" title="Bật chế độ kéo thả Mini-HUD trong game (giữ Alt để hiện chuột)">
+                <span class="pill-disc" aria-hidden="true">
+                  <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path d="M12 2L15.4 5.8H13.2V10.8H18.2V8.6L22 12L18.2 15.4V13.2H13.2V18.2H15.4L12 22L8.6 18.2H10.8V13.2H5.8V15.4L2 12L5.8 8.6V10.8H10.8V5.8H8.6Z"/>
+                  </svg>
+                </span>
+                <span class="btn-label" data-i18n="popup.nav_hud.edit_btn">Kéo</span>
+              </button>
+              <label class="t3-hud-lbl" for="select-hud-guide-zoom" style="margin-left: 2px;" data-i18n="popup.nav_hud.guide_zoom_label" data-i18n-title="popup.nav_hud.guide_zoom_tooltip" title="Cách phím tắt Thẻ hướng dẫn (mặc định Alt+H) hoạt động: Xoay vòng nhấn 1 lần mở nhỏ → lần 2 phóng to rõ → lần 3 đóng">Thẻ ảnh</label>
+              <select id="select-hud-guide-zoom" class="select-input" style="flex: 1.25;" data-i18n-aria-label="popup.nav_hud.guide_zoom_label" data-i18n-title="popup.nav_hud.guide_zoom_tooltip" aria-label="Thẻ ảnh" title="Cách phím tắt Thẻ hướng dẫn (mặc định Alt+H) hoạt động">
+                <option value="cycle" data-i18n="popup.nav_hud.guide_zoom_cycle">Xoay vòng (Nhỏ → To)</option>
+                <option value="compact" data-i18n="popup.nav_hud.guide_zoom_compact">Chỉ mở gọn</option>
+                <option value="large" data-i18n="popup.nav_hud.guide_zoom_large">Mở to luôn</option>
+              </select>
+            </div>
+
+            <label class="t3-hud-tray-row hud-cap-row" for="toggle-hud-capture" data-i18n-title="popup.nav_hud.capture_tooltip" title="Khi bật, Mini-HUD xuất hiện trong ảnh chụp / OBS / Share Screen (vẫn tự ẩn khi bạn Alt+Tab sang trình duyệt hoặc app khác đè lên game trên cùng 1 màn hình). Để NVIDIA Alt+F9 quay được overlay: Alt+Z → Cài đặt → Quyền riêng tư → bật Desktop Capture.">
+              <span class="hud-cap-left">
+                <svg class="ui-ico ui-ico--brass" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path fill-rule="evenodd" d="M8.8 4.2H15.2L16.8 6.4H20.2L21.5 7.7V18.5L20.2 19.8H3.8L2.5 18.5V7.7L3.8 6.4H7.2ZM12 8.4A4.6 4.6 0 1 0 16.6 13A4.6 4.6 0 0 0 12 8.4ZM12 10.3L12.8 12.2L14.7 13L12.8 13.8L12 15.7L11.2 13.8L9.3 13L11.2 12.2Z"/>
+                </svg>
+                <span class="hud-cap-title" data-i18n="popup.nav_hud.capture_title">Hiện HUD khi chụp / quay</span>
+                <span class="hud-cap-desc" data-i18n="popup.nav_hud.capture_desc">OBS, Win+Shift+S (ẩn nếu che)</span>
+              </span>
+              <span class="switch switch--sm">
+                <input id="toggle-hud-capture" type="checkbox">
+                <span class="switch-track">
+                  <svg class="sw-star" viewBox="0 0 12 12" width="7" height="7" fill="currentColor" aria-hidden="true"><path d="M6 1L7.3 4.7L11 6L7.3 7.3L6 11L4.7 7.3L1 6L4.7 4.7Z"/></svg>
+                  <svg class="sw-diam" viewBox="0 0 12 12" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><polygon points="6,2 10,6 6,10 2,6"/></svg>
+                  <span class="switch-knob" aria-hidden="true"><svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><circle class="knob-outer" cx="8" cy="8" r="7.2" stroke-width="1.2"/><circle class="knob-ring" cx="8" cy="8" r="3.6" fill="none" stroke-width="1.6"/></svg></span>
+                </span>
               </span>
             </label>
+          </div>
 
-            <div id="hud-sub-group" class="sub-group">
-              <div class="hud-pos-row">
-                <label class="hud-pos-label" for="select-hud-position" data-i18n="popup.nav_hud.position_label">Vị trí</label>
-                <select id="select-hud-position" class="select-input" data-i18n-aria-label="popup.nav_hud.position_label" aria-label="Vị trí HUD">
-                  <option value="under_minimap" data-i18n="popup.nav_hud.pos_under_minimap">Dưới minimap</option>
-                  <option value="right_of_minimap" data-i18n="popup.nav_hud.pos_right_of_minimap">Cạnh phải minimap</option>
-                  <option value="top_center" data-i18n="popup.nav_hud.pos_top_center">Giữa phía trên</option>
-                  <option value="bottom_center" data-i18n="popup.nav_hud.pos_bottom_center">Giữa phía dưới</option>
-                  <option value="custom" data-i18n="popup.nav_hud.pos_custom">Tùy chỉnh (kéo thả)</option>
-                </select>
-                <button id="btn-hud-edit" type="button" class="preset-btn preset-btn--brass" data-i18n-title="popup.nav_hud.edit_tooltip" title="Bật chế độ kéo thả Mini-HUD trong game (giữ Alt để hiện chuột)">
-                  <svg class="ui-ico" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/>
-                    <polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/>
-                    <line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/>
+          <div class="t3-pair-row">
+            <label class="t3-pair-cell" for="toggle-radar-enabled" data-i18n-title="popup.radar.tooltip" title="Bản đồ nổi Live 60 fps góc dưới-phải (hướng Bắc như HoYoLAB, tự che UID, kéo/resize trong Alt+F7). Tắt = 0% CPU/RAM.">
+              <div class="t3-cell-left">
+                <span class="t3-cell-ico" aria-hidden="true">
+                  <svg class="ui-ico" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path d="M12 3.2L21 8.0L12 12.8L3 8.0Z"/>
+                    <path d="M3 12.0L12 16.8L21 12.0L19.1 11.0L12 14.8L4.9 11.0Z"/>
+                    <path d="M3 16.0L12 20.8L21 16.0L19.1 15.0L12 18.8L4.9 15.0Z"/>
                   </svg>
-                  <span class="btn-label" data-i18n="popup.nav_hud.edit_btn">Kéo</span>
-                </button>
-              </div>
-
-              <div class="hud-pos-row">
-                <label class="hud-pos-label" for="select-hud-guide-zoom" data-i18n="popup.nav_hud.guide_zoom_label" data-i18n-title="popup.nav_hud.guide_zoom_tooltip" title="Cách phím tắt Thẻ hướng dẫn (mặc định Alt+H) hoạt động: Xoay vòng nhấn 1 lần mở nhỏ → lần 2 phóng to rõ → lần 3 đóng">Thẻ ảnh</label>
-                <select id="select-hud-guide-zoom" class="select-input" data-i18n-aria-label="popup.nav_hud.guide_zoom_label" data-i18n-title="popup.nav_hud.guide_zoom_tooltip" aria-label="Thẻ ảnh" title="Cách phím tắt Thẻ hướng dẫn (mặc định Alt+H) hoạt động">
-                  <option value="cycle" data-i18n="popup.nav_hud.guide_zoom_cycle">Xoay vòng (Nhỏ → To)</option>
-                  <option value="compact" data-i18n="popup.nav_hud.guide_zoom_compact">Chỉ mở gọn</option>
-                  <option value="large" data-i18n="popup.nav_hud.guide_zoom_large">Mở to luôn</option>
-                </select>
-              </div>
-
-              <label class="toggle-row toggle-row--sub" for="toggle-hud-capture" data-i18n-title="popup.nav_hud.capture_tooltip" title="Khi bật, Mini-HUD xuất hiện trong ảnh chụp / OBS / Share Screen (vẫn tự ẩn khi bạn Alt+Tab sang trình duyệt hoặc app khác đè lên game trên cùng 1 màn hình). Để NVIDIA Alt+F9 quay được overlay: Alt+Z → Cài đặt → Quyền riêng tư → bật Desktop Capture.">
-                <div class="toggle-info">
-                  <span class="toggle-title toggle-title--sub">
-                    <svg class="ui-ico ui-ico--brass" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                      <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/>
-                      <circle cx="12" cy="13" r="3"/>
-                    </svg>
-                    <span data-i18n="popup.nav_hud.capture_title">Hiện HUD khi chụp / quay</span>
-                  </span>
-                  <span class="toggle-desc" data-i18n="popup.nav_hud.capture_desc">OBS, Win+Shift+S (ẩn nếu che)</span>
+                </span>
+                <div class="t3-cell-txt">
+                  <span class="t3-cell-title" data-i18n="popup.radar.title">Bản đồ nổi Live (Radar)</span>
+                  <span class="t3-cell-desc" data-i18n="popup.radar.desc">Góc dưới-phải · Alt+` · Tắt = 0%</span>
                 </div>
-                <span class="switch switch--brass switch--sm">
-                  <input id="toggle-hud-capture" type="checkbox">
-                  <span class="switch-track"></span>
-                </span>
-              </label>
-            </div>
-          </section>
-
-          <!-- Right Column: Audio, Display & Quick Actions -->
-          <section class="card deck-col">
-            <h2 class="section-label deck-heading" data-i18n="popup.deck.audio_display">ÂM THANH &amp; HIỂN THỊ</h2>
-
-            <label class="toggle-row" for="toggle-audio-enabled">
-              <div class="toggle-info">
-                <span class="toggle-title">
-                  <svg class="ui-ico ui-ico--sky" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
-                  </svg>
-                  <span data-i18n="popup.audio.title">Âm thanh phản hồi</span>
-                </span>
-                <span class="toggle-desc" data-i18n="popup.audio.desc">Chuông dịu tai cho tai nghe</span>
               </div>
               <span class="switch">
-                <input id="toggle-audio-enabled" type="checkbox" checked>
-                <span class="switch-track"></span>
-              </span>
-            </label>
-
-            <div class="sub-group">
-              <div id="audio-vol-row" class="audio-vol-row">
-                <input id="range-audio-volume" class="audio-vol-slider" type="range" min="0" max="100" step="5" value="50" data-i18n-aria-label="popup.audio.volume_aria" aria-label="Âm lượng âm báo (%)">
-                <span id="audio-volume-value" class="audio-vol-value">50%</span>
-                <button id="btn-audio-test" type="button" class="preset-btn preset-btn--brass" data-i18n-title="popup.audio.test_tooltip" title="Phát thử âm báo với mức âm lượng hiện tại">
-                  <svg class="ui-ico" width="10" height="10" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
-                    <polygon points="6 4 20 12 6 20 6 4"/>
-                  </svg>
-                  <span class="btn-label" data-i18n="popup.audio.test_btn">Thử</span>
-                </button>
-              </div>
-            </div>
-
-            <label class="toggle-row" for="toggle-radar-enabled" data-i18n-title="popup.radar.tooltip" title="Bản đồ nổi Live 60 fps góc dưới-phải (hướng Bắc như HoYoLAB, tự che UID, kéo/resize trong Alt+F7). Tắt = 0% CPU/RAM.">
-              <div class="toggle-info">
-                <span class="toggle-title">
-                  <svg class="ui-ico ui-ico--brass" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21"/>
-                    <circle cx="12" cy="12" r="2.2"/>
-                  </svg>
-                  <span data-i18n="popup.radar.title">Bản đồ nổi Live (Radar)</span>
-                </span>
-                <span class="toggle-desc" data-i18n="popup.radar.desc">Góc dưới-phải · Alt+` · Tắt = 0%</span>
-              </div>
-              <span class="switch switch--brass">
                 <input id="toggle-radar-enabled" type="checkbox">
-                <span class="switch-track"></span>
-              </span>
-            </label>
-
-            <label class="toggle-row" for="toggle-compact-ui" data-i18n-title="popup.compact_ui.tooltip" title="Ẩn thanh tiêu đề/quảng cáo thừa trên HoYoLAB Map và tự thu gọn thanh lọc (giữ an toàn Thám Hiểm Phân Tầng)">
-              <div class="toggle-info">
-                <span class="toggle-title">
-                  <svg class="ui-ico ui-ico--brass" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <rect x="3" y="3" width="18" height="18" rx="2"/>
-                    <line x1="9" y1="3" x2="9" y2="21"/>
-                  </svg>
-                  <span data-i18n="popup.compact_ui.title">Giao diện HoYoLAB gọn</span>
+                <span class="switch-track">
+                  <svg class="sw-star" viewBox="0 0 12 12" width="8" height="8" fill="currentColor" aria-hidden="true"><path d="M6 1L7.3 4.7L11 6L7.3 7.3L6 11L4.7 7.3L1 6L4.7 4.7Z"/></svg>
+                  <svg class="sw-diam" viewBox="0 0 12 12" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><polygon points="6,2 10,6 6,10 2,6"/></svg>
+                  <span class="switch-knob" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle class="knob-outer" cx="8" cy="8" r="7.2" stroke-width="1.2"/><circle class="knob-ring" cx="8" cy="8" r="3.6" fill="none" stroke-width="1.6"/></svg></span>
                 </span>
-                <span class="toggle-desc" data-i18n="popup.compact_ui.desc">Ẩn header/banner, thu gọn lọc</span>
-              </div>
-              <span class="switch switch--brass">
-                <input id="toggle-compact-ui" type="checkbox">
-                <span class="switch-track"></span>
               </span>
             </label>
 
-            <section class="actions">
-              <div class="open-map-group">
-                <button id="btn-open-map" type="button" class="btn btn-primary open-map-btn">
-                  <svg class="ui-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21"/>
-                    <line x1="9" y1="3" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="21"/>
+            <label class="t3-pair-cell" for="toggle-compact-ui" data-i18n-title="popup.compact_ui.tooltip" title="Ẩn thanh tiêu đề/quảng cáo thừa trên HoYoLAB Map và tự thu gọn thanh lọc (giữ an toàn Thám Hiểm Phân Tầng)">
+              <div class="t3-cell-left">
+                <span class="t3-cell-ico" aria-hidden="true">
+                  <svg class="ui-ico" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path fill-rule="evenodd" d="M5.2 3.5H18.8L20.5 5.2V18.8L18.8 20.5H5.2L3.5 18.8V5.2ZM6.4 6.4V11.1H11.1V6.4ZM12.9 6.4V11.1H17.6V6.4ZM6.4 12.9V17.6H11.1V12.9ZM12.9 12.9V17.6H17.6V12.9Z"/>
                   </svg>
-                  <span class="btn-label" data-i18n="popup.action.open_map">Mở Map</span>
-                </button>
-                <select id="select-map-provider" class="provider-select" data-i18n-title="popup.provider.select_title" title="Chọn bản đồ muốn mở">
-                  <option value="hoyolab" data-i18n="popup.provider.hoyolab">HoYoLAB</option>
-                  <option value="kongying" data-i18n="popup.provider.kongying">Kongying (OS)</option>
-                  <option value="appsample" data-i18n="popup.provider.appsample">AppSample</option>
-                </select>
+                </span>
+                <div class="t3-cell-txt">
+                  <span class="t3-cell-title" data-i18n="popup.compact_ui.title">Giao diện HoYoLAB gọn</span>
+                  <span class="t3-cell-desc" data-i18n="popup.compact_ui.desc">Ẩn header/banner, thu gọn lọc</span>
+                </div>
               </div>
-              <button id="btn-switch-game" type="button" class="btn btn-secondary btn-full">
-                <svg class="ui-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <rect x="2" y="6" width="20" height="12" rx="4"/>
-                  <line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/>
-                  <line x1="15" y1="13" x2="15.01" y2="13"/><line x1="18" y1="11" x2="18.01" y2="11"/>
+              <span class="switch">
+                <input id="toggle-compact-ui" type="checkbox">
+                <span class="switch-track">
+                  <svg class="sw-star" viewBox="0 0 12 12" width="8" height="8" fill="currentColor" aria-hidden="true"><path d="M6 1L7.3 4.7L11 6L7.3 7.3L6 11L4.7 7.3L1 6L4.7 4.7Z"/></svg>
+                  <svg class="sw-diam" viewBox="0 0 12 12" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><polygon points="6,2 10,6 6,10 2,6"/></svg>
+                  <span class="switch-knob" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle class="knob-outer" cx="8" cy="8" r="7.2" stroke-width="1.2"/><circle class="knob-ring" cx="8" cy="8" r="3.6" fill="none" stroke-width="1.6"/></svg></span>
+                </span>
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <section class="t3-sheet t3-audio-sheet">
+          <div class="t3-audio-top">
+            <label class="t3-cell-left" for="toggle-audio-enabled" style="cursor: pointer;">
+              <span class="t3-cell-ico" aria-hidden="true">
+                <svg class="ui-ico" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path fill-rule="evenodd" d="M4.8 3.6H19.2L20.8 5.2V18.8L19.2 20.4H4.8L3.2 18.8V5.2ZM6.4 9.7V14.3H9.3L13.1 17.4V6.6L9.3 9.7ZM15.2 9.1L16.5 8.1A5.8 5.8 0 0 1 16.5 15.9L15.2 14.9A4.1 4.1 0 0 0 15.2 9.1Z"/>
                 </svg>
-                <span class="btn-label" data-i18n="popup.action.switch_game">Chuyển về Game</span>
-              </button>
-            </section>
-          </section>
-        </div>
+              </span>
+              <div class="t3-cell-txt">
+                <span class="t3-cell-title" data-i18n="popup.audio.title">Âm thanh phản hồi</span>
+                <span class="t3-cell-desc" data-i18n="popup.audio.desc">Chuông dịu tai cho tai nghe</span>
+              </div>
+            </label>
+            <span class="switch">
+              <input id="toggle-audio-enabled" type="checkbox" checked>
+              <span class="switch-track">
+                <svg class="sw-star" viewBox="0 0 12 12" width="8" height="8" fill="currentColor" aria-hidden="true"><path d="M6 1L7.3 4.7L11 6L7.3 7.3L6 11L4.7 7.3L1 6L4.7 4.7Z"/></svg>
+                <svg class="sw-diam" viewBox="0 0 12 12" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><polygon points="6,2 10,6 6,10 2,6"/></svg>
+                <span class="switch-knob" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle class="knob-outer" cx="8" cy="8" r="7.2" stroke-width="1.2"/><circle class="knob-ring" cx="8" cy="8" r="3.6" fill="none" stroke-width="1.6"/></svg></span>
+              </span>
+            </span>
+          </div>
+
+          <div id="audio-vol-row" class="t3-audio-bar">
+            <div class="t3-slider-wrap">
+              <div class="t3-slider-track">
+                <div id="audio-vol-fill" class="t3-slider-fill" style="width: 50%;"></div>
+              </div>
+              <div id="audio-vol-thumb" class="t3-slider-thumb" style="left: 50%;" aria-hidden="true">
+                <svg viewBox="0 0 16 16" width="16" height="16" style="display:block;" aria-hidden="true">
+                  <circle class="t3-sl-outer" cx="8" cy="8" r="6.8" stroke-width="1.8"/>
+                  <circle class="t3-sl-core" cx="8" cy="8" r="2.6"/>
+                </svg>
+              </div>
+              <input id="range-audio-volume" class="t3-slider-input" type="range" min="0" max="100" step="5" value="50" style="--vol-pct: 50%;" data-i18n-aria-label="popup.audio.volume_aria" aria-label="Âm lượng âm báo (%)">
+            </div>
+            <span id="audio-volume-value" class="audio-vol-value">50%</span>
+            <button id="btn-audio-test" type="button" class="pill-btn pill-btn--secondary pill-btn--sm" data-i18n-title="popup.audio.test_tooltip" title="Phát thử âm báo với mức âm lượng hiện tại">
+              <span class="pill-disc" aria-hidden="true">
+                <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path fill-rule="evenodd" d="M4.8 3.6H19.2L20.8 5.2V18.8L19.2 20.4H4.8L3.2 18.8V5.2ZM6.4 9.7V14.3H9.3L13.1 17.4V6.6L9.3 9.7ZM15.2 9.1L16.5 8.1A5.8 5.8 0 0 1 16.5 15.9L15.2 14.9A4.1 4.1 0 0 0 15.2 9.1Z"/>
+                </svg>
+              </span>
+              <span class="btn-label" data-i18n="popup.audio.test_btn">Thử</span>
+            </button>
+          </div>
+        </section>
       </main>
 
-      <!-- TAB 2: TOOLS (2-Column Observatory Grid, 0-Scroll) -->
+      <!-- TAB 2: TOOLS (2-Column Teyvat Grid, 0-Scroll) -->
       <section id="tab-panel-tools" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-tools" hidden>
         <div class="tools-grid">
           <!-- 1. Web Route Companion & M-Map Overlay -->
           <section class="card route-card">
-            <h2 class="section-label deck-heading" data-i18n="popup.route.section">TUYẾN ĐƯỜNG WEB MAP</h2>
+            <div class="tool-head">
+              <svg class="ui-ico ui-ico--brass" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M6.4 8.0C7.4 4.6 9.6 2.8 12 2.8C14.4 2.8 16.6 4.6 17.6 8.0L15.7 8.9C15 6.6 13.7 5.3 12 5.3C10.3 5.3 9 6.6 8.3 8.9Z"/>
+                <path d="M12 6.6L14.2 10.4L12 13.2L9.8 10.4Z"/>
+                <path d="M8.7 13.0L12 15.0L15.3 13.0L13.1 21.2H10.9Z"/>
+              </svg>
+              <h2 class="tool-title" data-i18n="popup.route.section">TUYẾN ĐƯỜNG WEB MAP</h2>
+            </div>
             <p id="route-status-text" class="tool-desc route-status-text" data-i18n="popup.route.idle">Mở tuyến trên HoYoLAB Map hoặc nạp file .ghroute.json / link.</p>
             <div class="route-overlay-row">
               <label for="select-mmap-overlay-mode" class="route-overlay-lbl" data-i18n="popup.route.mmap_mode_label">Overlay Map (M)</label>
@@ -360,21 +429,13 @@
               </select>
             </div>
             <div class="tool-btn-row route-btn-row">
-              <button id="btn-route-export" type="button" class="btn btn-secondary btn-compact">
-                <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                  <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-                </svg>
+              <button id="btn-route-export" type="button" class="pill-btn pill-btn--secondary pill-btn--sm pill-btn--plain pill-btn--flex">
                 <span class="btn-label" data-i18n="popup.route.export_btn">Xuất file</span>
               </button>
-              <button id="btn-route-import" type="button" class="btn btn-primary btn-compact">
-                <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                  <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-                </svg>
+              <button id="btn-route-import" type="button" class="pill-btn pill-btn--primary pill-btn--sm pill-btn--plain pill-btn--flex">
                 <span class="btn-label" data-i18n="popup.route.import_btn">Nạp tuyến</span>
               </button>
-              <button id="btn-route-clear" type="button" class="btn btn-neutral btn-compact" data-i18n="popup.route.clear_btn">Dừng</button>
+              <button id="btn-route-clear" type="button" class="pill-btn pill-btn--secondary pill-btn--sm pill-btn--plain" data-i18n="popup.route.clear_btn">Dừng</button>
             </div>
             <div id="route-import-tray" class="route-import-tray" hidden>
               <input id="input-route-file" type="file" accept=".json,.ghroute.json,application/json" hidden>
@@ -388,7 +449,12 @@
 
           <!-- 2. 1-Click Cross-Map Pin Importer & Exporter -->
           <section class="card">
-            <h2 class="section-label deck-heading" data-i18n="popup.export.section">XUẤT GHIM LIÊN BẢN ĐỒ</h2>
+            <div class="tool-head">
+              <svg class="ui-ico ui-ico--brass" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M5.2 4.6H18.8L20.8 8.3V10.6H14.5L12 8.8L9.5 10.6H3.2V8.3ZM3.4 12.2H9.8L12 14.0L14.2 12.2H20.6V19.4H3.4ZM12 10.2L13.5 11.6L12 13.0L10.5 11.6Z"/>
+              </svg>
+              <h2 class="tool-title" data-i18n="popup.export.section">XUẤT GHIM LIÊN BẢN ĐỒ</h2>
+            </div>
             <p class="tool-desc" data-i18n="popup.export.desc">Xuất toàn bộ điểm đã đánh dấu trên HoYoLAB (kể cả danh mục đang ẩn) bằng 1 cú nhấp.</p>
             <div class="export-row">
               <select id="select-export-format" class="select-input" data-i18n-aria-label="popup.export.format_aria" aria-label="Chọn định dạng bản đồ đích">
@@ -397,19 +463,16 @@
                 <option value="genshinmap" data-i18n="popup.export.fmt_genshinmap">genshinmap.github.io (GM_007~)</option>
                 <option value="canonical" data-i18n="popup.export.fmt_canonical">Canonical Backup (JSON)</option>
               </select>
-              <button id="btn-export-pins" type="button" class="btn btn-secondary btn-compact">
-                <svg class="ui-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                  <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-                </svg>
+              <button id="btn-export-pins" type="button" class="pill-btn pill-btn--secondary pill-btn--sm pill-btn--plain">
                 <span class="btn-label" data-i18n="popup.export.btn">Xuất ghim</span>
               </button>
             </div>
-            <button id="btn-open-importer" type="button" class="btn btn-primary btn-compact btn-full" data-i18n-title="popup.export.import_tooltip" title="Mở công cụ nhập tiến độ từ Appsample (100% chuẩn) hoặc Kongying Tavern sang HoYoLAB kèm Xem trước &amp; Hoàn tác 1-Click">
-              <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-              </svg>
+            <button id="btn-open-importer" type="button" class="pill-btn pill-btn--primary pill-btn--sm btn-full" data-i18n-title="popup.export.import_tooltip" title="Mở công cụ nhập tiến độ từ Appsample (100% chuẩn) hoặc Kongying Tavern sang HoYoLAB kèm Xem trước &amp; Hoàn tác 1-Click">
+              <span class="pill-disc" aria-hidden="true">
+                <svg class="ui-ico" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path fill-rule="evenodd" d="M5.2 4.6H18.8L20.8 8.3V10.6H14.5L12 8.8L9.5 10.6H3.2V8.3ZM3.4 12.2H9.8L12 14.0L14.2 12.2H20.6V19.4H3.4ZM12 10.2L13.5 11.6L12 13.0L10.5 11.6Z"/>
+                </svg>
+              </span>
               <span class="btn-label" data-i18n="popup.export.import_btn">Nhập từ Appsample / Kongying</span>
             </button>
           </section>
@@ -417,16 +480,32 @@
           <!-- 3. LAN Companion QR (Full-Width Card) -->
           <section class="card tools-span-full lan-card">
             <div class="card-head-row">
-              <h2 class="section-label deck-heading" data-i18n="popup.lan.section">LAN COMPANION (MÀN HÌNH PHỤ)</h2>
+              <div class="tool-head">
+                <svg class="ui-ico ui-ico--brass" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path d="M12 3.6L15.4 10.0L12 16.2L8.6 10.0Z"/>
+                  <path d="M9.2 18.0H14.8L16.2 20.4H7.8Z"/>
+                  <path d="M6.4 6.1L7.6 7.4A5.2 5.2 0 0 0 7.6 13.4L6.4 14.7A7 7 0 0 1 6.4 6.1Z"/>
+                  <path d="M17.6 6.1A7 7 0 0 1 17.6 14.7L16.4 13.4A5.2 5.2 0 0 0 16.4 7.4Z"/>
+                </svg>
+                <h2 class="tool-title" data-i18n="popup.lan.section">LAN COMPANION (MÀN HÌNH PHỤ)</h2>
+              </div>
               <span id="lan-status-badge" class="lan-badge is-off" data-i18n="popup.lan.status_off">Đang tắt</span>
             </div>
             <div class="lan-head-row">
               <p class="tool-desc" data-i18n="popup.lan.desc">Xem bản đồ trực tiếp trên điện thoại / máy tính bảng chung Wi-Fi (chỉ bật khi cần).</p>
-              <button id="btn-toggle-lan" type="button" class="btn btn-primary btn-compact">
-                <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/>
-                  <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>
-                </svg>
+              <button id="btn-toggle-lan" type="button" class="pill-btn btn-primary pill-btn--sm">
+                <span class="pill-disc" aria-hidden="true">
+                  <svg class="ui-ico lan-ico lan-ico--start" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path d="M12 3.6L15.4 10.0L12 16.2L8.6 10.0Z"/>
+                    <path d="M9.2 18.0H14.8L16.2 20.4H7.8Z"/>
+                    <path d="M6.4 6.1L7.6 7.4A5.2 5.2 0 0 0 7.6 13.4L6.4 14.7A7 7 0 0 1 6.4 6.1Z"/>
+                    <path d="M17.6 6.1A7 7 0 0 1 17.6 14.7L16.4 13.4A5.2 5.2 0 0 0 16.4 7.4Z"/>
+                  </svg>
+                  <svg class="ui-ico lan-ico lan-ico--stop" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path d="M10.6 3.2H13.4V12.2H10.6Z"/>
+                    <path d="M7.08 4.70L8.64 7.03A6.0 6.0 0 1 0 15.36 7.03L16.92 4.70A8.8 8.8 0 1 1 7.08 4.70Z"/>
+                  </svg>
+                </span>
                 <span class="btn-label" data-i18n="popup.lan.start_btn">Bật LAN</span>
               </button>
             </div>
@@ -439,7 +518,7 @@
                 </div>
                 <div class="lan-url-row">
                   <code id="lan-url-text" class="lan-url-text"></code>
-                  <button id="btn-copy-lan-url" type="button" class="preset-btn preset-btn--brass" data-i18n="popup.lan.copy_btn">Chép</button>
+                  <button id="btn-copy-lan-url" type="button" class="pill-btn pill-btn--secondary pill-btn--sm pill-btn--plain" data-i18n="popup.lan.copy_btn">Chép</button>
                 </div>
                 <div id="lan-clients-text" class="lan-clients-text"></div>
               </div>
@@ -448,14 +527,20 @@
 
           <!-- 4. Launch Genshin Borderless (Full-Width Compact Row) -->
           <section class="card tools-span-full">
-            <h2 class="section-label deck-heading" data-i18n="popup.borderless.section">KHỞI ĐỘNG GENSHIN BORDERLESS</h2>
+            <div class="tool-head">
+              <svg class="ui-ico ui-ico--brass" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M3 4.5H21V17.5H13.8V19.2H16.2V21H7.8V19.2H10.2V17.5H3ZM5 8.5V15.5H19V8.5Z"/>
+              </svg>
+              <h2 class="tool-title" data-i18n="popup.borderless.section">KHỞI ĐỘNG GENSHIN BORDERLESS</h2>
+            </div>
             <div class="borderless-row">
               <p class="tool-desc" data-i18n="popup.borderless.desc">Mở game Borderless Windowed (-popupwindow) để Mini-HUD &amp; Toast hiển thị mượt.</p>
-              <button id="btn-launch-borderless" type="button" class="btn btn-secondary btn-compact">
-                <svg class="ui-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <rect x="3" y="4" width="18" height="16" rx="2"/>
-                  <path d="M3 9h18"/>
-                </svg>
+              <button id="btn-launch-borderless" type="button" class="pill-btn pill-btn--secondary pill-btn--sm">
+                <span class="pill-disc" aria-hidden="true">
+                  <svg class="ui-ico" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path d="M19.8 2.8L21.2 4.2L19.0 8.0L14.2 12.8L16.3 14.9L15.0 16.2L12.0 13.2L9.0 16.2L7.7 14.9L9.8 12.8L5.0 8.0L2.8 4.2L4.2 2.8L8.0 5.0L12.0 9.0L16.0 5.0ZM6.4 15.8L8.2 17.6L5.6 20.2L4.6 21.2L2.8 19.4L3.8 18.4ZM17.6 15.8L20.2 18.4L21.2 19.4L19.4 21.2L18.4 20.2L15.8 17.6Z"/>
+                  </svg>
+                </span>
                 <span class="btn-label" data-i18n="popup.borderless.btn">Mở Borderless</span>
               </button>
             </div>
@@ -463,45 +548,50 @@
         </div>
       </section>
 
-      <!-- TAB 3: HOTKEYS & DIAGNOSTICS (Compact 2-Column + 3x2 Matrix) -->
+      <!-- TAB 3: HOTKEYS & DIAGNOSTICS (Hybrid Teyvat Craft v4 2-Sheet) -->
       <section id="tab-panel-settings" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-settings" hidden>
-        <section class="card hotkey-card">
-          <div class="card-head-row">
-            <h2 class="section-label deck-heading" data-i18n="popup.hotkeys.section">PHÍM TẮT &amp; CHUỘT</h2>
-            <span class="mini-note" data-i18n="popup.hotkeys.mini_note">Click ô để gõ phím hoặc chọn nhanh</span>
+        <div class="hk-head-row">
+          <div class="tool-head">
+            <svg class="ui-ico ui-ico--brass" width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" d="M4.5 5.2H19.5L21.5 7.2V16.8L19.5 18.8H4.5L2.5 16.8V7.2ZM6.2 8.7V10.7H8.6V8.7ZM10.8 8.7V10.7H13.2V8.7ZM15.4 8.7V10.7H17.8V8.7ZM7.4 13.3V15.3H16.6V13.3Z"/>
+            </svg>
+            <h2 class="tool-title" data-i18n="popup.hotkeys.section">PHÍM TẮT &amp; CHUỘT</h2>
           </div>
+          <span class="mini-note" data-i18n="popup.hotkeys.mini_note">Click ô để gõ phím hoặc chọn nhanh</span>
+        </div>
 
-          <!-- Primary Global Hotkeys -->
-          <div class="primary-rec-grid">
-            <!-- Sync & Ghim (full-width because 6 presets) -->
-            <div class="recorder-group primary-rec-span" data-group="sync">
-              <div class="recorder-label-row">
-                <span class="recorder-title" data-i18n="popup.hotkeys.sync_title">Sync &amp; Ghim</span>
-                <span class="recorder-default" data-i18n="popup.hotkeys.sync_default">Mặc định: Alt + F11</span>
-              </div>
+        <!-- Sheet 1: Primary Global Hotkeys & Mouse Quick-Picks -->
+        <section class="t3-sheet hk-primary-sheet">
+          <!-- Sync & Ghim -->
+          <div class="recorder-group hk-primary-top" data-group="sync">
+            <div class="hk-slot-line">
+              <span class="recorder-title" data-i18n="popup.hotkeys.sync_title">Sync &amp; Ghim</span>
+              <span class="recorder-default sr-only" data-i18n="popup.hotkeys.sync_default">Mặc định: Alt + F11</span>
               <div id="rec-box-sync" class="recorder-box is-sky" tabindex="0" role="button" data-i18n-title="popup.hotkeys.box_tooltip" title="Click rồi nhấn phím trên bàn phím (Esc để hủy)">
                 <span id="rec-display-sync" class="recorder-value">Alt + F11</span>
                 <span id="rec-badge-sync" class="recorder-badge" data-i18n="popup.hotkeys.badge_change">Đổi phím</span>
               </div>
-              <div class="preset-row">
-                <button type="button" class="preset-btn" data-target="sync" data-key="mouse4" data-label="Mouse 4 (Chuột hông)" data-label-i18n="popup.hotkeys.mouse4">Mouse 4</button>
-                <button type="button" class="preset-btn" data-target="sync" data-key="mouse5" data-label="Mouse 5 (Chuột hông)" data-label-i18n="popup.hotkeys.mouse5">Mouse 5</button>
-                <button type="button" class="preset-btn" data-target="sync" data-key="middle" data-label="Chuột giữa (Con lăn)" data-label-i18n="popup.hotkeys.mouse_middle" data-i18n="popup.hotkeys.preset_middle">Chuột giữa</button>
-                <button type="button" class="preset-btn preset-btn--brass" data-target="sync" data-key="alt+mouse4" data-label="Alt + Mouse 4">Alt + Mouse 4</button>
-                <button type="button" class="preset-btn" data-target="sync" data-key="alt+f11" data-label="Alt + F11">Alt + F11</button>
-                <button type="button" class="preset-btn" data-target="sync" data-key="f10" data-label="F10">F10</button>
-              </div>
             </div>
+            <div class="preset-row">
+              <button type="button" class="preset-btn" data-target="sync" data-key="mouse4" data-label="Mouse 4 (Chuột hông)" data-label-i18n="popup.hotkeys.mouse4">Mouse 4</button>
+              <button type="button" class="preset-btn" data-target="sync" data-key="mouse5" data-label="Mouse 5 (Chuột hông)" data-label-i18n="popup.hotkeys.mouse5">Mouse 5</button>
+              <button type="button" class="preset-btn" data-target="sync" data-key="middle" data-label="Chuột giữa (Con lăn)" data-label-i18n="popup.hotkeys.mouse_middle" data-i18n="popup.hotkeys.preset_middle">Chuột giữa</button>
+              <button type="button" class="preset-btn preset-btn--brass" data-target="sync" data-key="alt+mouse4" data-label="Alt + Mouse 4">Alt + Mouse 4</button>
+              <button type="button" class="preset-btn" data-target="sync" data-key="alt+f11" data-label="Alt + F11">Alt + F11</button>
+              <button type="button" class="preset-btn" data-target="sync" data-key="f10" data-label="F10">F10</button>
+            </div>
+          </div>
 
+          <div class="hk-primary-pair">
             <!-- Quick Switch -->
-            <div class="recorder-group" data-group="switch">
-              <div class="recorder-label-row">
+            <div class="recorder-group hk-primary-cell" data-group="switch">
+              <div class="hk-slot-line">
                 <span class="recorder-title" data-i18n="popup.hotkeys.switch_title">Chuyển nhanh Game ↔ Map</span>
-                <span class="recorder-default" data-i18n="popup.hotkeys.switch_default">Mặc định: Alt + Q</span>
-              </div>
-              <div id="rec-box-switch" class="recorder-box is-emerald" tabindex="0" role="button" data-i18n-title="popup.hotkeys.box_tooltip" title="Click rồi nhấn phím trên bàn phím (Esc để hủy)">
-                <span id="rec-display-switch" class="recorder-value">Alt + Q</span>
-                <span id="rec-badge-switch" class="recorder-badge" data-i18n="popup.hotkeys.badge_change">Đổi phím</span>
+                <span class="recorder-default sr-only" data-i18n="popup.hotkeys.switch_default">Mặc định: Alt + Q</span>
+                <div id="rec-box-switch" class="recorder-box is-emerald" tabindex="0" role="button" data-i18n-title="popup.hotkeys.box_tooltip" title="Click rồi nhấn phím trên bàn phím (Esc để hủy)">
+                  <span id="rec-display-switch" class="recorder-value">Alt + Q</span>
+                  <span id="rec-badge-switch" class="recorder-badge" data-i18n="popup.hotkeys.badge_change">Đổi phím</span>
+                </div>
               </div>
               <div class="preset-row">
                 <button type="button" class="preset-btn" data-target="switch" data-key="alt+q" data-label="Alt + Q">Alt + Q</button>
@@ -512,14 +602,14 @@
             </div>
 
             <!-- Diagnostic -->
-            <div class="recorder-group" data-group="debug">
-              <div class="recorder-label-row">
+            <div class="recorder-group hk-primary-cell" data-group="debug">
+              <div class="hk-slot-line">
                 <span class="recorder-title" data-i18n="popup.hotkeys.debug_title">Chụp Chẩn Đoán</span>
-                <span class="recorder-default" data-i18n="popup.hotkeys.debug_default">Mặc định: Alt + F12</span>
-              </div>
-              <div id="rec-box-debug" class="recorder-box is-brass" tabindex="0" role="button" data-i18n-title="popup.hotkeys.box_tooltip" title="Click rồi nhấn phím trên bàn phím (Esc để hủy)">
-                <span id="rec-display-debug" class="recorder-value">Alt + F12</span>
-                <span id="rec-badge-debug" class="recorder-badge" data-i18n="popup.hotkeys.badge_change">Đổi phím</span>
+                <span class="recorder-default sr-only" data-i18n="popup.hotkeys.debug_default">Mặc định: Alt + F12</span>
+                <div id="rec-box-debug" class="recorder-box is-brass" tabindex="0" role="button" data-i18n-title="popup.hotkeys.box_tooltip" title="Click rồi nhấn phím trên bàn phím (Esc để hủy)">
+                  <span id="rec-display-debug" class="recorder-value">Alt + F12</span>
+                  <span id="rec-badge-debug" class="recorder-badge" data-i18n="popup.hotkeys.badge_change">Đổi phím</span>
+                </div>
               </div>
               <div class="preset-row">
                 <button type="button" class="preset-btn" data-target="debug" data-key="alt+f12" data-label="Alt + F12">Alt + F12</button>
@@ -529,60 +619,76 @@
               </div>
             </div>
           </div>
+        </section>
 
-          <!-- In-game Navigation Hotkeys (3x2 Matrix) -->
-          <div class="recorder-subhead" data-i18n="popup.hotkeys.nav_section">ĐIỀU HƯỚNG TRONG GAME (KHÔNG CẦN ALT+TAB)</div>
-          <div class="nav-rec-grid">
-            <div class="recorder-group recorder-group--compact" data-group="nav_mark">
+        <!-- Subheading & Sheet 2: In-game Navigation Hotkeys (2x4 Balanced Matrix) -->
+        <div class="recorder-subhead" data-i18n="popup.hotkeys.nav_section">ĐIỀU HƯỚNG TRONG GAME (KHÔNG CẦN ALT+TAB)</div>
+        <section class="t3-sheet nav-rec-grid">
+          <div class="recorder-group recorder-group--compact" data-group="nav_mark">
+            <div class="hk-nav-line">
               <span class="recorder-title" data-i18n="popup.hotkeys.nav_mark_title">Ghim mục tiêu</span>
               <div id="rec-box-nav_mark" class="recorder-box is-emerald" tabindex="0" role="button" data-i18n-title="popup.hotkeys.box_tooltip" title="Click rồi nhấn phím trên bàn phím (Esc để hủy)">
                 <span id="rec-display-nav_mark" class="recorder-value">Alt + F</span>
                 <span id="rec-badge-nav_mark" class="recorder-badge" data-i18n="popup.hotkeys.badge_change">Đổi phím</span>
               </div>
             </div>
-            <div class="recorder-group recorder-group--compact" data-group="nav_undo">
+          </div>
+          <div class="recorder-group recorder-group--compact" data-group="nav_undo">
+            <div class="hk-nav-line">
               <span class="recorder-title" data-i18n="popup.hotkeys.nav_undo_title">Hoàn tác ghim</span>
               <div id="rec-box-nav_undo" class="recorder-box is-brass" tabindex="0" role="button" data-i18n-title="popup.hotkeys.box_tooltip" title="Click rồi nhấn phím trên bàn phím (Esc để hủy)">
                 <span id="rec-display-nav_undo" class="recorder-value">Alt + T</span>
                 <span id="rec-badge-nav_undo" class="recorder-badge" data-i18n="popup.hotkeys.badge_change">Đổi phím</span>
               </div>
             </div>
-            <div class="recorder-group recorder-group--compact" data-group="nav_guide">
+          </div>
+          <div class="recorder-group recorder-group--compact" data-group="nav_guide">
+            <div class="hk-nav-line">
               <span class="recorder-title" data-i18n="popup.hotkeys.nav_guide_title">Thẻ hướng dẫn</span>
               <div id="rec-box-nav_guide" class="recorder-box is-sky" tabindex="0" role="button" data-i18n-title="popup.hotkeys.box_tooltip" title="Click rồi nhấn phím trên bàn phím (Esc để hủy)">
                 <span id="rec-display-nav_guide" class="recorder-value">Alt + H</span>
                 <span id="rec-badge-nav_guide" class="recorder-badge" data-i18n="popup.hotkeys.badge_change">Đổi phím</span>
               </div>
             </div>
-            <div class="recorder-group recorder-group--compact" data-group="nav_next">
+          </div>
+          <div class="recorder-group recorder-group--compact" data-group="nav_next">
+            <div class="hk-nav-line">
               <span class="recorder-title" data-i18n="popup.hotkeys.nav_next_title">Mục tiêu kế</span>
               <div id="rec-box-nav_next" class="recorder-box is-sky" tabindex="0" role="button" data-i18n-title="popup.hotkeys.box_tooltip" title="Click rồi nhấn phím trên bàn phím (Esc để hủy)">
                 <span id="rec-display-nav_next" class="recorder-value">Alt + E</span>
                 <span id="rec-badge-nav_next" class="recorder-badge" data-i18n="popup.hotkeys.badge_change">Đổi phím</span>
               </div>
             </div>
-            <div class="recorder-group recorder-group--compact" data-group="nav_layout">
+          </div>
+          <div class="recorder-group recorder-group--compact" data-group="nav_layout">
+            <div class="hk-nav-line">
               <span class="recorder-title" data-i18n="popup.hotkeys.nav_layout_title">Kéo vị trí HUD</span>
               <div id="rec-box-nav_layout" class="recorder-box is-brass" tabindex="0" role="button" data-i18n-title="popup.hotkeys.box_tooltip" title="Click rồi nhấn phím trên bàn phím (Esc để hủy)">
                 <span id="rec-display-nav_layout" class="recorder-value">Alt + F7</span>
                 <span id="rec-badge-nav_layout" class="recorder-badge" data-i18n="popup.hotkeys.badge_change">Đổi phím</span>
               </div>
             </div>
-            <div class="recorder-group recorder-group--compact" data-group="nav_toggle">
+          </div>
+          <div class="recorder-group recorder-group--compact" data-group="nav_toggle">
+            <div class="hk-nav-line">
               <span class="recorder-title" data-i18n="popup.hotkeys.nav_toggle_title">Ẩn/Hiện HUD</span>
               <div id="rec-box-nav_toggle" class="recorder-box is-sky" tabindex="0" role="button" data-i18n-title="popup.hotkeys.box_tooltip" title="Click rồi nhấn phím trên bàn phím (Esc để hủy)">
                 <span id="rec-display-nav_toggle" class="recorder-value">Alt + X</span>
                 <span id="rec-badge-nav_toggle" class="recorder-badge" data-i18n="popup.hotkeys.badge_change">Đổi phím</span>
               </div>
             </div>
-            <div class="recorder-group recorder-group--compact" data-group="radar_toggle">
+          </div>
+          <div class="recorder-group recorder-group--compact" data-group="radar_toggle">
+            <div class="hk-nav-line">
               <span class="recorder-title" data-i18n="popup.hotkeys.radar_toggle_title">Bật/Tắt Radar Map</span>
               <div id="rec-box-radar_toggle" class="recorder-box is-brass" tabindex="0" role="button" data-i18n-title="popup.hotkeys.box_tooltip" title="Click rồi nhấn phím trên bàn phím (Esc để hủy)">
                 <span id="rec-display-radar_toggle" class="recorder-value">Alt + `</span>
                 <span id="rec-badge-radar_toggle" class="recorder-badge" data-i18n="popup.hotkeys.badge_change">Đổi phím</span>
               </div>
             </div>
-            <div class="recorder-group recorder-group--compact" data-group="nav_unlock">
+          </div>
+          <div class="recorder-group recorder-group--compact" data-group="nav_unlock">
+            <div class="hk-nav-line">
               <span class="recorder-title" data-i18n="popup.hotkeys.nav_unlock_title">Hủy khóa ghim</span>
               <div id="rec-box-nav_unlock" class="recorder-box is-brass" tabindex="0" role="button" data-i18n-title="popup.hotkeys.box_tooltip" title="Click rồi nhấn phím trên bàn phím (Esc để hủy)">
                 <span id="rec-display-nav_unlock" class="recorder-value">Alt + F6</span>
@@ -590,18 +696,18 @@
               </div>
             </div>
           </div>
-
-          <div id="hotkey-backups-bar" class="backups-bar" hidden></div>
-
-          <button id="btn-save-hotkeys" type="button" class="btn btn-primary btn-full">
-            <svg class="ui-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
-              <polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
-            </svg>
-            <span class="btn-label" data-i18n="popup.hotkeys.save_btn">Lưu phím tắt</span>
-          </button>
         </section>
 
+        <div id="hotkey-backups-bar" class="backups-bar" hidden></div>
+
+        <button id="btn-save-hotkeys" type="button" class="pill-btn pill-btn--primary btn-full">
+          <span class="pill-disc" aria-hidden="true">
+            <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" d="M4.5 5.2H19.5L21.5 7.2V16.8L19.5 18.8H4.5L2.5 16.8V7.2ZM6.2 8.7V10.7H8.6V8.7ZM10.8 8.7V10.7H13.2V8.7ZM15.4 8.7V10.7H17.8V8.7ZM7.4 13.3V15.3H16.6V13.3Z"/>
+            </svg>
+          </span>
+          <span class="btn-label" data-i18n="popup.hotkeys.save_btn">Lưu phím tắt</span>
+        </button>
       </section>
     </div>
 
@@ -610,23 +716,26 @@
 
     <!-- Anchored App & Map Update Popover (Above Sticky Footer, Zero Layout Shift) -->
     <section id="update-drawer" class="update-drawer" role="dialog" aria-modal="false" aria-labelledby="update-drawer-title" hidden>
+      <span class="popup-corner popup-corner--tl" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
+      <span class="popup-corner popup-corner--tr" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
+      <span class="popup-corner popup-corner--bl" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
+      <span class="popup-corner popup-corner--br" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
       <div class="donate-header">
         <div>
           <div id="update-drawer-title" class="update-drawer-title">
-            <svg class="ui-ico ui-ico--sky" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-              <polyline points="7 10 12 15 17 10"/>
-              <line x1="12" y1="15" x2="12" y2="3"/>
+            <svg class="ui-ico ui-ico--brass" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M10.4 3.2H13.6V10.6H17.2L12 16.2L6.8 10.6H10.4Z"/>
+              <path d="M3.5 15.4H6.1V18.2H17.9V15.4H20.5V20.8H3.5Z"/>
             </svg>
             <span data-i18n="popup.update.drawer_title">Cập nhật ứng dụng &amp; Bản đồ</span>
           </div>
           <p class="update-drawer-sub" data-i18n="popup.update.drawer_sub">Tải từ GitHub Releases với xác thực SHA-256 tự động.</p>
         </div>
-        <button id="btn-update-close" type="button" class="donate-close" data-i18n-aria-label="popup.update.close_aria" aria-label="Đóng bảng cập nhật">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
-        </button>
+        <button id="btn-update-close" type="button" class="donate-close" data-i18n-aria-label="popup.update.close_aria" aria-label="Đóng bảng cập nhật">×</button>
+      </div>
+
+      <div class="t3-ornament-rule" aria-hidden="true">
+        <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3"><polygon points="6,1.8 10.2,6 6,10.2 1.8,6"/></svg>
       </div>
 
       <div class="update-ver-row">
@@ -651,26 +760,24 @@
       <pre id="update-notes-box" class="update-notes-box" hidden></pre>
 
       <div class="update-actions-row">
-        <button id="btn-update-primary" type="button" class="btn btn-primary btn-compact" data-state="idle">
-          <svg class="ui-ico btn-upd-ico btn-upd-ico--spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <polyline points="23 4 23 10 17 10"/>
-            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-          </svg>
-          <svg class="ui-ico btn-upd-ico btn-upd-ico--download" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-            <polyline points="7 10 12 15 17 10"/>
-            <line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-          <svg class="ui-ico btn-upd-ico btn-upd-ico--ready" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <polyline points="20 6 9 17 4 12"/>
-          </svg>
+        <button id="btn-update-primary" type="button" class="pill-btn pill-btn--primary pill-btn--sm" data-state="idle">
+          <span class="pill-disc" aria-hidden="true">
+            <svg class="ui-ico btn-upd-ico btn-upd-ico--spin" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M12 3.2A8.8 8.8 0 0 1 20.5 9.8L17.4 10.6A5.8 5.8 0 0 0 12 6.2V8.2L8.4 4.8L12 1.4Z"/>
+              <path d="M12 20.8A8.8 8.8 0 0 1 3.5 14.2L6.6 13.4A5.8 5.8 0 0 0 12 17.8V15.8L15.6 19.2L12 22.6Z"/>
+              <path d="M12 8.8L13.1 10.9L15.2 12L13.1 13.1L12 15.2L10.9 13.1L8.8 12L10.9 10.9Z"/>
+            </svg>
+            <svg class="ui-ico btn-upd-ico btn-upd-ico--download" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M10.4 3.2H13.6V10.6H17.2L12 16.2L6.8 10.6H10.4Z"/>
+              <path d="M3.5 15.4H6.1V18.2H17.9V15.4H20.5V20.8H3.5Z"/>
+            </svg>
+            <svg class="ui-ico btn-upd-ico btn-upd-ico--ready" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" d="M8.3 3H15.7L21 8.3V15.7L15.7 21H8.3L3 15.7V8.3ZM16.8 9.2L15.2 7.6L10.6 12.2L8.6 10.2L7.0 11.8L10.6 15.4Z"/>
+            </svg>
+          </span>
           <span class="btn-label" data-i18n="popup.update.check_btn">Kiểm tra ngay</span>
         </button>
-        <button id="btn-update-github" type="button" class="btn btn-secondary btn-compact">
-          <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-            <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
-          </svg>
+        <button id="btn-update-github" type="button" class="pill-btn pill-btn--secondary pill-btn--sm pill-btn--plain">
           <span class="btn-label" data-i18n="popup.update.github_btn">GitHub Releases</span>
         </button>
       </div>
@@ -704,22 +811,25 @@
 
     <!-- Anchored Bug Report & Diagnostics Popover (Above Sticky Footer) -->
     <section id="diag-drawer" class="diag-drawer" role="dialog" aria-modal="false" aria-labelledby="diag-drawer-title" hidden>
+      <span class="popup-corner popup-corner--tl" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
+      <span class="popup-corner popup-corner--tr" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
+      <span class="popup-corner popup-corner--bl" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
+      <span class="popup-corner popup-corner--br" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
       <div class="donate-header">
         <div>
           <div id="diag-drawer-title" class="diag-drawer-title">
-            <svg class="ui-ico ui-ico--sky" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-              <path d="m9 12 2 2 4-4"/>
+            <svg class="ui-ico ui-ico--brass" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" d="M5.2 3.4H18.8L17.4 5.6V20.6L12 17.3L6.6 20.6V5.6ZM11.1 7.1V12.2H12.9V7.1ZM11.1 13.7V15.5H12.9V13.7Z"/>
             </svg>
             <span data-i18n="popup.diag.drawer_title">Chẩn đoán &amp; Báo lỗi Beta</span>
           </div>
           <p class="diag-drawer-sub" data-i18n="popup.diag.drawer_sub">Đóng gói 1 file .zip sạch thông tin cá nhân để gửi nhanh lên Discord.</p>
         </div>
-        <button id="btn-diag-close" type="button" class="donate-close" data-i18n-aria-label="popup.diag.close_aria" aria-label="Đóng khung báo lỗi">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
-        </button>
+        <button id="btn-diag-close" type="button" class="donate-close" data-i18n-aria-label="popup.diag.close_aria" aria-label="Đóng khung báo lỗi">×</button>
+      </div>
+
+      <div class="t3-ornament-rule" aria-hidden="true">
+        <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3"><polygon points="6,1.8 10.2,6 6,10.2 1.8,6"/></svg>
       </div>
 
       <div class="diag-privacy-box">
@@ -746,10 +856,12 @@
         <span data-i18n="popup.diag.include_browser">Kèm ảnh riêng khung HoYoLAB Map (tự ẩn thanh tài khoản)</span>
       </label>
 
-      <button id="btn-trigger-diag" type="button" class="btn btn-primary btn-full">
-        <svg class="ui-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/>
-        </svg>
+      <button id="btn-trigger-diag" type="button" class="pill-btn pill-btn--primary btn-full">
+        <span class="pill-disc" aria-hidden="true">
+          <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path fill-rule="evenodd" d="M5.2 3.4H18.8L17.4 5.6V20.6L12 17.3L6.6 20.6V5.6ZM11.1 7.1V12.2H12.9V7.1ZM11.1 13.7V15.5H12.9V13.7Z"/>
+          </svg>
+        </span>
         <span class="btn-label" data-i18n="popup.diag.btn">Tạo .zip &amp; Mở thư mục</span>
       </button>
 
@@ -761,17 +873,10 @@
           <span id="diag-zip-meta" class="diag-zip-meta"></span>
         </div>
         <div class="diag-result-actions">
-          <button id="btn-diag-open-folder" type="button" class="btn btn-secondary btn-compact">
-            <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            </svg>
+          <button id="btn-diag-open-folder" type="button" class="pill-btn pill-btn--secondary pill-btn--sm pill-btn--plain">
             <span class="btn-label" data-i18n="popup.diag.open_folder_btn">Mở lại thư mục</span>
           </button>
-          <button id="btn-diag-copy-template" type="button" class="btn btn-brass btn-compact">
-            <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-            </svg>
+          <button id="btn-diag-copy-template" type="button" class="pill-btn pill-btn--secondary pill-btn--sm pill-btn--plain">
             <span class="btn-label" data-i18n="popup.diag.copy_discord_btn">Chép lại mẫu</span>
           </button>
         </div>
@@ -784,24 +889,27 @@
 
     <!-- Anchored Support Popover (Above Sticky Footer, Never Clipped) -->
     <section id="donate-drawer" class="donate-drawer" role="dialog" aria-modal="false" aria-labelledby="donate-drawer-title" hidden>
+      <span class="popup-corner popup-corner--tl" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
+      <span class="popup-corner popup-corner--tr" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
+      <span class="popup-corner popup-corner--bl" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
+      <span class="popup-corner popup-corner--br" aria-hidden="true"><svg viewBox="0 0 14 14" width="12" height="12" fill="currentColor" style="display:block;"><path d="M0 0H12V2H3.5L2 3.5V12H0ZM3.5 3.5L6.5 3.5L3.5 6.5Z"/></svg></span>
       <div class="donate-header">
         <div>
           <div id="donate-drawer-title" class="donate-title">
-            <svg class="ui-ico ui-ico--brass" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M17 8h1a4 4 0 0 1 0 8h-1"/>
-              <path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z"/>
-              <line x1="6" y1="2" x2="6" y2="4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="14" y1="2" x2="14" y2="4"/>
+            <svg class="ui-ico ui-ico--brass" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" d="M9.4 2.9H14.6L13.7 5.4H10.3ZM7.2 6.9H16.8C19.1 9.1 20.2 12.1 19.8 15.4C19.3 18.8 16.5 21.1 12 21.1C7.5 21.1 4.7 18.8 4.2 15.4C3.8 12.1 4.9 9.1 7.2 6.9ZM12 9.5L13.2 12.5L16.2 13.7L13.2 14.9L12 17.9L10.8 14.9L7.8 13.7L10.8 12.5Z"/>
             </svg>
             <span data-i18n="popup.donate.title">Ủng hộ Genshin-Helper</span>
           </div>
           <p class="donate-desc" data-i18n="popup.donate.desc">Miễn phí 100%, mã nguồn mở &amp; không quảng cáo. Mời mình một ly cà phê nếu công cụ giúp ích cho bạn!</p>
         </div>
-        <button id="btn-donate-close" type="button" class="donate-close" data-i18n-aria-label="popup.donate.close_aria" aria-label="Đóng khung ủng hộ">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
-        </button>
+        <button id="btn-donate-close" type="button" class="donate-close" data-i18n-aria-label="popup.donate.close_aria" aria-label="Đóng khung ủng hộ">×</button>
       </div>
+
+      <div class="t3-ornament-rule" aria-hidden="true">
+        <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3"><polygon points="6,1.8 10.2,6 6,10.2 1.8,6"/></svg>
+      </div>
+
       <div class="donate-grid">
         <a class="donate-btn donate-kofi" href="https://ko-fi.com/minmories" target="_blank" rel="noopener noreferrer">
           <span class="donate-btn-title">Ko-fi</span>
@@ -818,7 +926,7 @@
       </div>
     </section>
 
-    <!-- Sticky Observatory Footer (Always Visible, Report Bug & Support Always One Click) -->
+    <!-- Sticky Teyvat Footer (34px Always Visible) -->
     <footer class="popup-footer">
       <div class="footer-status">
         <span id="footer-conn-dot" class="footer-conn-dot is-offline" aria-hidden="true"></span>
@@ -826,17 +934,14 @@
       </div>
       <div class="footer-actions">
         <button id="btn-diag-toggle" type="button" class="diag-trigger" aria-expanded="false" data-i18n-title="popup.diag.footer_title" title="Chụp chẩn đoán &amp; gửi báo lỗi Discord">
-          <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-            <path d="M12 8v4"/><path d="M12 16h.01"/>
+          <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path fill-rule="evenodd" d="M5.2 3.4H18.8L17.4 5.6V20.6L12 17.3L6.6 20.6V5.6ZM11.1 7.1V12.2H12.9V7.1ZM11.1 13.7V15.5H12.9V13.7Z"/>
           </svg>
           <span class="btn-label" data-i18n="popup.diag.footer_btn">Báo lỗi</span>
         </button>
         <button id="btn-donate-toggle" type="button" class="donate-trigger" aria-expanded="false" data-i18n-title="popup.donate.footer_title" title="Ủng hộ tác giả (Ko-fi / MoMo QR — 100% tự nguyện)">
-          <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M17 8h1a4 4 0 0 1 0 8h-1"/>
-            <path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z"/>
-            <line x1="6" y1="2" x2="6" y2="4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="14" y1="2" x2="14" y2="4"/>
+          <svg class="ui-ico" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path fill-rule="evenodd" d="M9.4 2.9H14.6L13.7 5.4H10.3ZM7.2 6.9H16.8C19.1 9.1 20.2 12.1 19.8 15.4C19.3 18.8 16.5 21.1 12 21.1C7.5 21.1 4.7 18.8 4.2 15.4C3.8 12.1 4.9 9.1 7.2 6.9ZM12 9.5L13.2 12.5L16.2 13.7L13.2 14.9L12 17.9L10.8 14.9L7.8 13.7L10.8 12.5Z"/>
           </svg>
           <span class="btn-label" data-i18n="popup.donate.footer_btn">Ủng hộ</span>
         </button>

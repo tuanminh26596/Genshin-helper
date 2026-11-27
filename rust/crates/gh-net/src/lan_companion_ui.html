@@ -6,8 +6,8 @@
 <title>Genshin Helper — LAN Companion</title>
 <style>
   :root{
-    --bg:#121318;--panel:#191b24;--panel2:#222534;--border:#2d3244;
-    --fg:#eef1f8;--muted:#9aa3b2;--accent:#bb86fc;--ok:#4ade80;--warn:#facc15;--err:#ff6b6b;--tp:#38bdf8
+    --bg:#151923;--panel:#1A1E28;--panel2:#242A39;--border:rgba(211,188,142,0.24);
+    --fg:#F2ECE0;--muted:#B8AF9E;--accent:#D3BC8E;--ok:#52C4A0;--warn:#E0AB58;--err:#EE827D;--tp:#7EE8FF
   }
   *{box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;-webkit-tap-highlight-color:transparent;user-select:none}
   html,body{margin:0;padding:0;width:100%;max-width:100vw;height:100%;overflow:hidden;position:fixed;inset:0;overscroll-behavior:none;touch-action:none;background:var(--bg);color:var(--fg)}
@@ -27,8 +27,8 @@
     max-width:140px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis
   }
   .controls{display:flex;align-items:center;gap:4px;flex-shrink:0}
-  .pill{background:#242736;border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:5px 8px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap}
-  .pill.active{border-color:var(--accent);color:var(--accent);background:rgba(187,134,252,.12)}
+  .pill{background:#242A39;border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:5px 8px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap}
+  .pill.active{border-color:var(--accent);color:#DFC48C;background:rgba(211,188,142,.15)}
   @media (max-width:440px){
     .status-txt{display:none}
     .map-pill{font-size:11px;padding:4px 8px;max-width:120px}
@@ -59,16 +59,16 @@
     background:rgba(24,26,36,.92);border:1px solid var(--border);border-radius:999px;
     padding:4px 9px;font-size:11px;font-weight:600;color:var(--fg);cursor:pointer
   }
-  .chip.active{border-color:var(--accent);background:rgba(187,134,252,.18);color:#f3e8ff}
+  .chip.active{border-color:var(--accent);background:rgba(211,188,142,.18);color:#DFC48C}
   .chip img{width:14px;height:14px;border-radius:50%;object-fit:contain}
 
   .fab-col{position:absolute;right:10px;bottom:14px;display:flex;flex-direction:column;gap:7px;z-index:11}
   .fab{
     width:40px;height:40px;border-radius:11px;border:1px solid var(--border);
-    background:rgba(24,26,36,.92);color:var(--fg);font-size:17px;font-weight:700;cursor:pointer;
+    background:rgba(26,30,40,.92);color:var(--fg);font-size:17px;font-weight:700;cursor:pointer;
     display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px)
   }
-  .fab.accent{border-color:rgba(187,134,252,.5);color:var(--accent)}
+  .fab.accent{border-color:rgba(211,188,142,.5);color:#DFC48C}
 
   .sheet{
     position:absolute;left:10px;right:10px;bottom:10px;z-index:30;
@@ -108,7 +108,7 @@
   }
   .sbtn.mark{background:rgba(74,222,128,.18);border-color:rgba(74,222,128,.55);color:#bbf7d0}
   .sbtn.unmark{background:rgba(248,113,113,.16);border-color:rgba(248,113,113,.5);color:#fecaca}
-  .sbtn.target{background:rgba(187,134,252,.18);border-color:rgba(187,134,252,.55);color:#e9d5ff}
+  .sbtn.target{background:rgba(211,188,142,.18);border-color:rgba(211,188,142,.55);color:#DFC48C}
 
   .toast{
     position:absolute;left:50%;top:56px;transform:translateX(-50%);background:rgba(20,22,30,.95);
@@ -1146,7 +1146,7 @@
       drawTargetBeaconRing(hdCtx, tx, ty, 15.5, routeAccent);
     }
 
-    // 6. Player FOV + Arrow
+    // 6. Player FOV + Unified Symmetrical Tinh Tú (Star Dart) Arrow
     if (hasFix) {
       const [px, py] = worldToScreen(dispLat, dispLng, w, h);
       if (dispCamHdg != null) {
@@ -1157,8 +1157,13 @@
         hdCtx.moveTo(0, 0);
         hdCtx.arc(0, 0, 42, rad - 0.45, rad + 0.45);
         hdCtx.closePath();
-        hdCtx.fillStyle = 'rgba(56, 189, 248, 0.25)';
+        hdCtx.fillStyle = 'rgba(126, 232, 255, 0.22)';
         hdCtx.fill();
+        hdCtx.beginPath();
+        hdCtx.arc(0, 0, 42, rad - 0.45, rad + 0.45);
+        hdCtx.strokeStyle = 'rgba(211, 188, 142, 0.72)';
+        hdCtx.lineWidth = 1.3;
+        hdCtx.stroke();
         hdCtx.restore();
       }
       const hdgRad = (dispHdg - 90) * Math.PI / 180;
@@ -1166,20 +1171,51 @@
       hdCtx.translate(px, py);
       hdCtx.beginPath();
       hdCtx.arc(0, 0, 14, 0, Math.PI * 2);
-      hdCtx.fillStyle = 'rgba(15, 23, 42, 0.72)';
+      hdCtx.fillStyle = 'rgba(26, 30, 40, 0.78)';
       hdCtx.fill();
-      hdCtx.rotate(hdgRad);
-      hdCtx.beginPath();
-      hdCtx.moveTo(12, 0);
-      hdCtx.lineTo(-7.5, -6.5);
-      hdCtx.lineTo(-4, 0);
-      hdCtx.lineTo(-7.5, 6.5);
-      hdCtx.closePath();
-      hdCtx.fillStyle = '#ffffff';
-      hdCtx.strokeStyle = '#bb86fc';
-      hdCtx.lineWidth = 2;
-      hdCtx.fill();
+      hdCtx.strokeStyle = 'rgba(211, 188, 142, 0.55)';
+      hdCtx.lineWidth = 1.1;
       hdCtx.stroke();
+      hdCtx.rotate(hdgRad + Math.PI / 2);
+      hdCtx.lineJoin = 'round';
+      // Outer dark halo + uniform bright blade
+      hdCtx.beginPath();
+      hdCtx.moveTo(0, -12);
+      hdCtx.lineTo(8.6, 8.2);
+      hdCtx.lineTo(0, 3.6);
+      hdCtx.lineTo(-8.6, 8.2);
+      hdCtx.closePath();
+      hdCtx.strokeStyle = '#141822';
+      hdCtx.lineWidth = 2.4;
+      hdCtx.stroke();
+      hdCtx.fillStyle = '#7EE8FF';
+      hdCtx.fill();
+      // Symmetric inner trim contour
+      hdCtx.beginPath();
+      hdCtx.moveTo(0, -8.2);
+      hdCtx.lineTo(5.6, 5.2);
+      hdCtx.lineTo(0, 2.2);
+      hdCtx.lineTo(-5.6, 5.2);
+      hdCtx.closePath();
+      hdCtx.strokeStyle = '#F0FCFF';
+      hdCtx.lineWidth = 1.1;
+      hdCtx.stroke();
+      // Centered 4-point Genshin star core
+      hdCtx.beginPath();
+      hdCtx.moveTo(0, -3.5);
+      hdCtx.lineTo(1.0, -1.4);
+      hdCtx.lineTo(3.1, -0.4);
+      hdCtx.lineTo(1.0, 0.6);
+      hdCtx.lineTo(0, 2.7);
+      hdCtx.lineTo(-1.0, 0.6);
+      hdCtx.lineTo(-3.1, -0.4);
+      hdCtx.lineTo(-1.0, -1.4);
+      hdCtx.closePath();
+      hdCtx.strokeStyle = '#141822';
+      hdCtx.lineWidth = 1.0;
+      hdCtx.stroke();
+      hdCtx.fillStyle = '#D3BC8E';
+      hdCtx.fill();
       hdCtx.restore();
     }
   }

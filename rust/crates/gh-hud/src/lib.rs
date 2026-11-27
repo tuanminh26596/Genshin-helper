@@ -9,6 +9,7 @@ pub mod layered;
 pub mod mmap_overlay;
 pub mod nav_hud;
 pub mod radar_map;
+pub(crate) mod star_dart;
 pub mod toast;
 
 pub use radar_map::{

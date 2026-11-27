@@ -1,23 +1,28 @@
 // Headless check that the dedicated HoYoLAB test profile is still signed in (Node >= 22, no deps).
 //
-//   node scripts/hoyolab_profile_check.mjs <chrome.exe> <profile-dir>
-//   (normally run through: pwsh -NoProfile -File scripts/hoyolab_test_profile.ps1 -Verify)
+//   node scripts/hoyolab_profile_check.mjs <chrome.exe> <profile-dir> [hoyolab|appsample]
+//   (normally run through: pwsh -NoProfile -File scripts/hoyolab_test_profile.ps1 -Verify [-Site appsample])
 //
-// Opens the Interactive Map headless on the profile and calls HoYoLAB's own mark_map_point_list
-// endpoint for map 2 from the page. Prints ONLY retcode / message / number of marked pins — never
-// cookies, tokens, account ids or pin data.
+// hoyolab:   opens the Interactive Map headless and calls HoYoLAB's own mark_map_point_list endpoint
+//            for map 2 from the page; prints ONLY retcode / message / number of marked pins.
+// appsample: opens the AppSample map and reads its app store the same way extension/provider_runtime.js
+//            does (React context with mapSync/store/catalog); prints ONLY signed-in yes/no and the
+//            number of found pins.
+// Never prints cookies, tokens, account ids, names or pin data.
 // Exit codes: 0 = signed in (retcode 0), 3 = not signed in (e.g. retcode -2004 "Please log in first"),
 // 1 = could not check (browser, network or timeout).
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
-const [chrome, profile] = process.argv.slice(2);
-if (!chrome || !profile) {
-  console.log('usage: node scripts/hoyolab_profile_check.mjs <chrome.exe> <profile-dir>');
+const [chrome, profile, site = 'hoyolab'] = process.argv.slice(2);
+if (!chrome || !profile || !['hoyolab', 'appsample'].includes(site)) {
+  console.log('usage: node scripts/hoyolab_profile_check.mjs <chrome.exe> <profile-dir> [hoyolab|appsample]');
   process.exit(1);
 }
-const MAP_URL = 'https://act.hoyolab.com/ys/app/interactive-map/index.html?lang=en-us';
+const MAP_URL = site === 'appsample'
+  ? 'https://genshin-impact-map.appsample.com/'
+  : 'https://act.hoyolab.com/ys/app/interactive-map/index.html?lang=en-us';
 const LIST_URL = 'https://sg-public-api.hoyolab.com/common/map_user/ys_obc/v1/map/point/mark_map_point_list?map_id=2&app_sn=ys_obc&lang=en-us';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -27,7 +32,7 @@ try { rmSync(join(profile, 'DevToolsActivePort'), { force: true }); } catch (e) 
 
 const proc = spawn(chrome, [
   '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
-  '--no-first-run', '--no-default-browser-check', 'about:blank',
+  '--window-size=1920,1080', '--no-first-run', '--no-default-browser-check', 'about:blank',
 ], { stdio: 'ignore' });
 const finish = (code, line) => {
   console.log(line);
@@ -58,6 +63,37 @@ async function main() {
   const send = (method, params = {}) => new Promise((res) => {
     const i = ++id; pending.set(i, res); ws.send(JSON.stringify({ id: i, method, params }));
   });
+  if (site === 'appsample') {
+    let st = null;
+    for (let attempt = 0; attempt < 15 && !st; attempt++) {
+      await sleep(2000);
+      const r = await send('Runtime.evaluate', {
+        returnByValue: true,
+        expression: `(() => {
+          const lc = document.querySelector('.leaflet-container');
+          if (!lc) return null;
+          const fk = Object.keys(lc).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+          let node = fk ? lc[fk] : null;
+          for (let d = 0; node && d < 20; d++, node = node.return) {
+            const v = node.memoizedProps && node.memoizedProps.value;
+            if (v && typeof v === 'object' && v.mapSync && v.store && v.catalog) {
+              const s = v.store.getState();
+              const found = s.found instanceof Set ? s.found.size : (Array.isArray(s.found) ? s.found.length : 0);
+              return { signedIn: Boolean(s.user), found };
+            }
+          }
+          return null;
+        })()`,
+      });
+      st = r.result && r.result.result ? r.result.result.value : null;
+    }
+    ws.close();
+    if (!st) return finish(1, 'check: AppSample app store not found (page did not load or its structure changed)');
+    const line = `check: appsample signed_in=${st.signedIn} found_pins=${st.found}`;
+    if (st.signedIn) return finish(0, `${line} -> signed in`);
+    return finish(3, `${line} -> NOT signed in; run: pwsh -NoProfile -File scripts/hoyolab_test_profile.ps1 -Login -Site appsample`);
+  }
+
   // The request must come from the HoYoLAB page so the session cookies apply; give it time to load.
   let value = null;
   for (let attempt = 0; attempt < 6 && !value; attempt++) {
