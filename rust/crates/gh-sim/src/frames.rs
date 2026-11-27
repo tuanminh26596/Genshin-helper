@@ -434,9 +434,9 @@ fn resolve_fixture_image(
 }
 
 fn has_required_locator_datasets(dir: &Path) -> bool {
-    dir.join("multimap_v4.json").is_file()
-        && dir.join("terrain_n2_v4.npz").is_file()
-        && dir.join("cave_masks_v4.npz").is_file()
+    gh_core::assets::REQUIRED_ASSETS
+        .iter()
+        .all(|name| dir.join(name).is_file())
 }
 
 fn resolve_data_dir(
@@ -464,13 +464,15 @@ fn build_frame_locator(data_dir: &Path) -> MapLocator {
     let ocr = WindowsOcrService::try_new()
         .ok()
         .map(|s| Arc::new(s) as Arc<dyn OcrProvider>);
+    let [db, terrain, cave_masks] = gh_core::assets::REQUIRED_ASSETS;
+    let [ui_anchors] = gh_core::assets::OPTIONAL_ASSETS;
     MapLocator::with_paths(
         LocatorPaths {
-            db_path: Some(data_dir.join("multimap_v4.json")),
-            terrain_npz_path: Some(data_dir.join("terrain_n2_v4.npz")),
-            cave_masks_npz_path: Some(data_dir.join("cave_masks_v4.npz")),
-            ui_anchors_npz_path: Some(data_dir.join("ui_anchors_v4.npz")),
-            legacy_underground_db_path: Some(data_dir.join("underground_db.json")),
+            db_path: Some(data_dir.join(db)),
+            terrain_npz_path: Some(data_dir.join(terrain)),
+            cave_masks_npz_path: Some(data_dir.join(cave_masks)),
+            ui_anchors_npz_path: Some(data_dir.join(ui_anchors)),
+            legacy_underground_db_path: None,
         },
         ocr,
     )
@@ -867,8 +869,9 @@ pub fn run_frames(opts: &FramesOptions) -> Result<FramesReport, String> {
             None => (
                 None,
                 Some(format!(
-                    "required map datasets missing in data_dir '{}' (need multimap_v4.json, terrain_n2_v4.npz, cave_masks_v4.npz)",
-                    opts.data_dir.display()
+                    "required map datasets missing in data_dir '{}' (need {})",
+                    opts.data_dir.display(),
+                    gh_core::assets::REQUIRED_ASSETS.join(", ")
                 )),
             ),
         }

@@ -366,7 +366,8 @@ pub fn evaluate_truth_oracle_detailed(
         let after_idx = m_end + 1;
         if after_idx < observed.len() && !sync_indices.is_empty() {
             let mut next_anchor: Option<usize> = None;
-            for (k, f) in observed.iter().enumerate().skip(after_idx) {
+            for (offset, f) in observed[after_idx..].iter().enumerate() {
+                let k = after_idx + offset;
                 if f.state != "TRACKING"
                     || is_hard_boundary_state(&f.state)
                     || is_pause_method(&f.match_method)

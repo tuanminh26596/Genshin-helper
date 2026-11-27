@@ -248,7 +248,11 @@ class Cdp {
       this.handlers.push(listener);
     });
   }
-  close() { try { this.ws.close(); } catch (e) {} }
+  close() {
+    if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+      this.ws.close();
+    }
+  }
 }
 
 async function main() {
@@ -283,6 +287,7 @@ async function main() {
     '--window-size=1440,900',
     'about:blank',
   ], { stdio: 'ignore' });
+  const procExited = new Promise((res) => proc.once('exit', res));
 
   const sessions = [];
   const counts = { pass: 0, fail: 0, 'known-fail': 0, xpass: 0 };
@@ -408,8 +413,11 @@ async function main() {
   } finally {
     for (const c of sessions) c.close();
     proc.kill();
-    await sleep(600);
-    try { rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 }); } catch (e) {}
+    await Promise.race([procExited, sleep(2000)]);
+    await sleep(300);
+    if (existsSync(profile)) {
+      rmSync(profile, { recursive: true, force: true, maxRetries: 15, retryDelay: 250 });
+    }
   }
 
   console.log(`DOM fixtures: pass ${counts.pass} | fail ${counts.fail} | known-fail ${counts['known-fail']} | xpass ${counts.xpass}`);
