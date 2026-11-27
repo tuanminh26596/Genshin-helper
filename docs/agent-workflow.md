@@ -24,10 +24,10 @@ duyệt. Mỗi vùng tính năng chưa có phiên quay phủ thì chưa được
 |---|---|---|---|
 | clippy | `cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings` | `rust/**` | chưa |
 | nextest | `cargo nextest run --manifest-path rust/Cargo.toml --workspace` | `rust/**` | chưa |
-| replay-qa | `gh-sim qa --sessions scratch\qa_sessions --data-dir data --ffmpeg <ABS>` (7/7 ĐẠT, exit 0) | `rust/crates/gh-cv/**`, `rust/crates/gh-app/**`, `rust/crates/gh-sim/**` | chưa |
+| replay-qa | `gh-sim qa --sessions scratch\qa_sessions --data-dir data --ffmpeg <ABS>` (12/12 ĐẠT, exit 0; gate cả độ giật mũi tên/nón từ 2026-11-27) | `rust/crates/gh-cv/**`, `rust/crates/gh-app/**`, `rust/crates/gh-sim/**` | chưa |
 | e6 (đang `#[ignore]`) | lệnh chạy e6 kèm `--run-ignored`, cần xác nhận lại | `rust/crates/gh-cv/**` | chưa |
 
-`replay-qa` chạy khoảng 2,5 phút cho 7 phiên (đo 146–147 s ngày 2026-11-27). Nên giữ nó làm gate cho các glob CV,
+`replay-qa` chạy khoảng 5,5 phút cho 12 phiên (đo 318 s ngày 2026-11-27). Nên giữ nó làm gate cho các glob CV,
 không chạy cho mọi thay đổi.
 
 ## Cửa một chiều cụ thể

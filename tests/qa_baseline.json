@@ -3,7 +3,7 @@
     "schema_version": 1,
     "sessions": {
         "sess_20261127_005004": {
-            "blessed_poses_sha256": "cb621e5429ab960bc2ba69255337f173ca6cd984d4d05f279d5095559bbc02f0",
+            "blessed_poses_sha256": "2377d807d40d96795985607cf5410ad25654bcca99828529c4d40c447057dc66",
             "codec": "libx265",
             "color_safe": false,
             "frames": 1340,
@@ -17,7 +17,7 @@
             "tracking_frames": 1135
         },
         "sess_20261127_011306": {
-            "blessed_poses_sha256": "bd55f10e4608b025b313dec60abe4b65069ef79ad7ee838a03387707e43d24e1",
+            "blessed_poses_sha256": "3d3ac62258ab0448a98d962ec4a4ffcb8ef891c74587311c044efefebbdee5cc",
             "codec": "libx265",
             "color_safe": false,
             "frames": 1341,
@@ -31,7 +31,7 @@
             "tracking_frames": 1149
         },
         "sess_20261127_011544": {
-            "blessed_poses_sha256": "00071b83cc8bfd253bf6338e75890b96774e81cc088aa1c71cb78ea769974a16",
+            "blessed_poses_sha256": "6530327832388c2ae16cbb559ab5fe221e2349f4364db04b37d07810d4942109",
             "codec": "libx265",
             "color_safe": false,
             "frames": 832,
@@ -45,7 +45,7 @@
             "tracking_frames": 617
         },
         "sess_20261127_011805": {
-            "blessed_poses_sha256": "455fddfc668523aee746e0a6e6787b317810753e8bb5c39c8593ef2775fafea5",
+            "blessed_poses_sha256": "5def2bac28417ef5371f7d37db630de7ea0f6ffa7a7f1b6e5d88a22715af3d84",
             "codec": "libx265",
             "color_safe": false,
             "frames": 893,
@@ -59,7 +59,7 @@
             "tracking_frames": 658
         },
         "sess_20261127_012040": {
-            "blessed_poses_sha256": "1835ceca32b8c684134125798e60b768eaa669a1e6f2d79a3df42abd03e5eb49",
+            "blessed_poses_sha256": "85325619f0c1728865bb8dfa8c5d8c3d3e9e01b382db4704e835624112856e92",
             "codec": "libx264rgb",
             "color_safe": true,
             "frames": 1244,
@@ -73,7 +73,7 @@
             "tracking_frames": 1068
         },
         "sess_20261127_012254": {
-            "blessed_poses_sha256": "7c8c888f26de244494d5fc2b1d071f3fe883defd5347c271676c87dab7b61e1a",
+            "blessed_poses_sha256": "0e28f47f263bdc620aa9c4d15ccf6a3aeefb76cbd1eae863e758130352af777a",
             "codec": "libx264rgb",
             "color_safe": true,
             "frames": 1185,
@@ -87,7 +87,7 @@
             "tracking_frames": 930
         },
         "sess_20261127_012515": {
-            "blessed_poses_sha256": "c1aac03731cecd60a327b08ce9b923f78c9b4331b612e155bf07f1106be30b6e",
+            "blessed_poses_sha256": "10f81d2b5f4767c909915eb178933c72012899ebfe7fee49227d417c4bcc10c8",
             "codec": "libx264rgb",
             "color_safe": true,
             "frames": 836,
@@ -99,6 +99,76 @@
             "mmap_view_drawer_open": 0,
             "mmap_view_frames": 180,
             "tracking_frames": 655
+        },
+        "sess_20261127_081807": {
+            "blessed_poses_sha256": "57170807c84a7c470f0381ed94c0d81a32ffea1c6d5f0bdf9a0d267ff561fee3",
+            "codec": "libx264rgb",
+            "color_safe": true,
+            "frames": 724,
+            "map_m_synced_count": 5,
+            "meta_ref_max_pos_delta_w": 1.722,
+            "meta_ref_over_threshold": 0,
+            "meta_ref_p95_pos_delta_w": 1.722,
+            "mmap_view_acquired": 144,
+            "mmap_view_drawer_open": 0,
+            "mmap_view_frames": 218,
+            "tracking_frames": 467
+        },
+        "sess_20261127_081956": {
+            "blessed_poses_sha256": "1ebc91091e0542ca928e9b149e10e04afe6fea32f8e719d38a6a3b8fd22ee622",
+            "codec": "libx264rgb",
+            "color_safe": true,
+            "frames": 1164,
+            "map_m_synced_count": 13,
+            "meta_ref_max_pos_delta_w": 9.091,
+            "meta_ref_over_threshold": 0,
+            "meta_ref_p95_pos_delta_w": 9.091,
+            "mmap_view_acquired": 226,
+            "mmap_view_drawer_open": 46,
+            "mmap_view_frames": 322,
+            "tracking_frames": 804
+        },
+        "sess_20261127_082307": {
+            "blessed_poses_sha256": "11dda9b8f6daee2ab40e7d51e88560ebd7cd0c856964b8b7e7abcef973c96d3e",
+            "codec": "libx264rgb",
+            "color_safe": true,
+            "frames": 1679,
+            "map_m_synced_count": 19,
+            "meta_ref_max_pos_delta_w": 692.313,
+            "meta_ref_over_threshold": 101,
+            "meta_ref_p95_pos_delta_w": 176.49,
+            "mmap_view_acquired": 284,
+            "mmap_view_drawer_open": 30,
+            "mmap_view_frames": 482,
+            "tracking_frames": 1166
+        },
+        "sess_20261127_082625": {
+            "blessed_poses_sha256": "906417214022d193591c343f0ae1405a43c5013cd7575328d22ea251374d325b",
+            "codec": "libx264rgb",
+            "color_safe": true,
+            "frames": 1199,
+            "map_m_synced_count": 10,
+            "meta_ref_max_pos_delta_w": 15325.933,
+            "meta_ref_over_threshold": 2,
+            "meta_ref_p95_pos_delta_w": 0.985,
+            "mmap_view_acquired": 282,
+            "mmap_view_drawer_open": 0,
+            "mmap_view_frames": 315,
+            "tracking_frames": 846
+        },
+        "sess_20261127_082854": {
+            "blessed_poses_sha256": "4cfed20629228f7a54e379984d337b0f66b6489ade2b85fa6a3e192814fe36dd",
+            "codec": "libx264rgb",
+            "color_safe": true,
+            "frames": 879,
+            "map_m_synced_count": 7,
+            "meta_ref_max_pos_delta_w": 1.742,
+            "meta_ref_over_threshold": 0,
+            "meta_ref_p95_pos_delta_w": 0.906,
+            "mmap_view_acquired": 244,
+            "mmap_view_drawer_open": 0,
+            "mmap_view_frames": 252,
+            "tracking_frames": 599
         }
     },
     "thresholds": {
