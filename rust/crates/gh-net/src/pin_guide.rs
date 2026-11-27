@@ -2961,4 +2961,142 @@ mod tests {
         assert_eq!(bytes_calls.load(AtomicOrdering::SeqCst), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn namespaced_and_non_numeric_pin_ids_never_hit_hoyolab_network() {
+        let json_calls = Arc::new(AtomicUsize::new(0));
+        let jc = Arc::clone(&json_calls);
+
+        let fetcher = PinGuideFetcher::with_config(PinGuideConfig {
+            fetch_json: Some(Arc::new(move |_url| {
+                jc.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(json!({
+                    "retcode": 0,
+                    "data": {
+                        "info": {
+                            "content": "HoYoLAB tip",
+                            "img": "https://upload-os-bbs.hoyoverse.com/tip.png"
+                        }
+                    }
+                }))
+            })),
+            fetch_bytes: Some(Arc::new(|_| Ok(b"PNG_OK".to_vec()))),
+            ..Default::default()
+        });
+        let provider: &dyn GuideProvider = &fetcher;
+
+        for invalid_id in [
+            "appsample:5001",
+            "kongying:777",
+            "custom:1",
+            "",
+            "   ",
+            "abc",
+            "123abc",
+            "-42",
+            "12.34",
+            "123:456",
+        ] {
+            assert!(
+                !PinGuideFetcher::is_fetchable_id(invalid_id),
+                "expected is_fetchable_id({invalid_id:?}) == false"
+            );
+            assert!(
+                !provider.is_fetchable(invalid_id),
+                "expected provider.is_fetchable({invalid_id:?}) == false"
+            );
+            assert!(
+                !fetcher.request(invalid_id, 2, |_| {}, Some("en")),
+                "fetcher.request({invalid_id:?}) must return false"
+            );
+            assert!(
+                !provider.request_guide(invalid_id, 2, Box::new(|_| {}), Some("en")),
+                "provider.request_guide({invalid_id:?}) must return false"
+            );
+        }
+        assert_eq!(
+            json_calls.load(AtomicOrdering::SeqCst),
+            0,
+            "namespaced/non-numeric IDs must trigger 0 HoYoLAB network calls via request_guide"
+        );
+
+        // Pure-digit HoYoLAB IDs are fetchable and perform the HoYoLAB call when fetched.
+        for valid_id in ["1", "42", "107596", " 999 "] {
+            assert!(
+                PinGuideFetcher::is_fetchable_id(valid_id),
+                "expected is_fetchable_id({valid_id:?}) == true"
+            );
+            assert!(provider.is_fetchable(valid_id));
+        }
+        let g = provider.fetch_guide("107596", 2, Some("en"));
+        assert!(g.ok);
+        assert_eq!(g.description, "HoYoLAB tip");
+        assert_eq!(json_calls.load(AtomicOrdering::SeqCst), 1);
+
+        fetcher.stop();
+    }
+
+    #[test]
+    fn allowed_provider_image_domains_exhaustive_ssrf_allow_and_deny() {
+        assert_eq!(
+            ALLOWED_PROVIDER_IMAGE_DOMAINS,
+            &[
+                "hoyoverse.com",
+                "hoyolab.com",
+                "mihoyo.com",
+                "assets.yuanshen.site",
+                "tiles.yuanshen.site",
+                "game-cdn.appsample.com",
+                "media.mapgenie.io",
+                "assets.gamedot.org",
+            ]
+        );
+
+        // Every allowlisted domain and valid subdomain over HTTPS must be accepted;
+        // every plain HTTP variant must be rejected.
+        for &domain in ALLOWED_PROVIDER_IMAGE_DOMAINS {
+            let exact = format!("https://{domain}/img/pin.png");
+            let sub = format!("https://cdn.{domain}/img/pin.webp?v=2");
+            let http = format!("http://{domain}/img/pin.png");
+            assert!(is_allowed_provider_image_url(&exact), "must accept {exact}");
+            assert!(is_allowed_provider_image_url(&sub), "must accept {sub}");
+            assert!(!is_allowed_provider_image_url(&http), "must reject {http}");
+        }
+
+        // SSRF, IP literals, suffix spoofs, userinfo tricks, non-HTTPS schemes, ports, control chars.
+        let rejected = [
+            "",
+            "   ",
+            "https://127.0.0.1/a.png",
+            "https://[::1]/a.png",
+            "https://169.254.169.254/latest/meta-data/",
+            "http://169.254.169.254/latest/meta-data/",
+            "https://10.0.0.1/internal.png",
+            "https://evil-appsample.com/a.png",
+            "https://evil-game-cdn.appsample.com/a.png",
+            "https://yuanshen.site.evil.com/a.png",
+            "https://assets.yuanshen.site.evil.com/a.png",
+            "https://media.mapgenie.io.evil.com/a.png",
+            "https://assets.gamedot.org.evil.com/a.png",
+            "https://not-hoyolab.com/a.png",
+            "https://appsample.com@evil.com/a.png",
+            "https://game-cdn.appsample.com@evil.com/a.png",
+            "https://assets.yuanshen.site:443@evil.com/a.png",
+            "https://assets.yuanshen.site\\@evil.com/a.png",
+            "https://assets.yuanshen.site:8443/a.png",
+            "https://.assets.yuanshen.site/a.png",
+            "file:///C:/Windows/win.ini",
+            "file://assets.yuanshen.site/a.png",
+            "data:image/png;base64,iVBORw0KGgo=",
+            "javascript:alert(1)",
+            "ftp://assets.yuanshen.site/a.png",
+            "https://assets.yuanshen.site/a.png\r\nX-Inject: 1",
+        ];
+        for url in rejected {
+            assert!(
+                !is_allowed_provider_image_url(url),
+                "must reject untrusted/SSRF URL: {url:?}"
+            );
+        }
+    }
 }
