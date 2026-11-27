@@ -22,6 +22,11 @@ pub const QA_BASELINE_SCHEMA_VERSION: u32 = 1;
 pub const QA_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const BLESSED_POSES_FILENAME: &str = "blessed_poses.jsonl";
 pub const QA_REPORT_FILENAME: &str = "qa_report.json";
+pub const HEADING_FLIP_THRESHOLD_DEG: f64 = 120.0;
+pub const HEADING_SPIKE_STEP_THRESHOLD_DEG: f64 = 30.0;
+pub const HEADING_SPIKE_RETURN_THRESHOLD_DEG: f64 = 15.0;
+pub const REBLESS_HEADING_STABILITY_NOTE: &str =
+    "re-bless needed for heading stability (blessed_poses.jsonl lacks body_heading/camera_heading)";
 pub const DEFAULT_QA_POLICY: &str = "Agent KHÔNG được chạy --bless, sửa baseline hay nới ngưỡng khi chưa có người dùng đồng ý. / Agents MUST NOT run --bless, modify this baseline, or relax thresholds without explicit user approval.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -250,6 +255,39 @@ pub struct MetaReferenceSummary {
     pub max_pos_delta_w: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeadingSample {
+    pub idx: usize,
+    pub tracking: bool,
+    pub heading: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HeadingStability {
+    pub steps: usize,
+    pub flips: usize,
+    pub spikes: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HeadingStabilityPair {
+    pub body: HeadingStability,
+    pub camera: HeadingStability,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionHeadingStability {
+    pub replay: HeadingStabilityPair,
+    pub blessed: Option<HeadingStabilityPair>,
+    pub live_meta: Option<HeadingStabilityPair>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeadingStabilityGateOutcome {
+    pub fail_reasons: Vec<String>,
+    pub notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QaSessionResult {
     pub session_name: String,
@@ -257,6 +295,8 @@ pub struct QaSessionResult {
     pub status: String,
     pub reason: String,
     pub reasons: Vec<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
     pub frames: usize,
     pub codec: String,
     pub color_safe: bool,
@@ -272,6 +312,8 @@ pub struct QaSessionResult {
     pub blessed_sha256_ok: bool,
     pub vs_blessed: Option<BlessedComparison>,
     pub vs_meta_ref: MetaReferenceSummary,
+    #[serde(default)]
+    pub heading_stability: SessionHeadingStability,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -385,6 +427,8 @@ fn sanitize_pose(p: &ObservedFrame) -> ObservedFrame {
         world_x: p.world_x.filter(|v| v.is_finite()),
         world_y: p.world_y.filter(|v| v.is_finite()),
         heading: p.heading.filter(|v| v.is_finite()),
+        body_heading: p.body_heading.filter(|v| v.is_finite()),
+        camera_heading: p.camera_heading.filter(|v| v.is_finite()),
         is_underground: p.is_underground,
     }
 }
@@ -403,12 +447,14 @@ pub fn write_blessed_poses_atomic(path: &Path, poses: &[ObservedFrame]) -> Resul
     sha256_file(path).map_err(|e| format!("failed to hash {}: {e}", path.display()))
 }
 
-/// Loads frame-by-frame poses from `<session>/blessed_poses.jsonl`.
-pub fn load_blessed_poses(path: &Path) -> Result<Vec<ObservedFrame>, String> {
+/// Loads frame-by-frame poses from `<session>/blessed_poses.jsonl` and reports whether
+/// the file contains the separate `body_heading`/`camera_heading` fields.
+pub fn load_blessed_poses_with_heading_info(path: &Path) -> Result<(Vec<ObservedFrame>, bool), String> {
     let file = std::fs::File::open(path)
         .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
     let reader = BufReader::new(file);
     let mut out = Vec::new();
+    let mut has_heading_fields = false;
     for (line_no, line_res) in reader.lines().enumerate() {
         let line = line_res
             .map_err(|e| format!("read error {}:{}: {e}", path.display(), line_no + 1))?;
@@ -416,11 +462,202 @@ pub fn load_blessed_poses(path: &Path) -> Result<Vec<ObservedFrame>, String> {
         if trimmed.is_empty() {
             continue;
         }
-        let pose: ObservedFrame = serde_json::from_str(trimmed)
+        let val: Value = serde_json::from_str(trimmed)
+            .map_err(|e| format!("parse error {}:{}: {e}", path.display(), line_no + 1))?;
+        if val.get("body_heading").is_some() || val.get("camera_heading").is_some() {
+            has_heading_fields = true;
+        }
+        let pose: ObservedFrame = serde_json::from_value(val)
             .map_err(|e| format!("parse error {}:{}: {e}", path.display(), line_no + 1))?;
         out.push(pose);
     }
-    Ok(out)
+    Ok((out, has_heading_fields))
+}
+
+/// Loads frame-by-frame poses from `<session>/blessed_poses.jsonl`.
+pub fn load_blessed_poses(path: &Path) -> Result<Vec<ObservedFrame>, String> {
+    load_blessed_poses_with_heading_info(path).map(|(poses, _)| poses)
+}
+
+/// Wraps an angle difference in degrees into `[-180.0, 180.0)`.
+pub fn wrap_angle_deg(delta: f64) -> f64 {
+    let mut w = (delta + 180.0).rem_euclid(360.0) - 180.0;
+    if w >= 180.0 {
+        w -= 360.0;
+    }
+    w
+}
+
+/// Pure function computing heading stability (`steps`, `flips`, `spikes`) for one heading kind
+/// over a frame sequence.
+pub fn compute_heading_stability(samples: &[HeadingSample]) -> HeadingStability {
+    let valid_heading = |s: &HeadingSample| -> Option<f64> {
+        if s.tracking {
+            s.heading.filter(|h| h.is_finite())
+        } else {
+            None
+        }
+    };
+
+    let mut steps = 0usize;
+    let mut flips = 0usize;
+    let mut spikes = 0usize;
+
+    for pair in samples.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        if a.idx.checked_add(1) != Some(b.idx) {
+            continue;
+        }
+        let (Some(ha), Some(hb)) = (valid_heading(a), valid_heading(b)) else {
+            continue;
+        };
+        steps += 1;
+        let d = wrap_angle_deg(hb - ha);
+        if d.abs() >= HEADING_FLIP_THRESHOLD_DEG {
+            flips += 1;
+        }
+    }
+
+    for tri in samples.windows(3) {
+        let (a, b, c) = (&tri[0], &tri[1], &tri[2]);
+        if a.idx.checked_add(1) != Some(b.idx) || b.idx.checked_add(1) != Some(c.idx) {
+            continue;
+        }
+        let (Some(ha), Some(hb), Some(hc)) = (valid_heading(a), valid_heading(b), valid_heading(c))
+        else {
+            continue;
+        };
+        let d1 = wrap_angle_deg(hb - ha);
+        let d2 = wrap_angle_deg(hc - hb);
+        let opposite_sign = (d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0);
+        if d1.abs() > HEADING_SPIKE_STEP_THRESHOLD_DEG
+            && d2.abs() > HEADING_SPIKE_STEP_THRESHOLD_DEG
+            && opposite_sign
+            && wrap_angle_deg(hc - ha).abs() < HEADING_SPIKE_RETURN_THRESHOLD_DEG
+        {
+            spikes += 1;
+        }
+    }
+
+    HeadingStability {
+        steps,
+        flips,
+        spikes,
+    }
+}
+
+/// Computes paired body & camera heading stability over observed replay/blessed frames.
+pub fn compute_observed_heading_stability(poses: &[ObservedFrame]) -> HeadingStabilityPair {
+    let body_samples: Vec<HeadingSample> = poses
+        .iter()
+        .map(|p| HeadingSample {
+            idx: p.idx,
+            tracking: p.state == "TRACKING",
+            heading: p.body_heading,
+        })
+        .collect();
+    let camera_samples: Vec<HeadingSample> = poses
+        .iter()
+        .map(|p| HeadingSample {
+            idx: p.idx,
+            tracking: p.state == "TRACKING",
+            heading: p.camera_heading,
+        })
+        .collect();
+    HeadingStabilityPair {
+        body: compute_heading_stability(&body_samples),
+        camera: compute_heading_stability(&camera_samples),
+    }
+}
+
+/// Loads live `meta.jsonl` and computes body/camera heading stability using only records with
+/// `state == "TRACKING"` and `mode == "minimap"`. Returns `None` if unavailable or missing fields.
+pub fn load_live_meta_heading_stability(meta_path: &Path) -> Option<HeadingStabilityPair> {
+    let file = std::fs::File::open(meta_path).ok()?;
+    let reader = BufReader::new(file);
+    let mut body_samples = Vec::new();
+    let mut camera_samples = Vec::new();
+    let mut has_heading_keys = false;
+
+    for line_res in reader.lines() {
+        let line = line_res.ok()?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let v: Value = serde_json::from_str(trimmed).ok()?;
+        let body_val = v.get("body");
+        let cam_val = v.get("camera");
+        if body_val.is_some() || cam_val.is_some() {
+            has_heading_keys = true;
+        }
+        let idx = v
+            .get("i")
+            .or_else(|| v.get("frame_idx"))
+            .and_then(Value::as_u64)
+            .map(|n| n as usize)
+            .unwrap_or(body_samples.len() + 1);
+        let tracking = v.get("state").and_then(Value::as_str) == Some("TRACKING")
+            && v.get("mode").and_then(Value::as_str) == Some("minimap");
+        let body = body_val.and_then(Value::as_f64).filter(|f| f.is_finite());
+        let camera = cam_val.and_then(Value::as_f64).filter(|f| f.is_finite());
+        body_samples.push(HeadingSample {
+            idx,
+            tracking,
+            heading: body,
+        });
+        camera_samples.push(HeadingSample {
+            idx,
+            tracking,
+            heading: camera,
+        });
+    }
+
+    if !has_heading_keys {
+        return None;
+    }
+
+    Some(HeadingStabilityPair {
+        body: compute_heading_stability(&body_samples),
+        camera: compute_heading_stability(&camera_samples),
+    })
+}
+
+/// Evaluates heading stability of `replay` against `blessed` (when available).
+///
+/// - When `blessed` is `Some(b)`: fails if replay flips or spikes (body or camera) exceed the
+///   blessed counts, with a reason naming kind, metric, actual, and blessed value.
+/// - When `blessed` is `None`: does not fail; records a note that a re-bless is needed.
+pub fn evaluate_heading_stability_gate(
+    replay: &HeadingStabilityPair,
+    blessed: Option<&HeadingStabilityPair>,
+) -> HeadingStabilityGateOutcome {
+    let Some(blessed) = blessed else {
+        return HeadingStabilityGateOutcome {
+            fail_reasons: Vec::new(),
+            notes: vec![REBLESS_HEADING_STABILITY_NOTE.to_owned()],
+        };
+    };
+
+    let mut fail_reasons = Vec::new();
+    let checks = [
+        ("body", "flips", replay.body.flips, blessed.body.flips),
+        ("body", "spikes", replay.body.spikes, blessed.body.spikes),
+        ("camera", "flips", replay.camera.flips, blessed.camera.flips),
+        ("camera", "spikes", replay.camera.spikes, blessed.camera.spikes),
+    ];
+    for (kind, metric, actual, base) in checks {
+        if actual > base {
+            fail_reasons.push(format!(
+                "heading stability {kind} {metric}: actual={actual} > blessed={base}"
+            ));
+        }
+    }
+
+    HeadingStabilityGateOutcome {
+        fail_reasons,
+        notes: Vec::new(),
+    }
 }
 
 /// Frame-by-frame comparison of fresh `actual` poses against `blessed` poses.
@@ -613,7 +850,7 @@ fn fmt_opt_w(v: Option<f64>) -> String {
 
 pub fn format_qa_header() -> String {
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:>6}  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:>6}  {}",
         "Session",
         "Status",
         "Frames",
@@ -621,6 +858,7 @@ pub fn format_qa_header() -> String {
         "vs Blessed (map/ov/p95/max)",
         "MMap(sync/acq)",
         "vs Meta[ref]",
+        "Arrow (b/c flips)",
         "Time",
         "Reason"
     )
@@ -645,8 +883,19 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
         r.vs_meta_ref.over_threshold_frames,
         fmt_opt_w(r.vs_meta_ref.max_pos_delta_w)
     );
+    let hs = &r.heading_stability;
+    let arrow_col = match hs.live_meta {
+        Some(live) => format!(
+            "b{}/c{} live b{}/c{}",
+            hs.replay.body.flips, hs.replay.camera.flips, live.body.flips, live.camera.flips
+        ),
+        None => format!(
+            "b{}/c{} live -",
+            hs.replay.body.flips, hs.replay.camera.flips
+        ),
+    };
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:>5.1}s  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:>5.1}s  {}",
         r.session_name,
         r.status,
         r.frames,
@@ -654,6 +903,7 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
         blessed_col,
         mmap_col,
         meta_col,
+        arrow_col,
         r.wall_elapsed_s,
         r.reason
     )
@@ -687,7 +937,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
     let total_t0 = Instant::now();
 
     let header = format_qa_header();
-    let sep = "-".repeat(header.len().min(148));
+    let sep = "-".repeat(header.len().min(172));
     println!("{header}");
     println!("{sep}");
     let _ = std::io::stdout().flush();
@@ -719,6 +969,9 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
 
         let (report, poses) = run_replay_with_poses(&replay_opts)?;
         let meta_ref = meta_ref_from_report(&report);
+        let replay_heading_stability = compute_observed_heading_stability(&poses);
+        let live_meta_heading_stability =
+            load_live_meta_heading_stability(&sdir.join("meta.jsonl"));
         let blessed_path = sdir.join(BLESSED_POSES_FILENAME);
 
         let result = if opts.bless {
@@ -768,6 +1021,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                     reasons.join("; ")
                 },
                 reasons,
+                notes: Vec::new(),
                 frames: report.performance.frames_processed,
                 codec,
                 color_safe,
@@ -783,6 +1037,11 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                 blessed_sha256_ok: true,
                 vs_blessed: Some(self_cmp),
                 vs_meta_ref: meta_ref,
+                heading_stability: SessionHeadingStability {
+                    replay: replay_heading_stability,
+                    blessed: Some(replay_heading_stability),
+                    live_meta: live_meta_heading_stability,
+                },
             }
         } else {
             match baseline.sessions.get(&session_name) {
@@ -792,6 +1051,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                     status: "KHÔNG ĐẠT".to_owned(),
                     reason: "thiếu phiên trong tests/qa_baseline.json".to_owned(),
                     reasons: vec!["thiếu phiên trong tests/qa_baseline.json".to_owned()],
+                    notes: Vec::new(),
                     frames: report.performance.frames_processed,
                     codec,
                     color_safe,
@@ -807,11 +1067,18 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                     blessed_sha256_ok: false,
                     vs_blessed: None,
                     vs_meta_ref: meta_ref,
+                    heading_stability: SessionHeadingStability {
+                        replay: replay_heading_stability,
+                        blessed: None,
+                        live_meta: live_meta_heading_stability,
+                    },
                 },
                 Some(base_sess) => {
                     let mut reasons = Vec::new();
+                    let mut notes = Vec::new();
                     let mut blessed_sha256_ok = false;
                     let mut vs_blessed = None;
+                    let mut blessed_heading_stability = None;
 
                     if !blessed_path.is_file() {
                         reasons.push(format!("thiếu file {BLESSED_POSES_FILENAME}"));
@@ -829,9 +1096,9 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                                 }
                             }
                         }
-                        match load_blessed_poses(&blessed_path) {
+                        match load_blessed_poses_with_heading_info(&blessed_path) {
                             Err(e) => reasons.push(format!("lỗi đọc {BLESSED_POSES_FILENAME}: {e}")),
-                            Ok(blessed_poses) => {
+                            Ok((blessed_poses, has_heading_fields)) => {
                                 let cmp = compare_poses_against_blessed(
                                     &blessed_poses,
                                     &poses,
@@ -847,6 +1114,16 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                                     &opts.overrides,
                                 );
                                 reasons.extend(eval_reasons);
+                                if has_heading_fields {
+                                    blessed_heading_stability =
+                                        Some(compute_observed_heading_stability(&blessed_poses));
+                                }
+                                let hdg_gate = evaluate_heading_stability_gate(
+                                    &replay_heading_stability,
+                                    blessed_heading_stability.as_ref(),
+                                );
+                                reasons.extend(hdg_gate.fail_reasons);
+                                notes.extend(hdg_gate.notes);
                                 vs_blessed = Some(cmp);
                             }
                         }
@@ -862,11 +1139,16 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                             "KHÔNG ĐẠT".to_owned()
                         },
                         reason: if passed {
-                            "ok".to_owned()
+                            if notes.is_empty() {
+                                "ok".to_owned()
+                            } else {
+                                format!("ok ({})", notes.join("; "))
+                            }
                         } else {
                             reasons.join("; ")
                         },
                         reasons,
+                        notes,
                         frames: report.performance.frames_processed,
                         codec,
                         color_safe,
@@ -882,6 +1164,11 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                         blessed_sha256_ok,
                         vs_blessed,
                         vs_meta_ref: meta_ref,
+                        heading_stability: SessionHeadingStability {
+                            replay: replay_heading_stability,
+                            blessed: blessed_heading_stability,
+                            live_meta: live_meta_heading_stability,
+                        },
                     }
                 }
             }
@@ -956,6 +1243,8 @@ mod tests {
             world_x: x,
             world_y: y,
             heading: Some(90.0),
+            body_heading: None,
+            camera_heading: None,
             is_underground: false,
         }
     }
@@ -1578,5 +1867,294 @@ mod tests {
         assert!(err.contains("--max-map-mismatches"), "got: {err}");
         assert!(err.contains("999"), "got: {err}");
         assert!(err.contains("(0)"), "got: {err}");
+    }
+
+    #[test]
+    fn heading_stability_synthetic_flips_spikes_gaps_and_360_wrap() {
+        let mk = |idx: usize, tracking: bool, heading: Option<f64>| HeadingSample {
+            idx,
+            tracking,
+            heading,
+        };
+        let samples = vec![
+            // Smooth 360/0 wrap: 350 -> 10 is +20 deg (step, NOT flip)
+            mk(1, true, Some(350.0)),
+            mk(2, true, Some(10.0)),
+            // Single-frame spike: 10 -> 55 (+45) -> 12 (-43), |12 - 10| = 2 < 15 -> 1 spike, 0 flips
+            mk(3, true, Some(55.0)),
+            mk(4, true, Some(12.0)),
+            // Large snap/flip: 12 -> 150 (+138 >= 120) -> 1 flip
+            mk(5, true, Some(150.0)),
+            // Non-tracking gap: must NOT pair (5,6) or (6,7) or bridge (5,7)
+            mk(6, false, Some(10.0)),
+            mk(7, true, Some(330.0)),
+            // Idx gap (7 -> 9): must NOT pair (7,9) even though |wrap(150 - 330)| = 180 >= 120
+            mk(9, true, Some(150.0)),
+            // Smooth step + spike across 360/0 wrap: 355 -> 40 (+45) -> 358 (-42), |wrap(358-355)|=3 < 15
+            mk(10, true, Some(355.0)), // 150 -> 355 is wrap(+205) = -155 -> flip #2
+            mk(11, true, Some(40.0)),
+            mk(12, true, Some(358.0)),
+            // Non-finite heading breaks continuity
+            mk(13, true, Some(f64::NAN)),
+            mk(14, true, Some(180.0)),
+        ];
+
+        // Valid consecutive pairs:
+        // (1,2): +20
+        // (2,3): +45
+        // (3,4): -43   [spike at idx 3]
+        // (4,5): +138  [flip #1]
+        // (9,10): -155 [flip #2]
+        // (10,11): +45
+        // (11,12): -42 [spike at idx 11]
+        // Total: steps=7, flips=2, spikes=2
+        let stab = compute_heading_stability(&samples);
+        assert_eq!(
+            stab,
+            HeadingStability {
+                steps: 7,
+                flips: 2,
+                spikes: 2,
+            }
+        );
+
+        // Evidence sequence from live recording: body snaps 283 -> 157 (-126 deg = 1 flip)
+        let evidence_body: Vec<HeadingSample> = [
+            65.0, 51.0, 9.0, 338.0, 312.0, 283.0, 157.0, 133.0, 129.0, 128.0,
+        ]
+        .iter()
+        .enumerate()
+        .map(|(k, &h)| mk(k + 1, true, Some(h)))
+        .collect();
+        assert_eq!(
+            compute_heading_stability(&evidence_body),
+            HeadingStability {
+                steps: 9,
+                flips: 1,
+                spikes: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn heading_stability_gate_handles_worse_equal_better_and_missing_blessed_fields() {
+        let blessed = HeadingStabilityPair {
+            body: HeadingStability {
+                steps: 100,
+                flips: 3,
+                spikes: 1,
+            },
+            camera: HeadingStability {
+                steps: 100,
+                flips: 1,
+                spikes: 0,
+            },
+        };
+
+        // 1. Equal -> pass, no notes
+        let equal_out = evaluate_heading_stability_gate(&blessed, Some(&blessed));
+        assert!(equal_out.fail_reasons.is_empty());
+        assert!(equal_out.notes.is_empty());
+
+        // 2. Better -> pass, no notes
+        let better = HeadingStabilityPair {
+            body: HeadingStability {
+                steps: 100,
+                flips: 0,
+                spikes: 0,
+            },
+            camera: HeadingStability {
+                steps: 100,
+                flips: 0,
+                spikes: 0,
+            },
+        };
+        let better_out = evaluate_heading_stability_gate(&better, Some(&blessed));
+        assert!(better_out.fail_reasons.is_empty());
+        assert!(better_out.notes.is_empty());
+
+        // 3. Worse on all four counters -> fail reasons name kind, metric, actual, blessed
+        let worse = HeadingStabilityPair {
+            body: HeadingStability {
+                steps: 100,
+                flips: 5,
+                spikes: 2,
+            },
+            camera: HeadingStability {
+                steps: 100,
+                flips: 4,
+                spikes: 3,
+            },
+        };
+        let worse_out = evaluate_heading_stability_gate(&worse, Some(&blessed));
+        assert_eq!(worse_out.fail_reasons.len(), 4, "got: {:?}", worse_out.fail_reasons);
+        assert!(
+            worse_out.fail_reasons[0].contains("body")
+                && worse_out.fail_reasons[0].contains("flips")
+                && worse_out.fail_reasons[0].contains('5')
+                && worse_out.fail_reasons[0].contains('3'),
+            "got: {}",
+            worse_out.fail_reasons[0]
+        );
+        assert!(
+            worse_out.fail_reasons[1].contains("body")
+                && worse_out.fail_reasons[1].contains("spikes")
+                && worse_out.fail_reasons[1].contains('2')
+                && worse_out.fail_reasons[1].contains('1'),
+            "got: {}",
+            worse_out.fail_reasons[1]
+        );
+        assert!(
+            worse_out.fail_reasons[2].contains("camera")
+                && worse_out.fail_reasons[2].contains("flips")
+                && worse_out.fail_reasons[2].contains('4')
+                && worse_out.fail_reasons[2].contains('1'),
+            "got: {}",
+            worse_out.fail_reasons[2]
+        );
+        assert!(
+            worse_out.fail_reasons[3].contains("camera")
+                && worse_out.fail_reasons[3].contains("spikes")
+                && worse_out.fail_reasons[3].contains('3')
+                && worse_out.fail_reasons[3].contains('0'),
+            "got: {}",
+            worse_out.fail_reasons[3]
+        );
+        assert!(worse_out.notes.is_empty());
+
+        // 4. Blessed lacks new fields -> pass with re-bless note
+        let missing_out = evaluate_heading_stability_gate(&worse, None);
+        assert!(missing_out.fail_reasons.is_empty());
+        assert_eq!(missing_out.notes.len(), 1);
+        assert!(
+            missing_out.notes[0].contains("re-bless"),
+            "got: {:?}",
+            missing_out.notes
+        );
+    }
+
+    #[test]
+    fn old_format_blessed_jsonl_still_deserializes_and_flags_missing_heading_fields() {
+        let tmp = TempDir::new("gh_sim_old_blessed");
+        let old_path = tmp.0.join("blessed_poses.jsonl");
+        let old_line = r#"{"idx":1,"ts":308.576,"state":"TRACKING","match_method":"hd_sobel_fast","map_id":2,"world_x":-4911.5,"world_y":-1306.4,"heading":269.33,"is_underground":false}"#;
+        std::fs::write(&old_path, format!("{old_line}\n")).unwrap();
+
+        let (poses, has_fields) = load_blessed_poses_with_heading_info(&old_path).unwrap();
+        assert!(!has_fields);
+        assert_eq!(poses.len(), 1);
+        assert_eq!(poses[0].heading, Some(269.33));
+        assert_eq!(poses[0].body_heading, None);
+        assert_eq!(poses[0].camera_heading, None);
+
+        // Writing via write_blessed_poses_atomic writes the new fields and marks has_fields = true.
+        let new_path = tmp.0.join("blessed_new.jsonl");
+        let mut p = poses[0].clone();
+        p.body_heading = Some(123.5);
+        p.camera_heading = Some(269.33);
+        write_blessed_poses_atomic(&new_path, &[p]).unwrap();
+        let (reloaded, has_new_fields) = load_blessed_poses_with_heading_info(&new_path).unwrap();
+        assert!(has_new_fields);
+        assert_eq!(reloaded[0].body_heading, Some(123.5));
+        assert_eq!(reloaded[0].camera_heading, Some(269.33));
+    }
+
+    #[test]
+    fn live_meta_heading_stability_requires_minimap_mode_and_tracking_state() {
+        let tmp = TempDir::new("gh_sim_live_meta");
+        let mp = tmp.0.join("meta.jsonl");
+        let content = concat!(
+            "{\"i\":1,\"mode\":\"minimap\",\"state\":\"TRACKING\",\"body\":10.0,\"camera\":20.0}\n",
+            "{\"i\":2,\"mode\":\"minimap\",\"state\":\"TRACKING\",\"body\":150.0,\"camera\":25.0}\n",
+            "{\"i\":3,\"mode\":\"map_m\",\"state\":\"TRACKING\",\"body\":0.0,\"camera\":200.0}\n",
+            "{\"i\":4,\"mode\":\"minimap\",\"state\":\"TRACKING\",\"body\":300.0,\"camera\":30.0}\n"
+        );
+        std::fs::write(&mp, content).unwrap();
+
+        let pair = load_live_meta_heading_stability(&mp).expect("should parse live meta");
+        // Only pair (1,2) is valid: frame 3 has mode="map_m" so neither (2,3) nor (3,4) counts.
+        assert_eq!(
+            pair.body,
+            HeadingStability {
+                steps: 1,
+                flips: 1,
+                spikes: 0,
+            }
+        );
+        assert_eq!(
+            pair.camera,
+            HeadingStability {
+                steps: 1,
+                flips: 0,
+                spikes: 0,
+            }
+        );
+
+        // Meta without body/camera keys returns None
+        let mp_old = tmp.0.join("meta_old.jsonl");
+        std::fs::write(&mp_old, "{\"i\":1,\"state\":\"TRACKING\"}\n").unwrap();
+        assert_eq!(load_live_meta_heading_stability(&mp_old), None);
+    }
+
+    #[test]
+    fn qa_table_header_and_row_include_arrow_column() {
+        let hdr = format_qa_header();
+        assert!(hdr.contains("Arrow"), "header missing Arrow: {hdr}");
+
+        let row_with_live = QaSessionResult {
+            session_name: "sess_test".to_owned(),
+            passed: true,
+            status: "ĐẠT".to_owned(),
+            reason: "ok".to_owned(),
+            reasons: vec![],
+            notes: vec![],
+            frames: 100,
+            codec: "libx264rgb".to_owned(),
+            color_safe: true,
+            wall_elapsed_s: 1.5,
+            effective_fps: 66.7,
+            hd_downloads: 0,
+            map_m_synced_count: 2,
+            baseline_map_m_synced_count: Some(2),
+            mmap_view_frames: 10,
+            mmap_view_acquired: 10,
+            baseline_mmap_view_acquired: Some(10),
+            mmap_view_drawer_open: 0,
+            blessed_sha256_ok: true,
+            vs_blessed: None,
+            vs_meta_ref: MetaReferenceSummary::default(),
+            heading_stability: SessionHeadingStability {
+                replay: HeadingStabilityPair {
+                    body: HeadingStability {
+                        steps: 50,
+                        flips: 8,
+                        spikes: 1,
+                    },
+                    camera: HeadingStability {
+                        steps: 50,
+                        flips: 0,
+                        spikes: 0,
+                    },
+                },
+                blessed: None,
+                live_meta: Some(HeadingStabilityPair {
+                    body: HeadingStability {
+                        steps: 50,
+                        flips: 8,
+                        spikes: 0,
+                    },
+                    camera: HeadingStability {
+                        steps: 50,
+                        flips: 0,
+                        spikes: 0,
+                    },
+                }),
+            },
+        };
+        let formatted = format_qa_row(&row_with_live);
+        assert!(
+            formatted.contains("b8/c0 live b8/c0"),
+            "unexpected row: {formatted}"
+        );
     }
 }

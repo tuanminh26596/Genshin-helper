@@ -232,6 +232,10 @@ pub struct ObservedFrame {
     pub world_x: Option<f64>,
     pub world_y: Option<f64>,
     pub heading: Option<f64>,
+    #[serde(default)]
+    pub body_heading: Option<f64>,
+    #[serde(default)]
+    pub camera_heading: Option<f64>,
     pub is_underground: bool,
 }
 
@@ -1151,6 +1155,8 @@ pub fn run_replay_with_poses(
             world_x: None,
             world_y: None,
             heading: None,
+            body_heading: None,
+            camera_heading: None,
             is_underground: false,
         };
 
@@ -1355,6 +1361,8 @@ fn apply_pose_to_obs(pose: &MinimapPose, obs: &mut ObservedFrame) {
     obs.world_x = pose.world_x;
     obs.world_y = pose.world_y;
     obs.heading = pose.view_heading.or(pose.camera_heading).or(pose.body_heading);
+    obs.body_heading = pose.body_heading;
+    obs.camera_heading = pose.camera_heading;
     obs.is_underground = pose.is_underground;
 }
 
@@ -1441,6 +1449,8 @@ mod tests {
             world_x: Some(wx),
             world_y: Some(0.0),
             heading: Some(90.0),
+            body_heading: None,
+            camera_heading: None,
             is_underground: false,
         };
         // 6 active frames with 0.5w delta, then 4 pause frames with 21.5w delta -> median stays 0.5w,
