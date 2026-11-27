@@ -8,7 +8,7 @@
     }
 
     const SCRIPT_VERSION = 'v5.7.0';
-    const SCRIPT_BUILD = '5.7.0-r8';
+    const SCRIPT_BUILD = '5.7.0-r9';
 
     function bootGenshinHelper() {
     if (window.__gh_booted_build === SCRIPT_BUILD) return;
