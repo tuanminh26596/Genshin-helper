@@ -12,7 +12,10 @@ fn main() {
     emit_build_stamp(&manifest_dir);
 
     if std::env::var_os("CARGO_CFG_TARGET_OS").as_deref() == Some(OsStr::new("windows")) {
-        let mut res = winresource::WindowsResource::new();
+        // winresource is only available as a build-dep on Windows targets
+        #[cfg(windows)]
+        {
+            let mut res = winresource::WindowsResource::new();
 
         let icon_path = manifest_dir
             .join("..")
@@ -26,16 +29,17 @@ fn main() {
             res.set_icon(&icon_path.to_string_lossy());
         }
 
-        res.set("ProductName", "Genshin Helper");
-        res.set(
-            "FileDescription",
-            "Genshin Helper - Exploration & HoYoLAB Auto-Sync",
-        );
-        res.set("OriginalFilename", "GenshinHelper.exe");
-        res.set("InternalName", "GenshinHelper");
+            res.set("ProductName", "Genshin Helper");
+            res.set(
+                "FileDescription",
+                "Genshin Helper - Exploration & HoYoLAB Auto-Sync",
+            );
+            res.set("OriginalFilename", "GenshinHelper.exe");
+            res.set("InternalName", "GenshinHelper");
 
-        if let Err(err) = res.compile() {
-            panic!("failed to compile Windows resource: {err}");
+            if let Err(err) = res.compile() {
+                panic!("failed to compile Windows resource: {err}");
+            }
         }
     }
 }

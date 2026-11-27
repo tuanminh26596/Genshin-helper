@@ -34,8 +34,12 @@ use tiny_skia::{
     Color, FillRule, FilterQuality, LineCap, LineJoin, Mask, Paint, PathBuilder, Pixmap,
     PixmapPaint, Stroke, Transform,
 };
+#[cfg(windows)]
 use windows::Win32::Foundation::POINT;
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, WM_APP};
+#[cfg(not(windows))]
+const WM_APP: u32 = 0x8000;
 
 pub const WM_APP_RADAR_UPDATE: u32 = WM_APP + 41;
 pub const WM_APP_RADAR_HIDE: u32 = WM_APP + 42;
@@ -900,6 +904,7 @@ impl RadarUiState {
         let cam_deg = self.smooth_cam_deg.unwrap_or(body_deg);
 
         // Hover auto-fade when player holds Alt & hovers over Radar outside Edit Mode.
+        #[cfg(windows)]
         let cursor_pos = {
             let mut pt = POINT::default();
             // SAFETY: Plain Win32 read-only cursor query.
@@ -909,6 +914,8 @@ impl RadarUiState {
                 None
             }
         };
+        #[cfg(not(windows))]
+        let cursor_pos = gh_platform::capture::get_cursor_pos();
         let hovered = cursor_pos.is_some_and(|(px, py)| {
             px >= rect.x
                 && px < rect.x.saturating_add(rect.width)

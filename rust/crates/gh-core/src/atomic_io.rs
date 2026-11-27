@@ -272,7 +272,11 @@ mod tests {
 
     #[test]
     fn replace_with_retry_retries_sharing_and_permission_errors() {
-        for raw_code in [5, 32, 33] {
+        #[cfg(windows)]
+        let raw_codes: &[i32] = &[5, 32, 33];
+        #[cfg(not(windows))]
+        let raw_codes: &[i32] = &[1, 13]; // EPERM, EACCES
+        for &raw_code in raw_codes {
             let mut calls = 0usize;
             replace_with_retry_using(
                 Path::new("a"),

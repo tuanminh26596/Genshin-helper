@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 gh-core.workspace = true
-gh-win32.workspace = true
+gh-platform.workspace = true
 gh-net.workspace = true
 gh-cv.workspace = true
 gh-hud.workspace = true
@@ -27,7 +27,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 zip.workspace = true
 
-[dependencies.windows]
+[target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [
     "Win32_Foundation",
@@ -36,5 +36,5 @@ features = [
     "Win32_UI_WindowsAndMessaging",
 ]
 
-[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
 winresource.workspace = true

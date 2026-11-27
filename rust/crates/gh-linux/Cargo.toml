@@ -1,0 +1,30 @@
+[package]
+name = "gh-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gh-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+
+# X11 screen capture and window management
+x11rb.workspace = true
+
+# Keyboard event monitoring via evdev (global hotkeys without X11 grab)
+evdev.workspace = true
+
+# System tray via D-Bus StatusNotifierItem
+ksni.workspace = true
+
+# Audio feedback via rodio (pure Rust)
+rodio.workspace = true
+
+# Wayland native capture (wlroots wlr-screencopy-unstable-v1)
+wayland-client.workspace = true
+wayland-protocols-wlr.workspace = true
+libc.workspace = true

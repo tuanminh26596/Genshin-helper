@@ -395,27 +395,25 @@ mod tests {
             ..PathEnv::default()
         };
 
+        let repo = PathBuf::from(r"X:\FakeRepo");
         let paths = AppPaths::resolve_with(&env);
         assert_eq!(paths.mode, RuntimeMode::Dev);
-        assert_eq!(paths.dev_root(), Some(Path::new(r"X:\FakeRepo")));
-        assert_eq!(paths.config_path, PathBuf::from(r"X:\FakeRepo\config.json"));
+        assert_eq!(paths.dev_root(), Some(repo.as_path()));
+        assert_eq!(paths.config_path, repo.join("config.json"));
         assert_eq!(
             paths.diagnostics_dir,
-            PathBuf::from(r"X:\FakeRepo\scratch\diagnostics")
+            repo.join("scratch").join("diagnostics")
         );
-        assert_eq!(paths.ocr_cache_dir(), PathBuf::from(r"X:\FakeRepo\scratch"));
+        assert_eq!(paths.ocr_cache_dir(), repo.join("scratch"));
         assert_eq!(
             paths.minimap_rec_dir(),
-            PathBuf::from(r"X:\FakeRepo\scratch\minimap_rec")
+            repo.join("scratch").join("minimap_rec")
         );
         assert_eq!(
             paths.external_hotkey_backups_path(),
-            PathBuf::from(r"X:\FakeRepo\external_hotkey_backups.json")
+            repo.join("external_hotkey_backups.json")
         );
-        assert_eq!(
-            paths.dev_data_dir,
-            Some(PathBuf::from(r"X:\FakeRepo\data"))
-        );
+        assert_eq!(paths.dev_data_dir, Some(repo.join("data")));
     }
 
     #[test]
@@ -481,9 +479,13 @@ mod tests {
         let env = PathEnv {
             appdata: Some(PathBuf::from(r"X:\Roaming")),
             localappdata: Some(PathBuf::from(r"X:\Local")),
-            exe_path: Some(PathBuf::from(
-                r"X:\CargoTarget\Genshin-Helper\debug\deps\gh_core.exe",
-            )),
+            exe_path: Some(
+                PathBuf::from("CargoTarget")
+                    .join("Genshin-Helper")
+                    .join("debug")
+                    .join("deps")
+                    .join("gh_core"),
+            ),
             cwd: Some(repo.clone()),
             ..PathEnv::default()
         };
@@ -510,6 +512,7 @@ mod tests {
         let env = PathEnv {
             appdata: Some(base.join("roaming")),
             localappdata: Some(base.join("local")),
+            xdg_data_home: Some(base.join("local")),
             dev_root_env: Some(dev_root.clone()),
             data_dir_env: Some(custom_data.clone()),
             ..PathEnv::default()
@@ -517,9 +520,15 @@ mod tests {
 
         let paths = AppPaths::resolve_with(&env);
         assert_eq!(paths.data_dir, custom_data);
+        #[cfg(windows)]
         assert_eq!(
             paths.cache_dir,
             base.join("local").join("GenshinHelper").join("cache")
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            paths.cache_dir,
+            base.join("local").join("genshin-helper").join("cache")
         );
         // Prefers dev_data_dir when file exists there
         assert_eq!(

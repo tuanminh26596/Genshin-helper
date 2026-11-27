@@ -6,6 +6,10 @@
 pub mod diag_annotate;
 pub mod fonts;
 pub mod layered;
+#[cfg(target_os = "linux")]
+pub mod layered_linux;
+#[cfg(target_os = "linux")]
+pub mod wayland_overlay;
 pub mod mmap_overlay;
 pub mod nav_hud;
 pub mod radar_map;

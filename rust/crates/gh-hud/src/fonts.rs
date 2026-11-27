@@ -6,7 +6,12 @@ use cosmic_text::{
     Align, Attrs, Buffer, Color, Ellipsize, Family, FontSystem, Metrics, Shaping, Style,
     SwashCache, SwashContent, Weight, Wrap, fontdb,
 };
-use gh_win32::locale::detect_windows_locale_name;
+#[cfg(windows)]
+use gh_platform::locale::detect_windows_locale_name;
+#[cfg(target_os = "linux")]
+fn detect_windows_locale_name() -> Option<String> {
+    gh_platform::locale::detect_linux_locale()
+}
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -839,6 +844,7 @@ mod tests {
         (count, bounds)
     }
 
+    #[cfg(windows)]
     #[test]
     fn targeted_windows_font_load_avoids_system_scan() {
         let fonts = HudFonts::new();

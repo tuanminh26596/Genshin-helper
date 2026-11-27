@@ -11,13 +11,16 @@ use crate::layered::{
 use crate::{HudError, HudResult};
 use cosmic_text::{Ellipsize, Wrap};
 use gh_core::frame::RectI32;
-use gh_win32::capture::WindowFinder;
+use gh_platform::capture::WindowFinder;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tiny_skia::{
     FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Stroke, Transform,
 };
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::WM_APP;
+#[cfg(not(windows))]
+const WM_APP: u32 = 0x8000;
 
 pub const TOAST_FADE_DURATION_MS: u64 = 350;
 pub const TOAST_FADE_TICK_MS: u32 = 25;
@@ -708,10 +711,16 @@ impl Default for HudToastOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layered::{EX_STYLE_CLICK_THROUGH, premultiplied_rgba_to_bgra};
+    #[cfg(windows)]
+    use crate::layered::EX_STYLE_CLICK_THROUGH;
+    use crate::layered::premultiplied_rgba_to_bgra;
+    #[cfg(windows)]
     use std::ffi::c_void;
+    #[cfg(windows)]
     use std::time::Duration;
+    #[cfg(windows)]
     use windows::Win32::Foundation::HWND;
+    #[cfg(windows)]
     use windows::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GetWindowLongPtrW};
 
     #[test]
@@ -839,6 +848,7 @@ mod tests {
         assert_eq!(sm.active_timeline().expect("tl").total_ms, 800);
     }
 
+    #[cfg(windows)]
     #[test]
     fn toast_overlay_offscreen_live_hwnd_lifecycle() {
         let overlay = HudToastOverlay::with_screen_offset((-20000, -20000));

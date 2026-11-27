@@ -8,6 +8,7 @@ use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
+#[cfg(windows)]
 use windows::Win32::System::SystemInformation::GetLocalTime;
 
 pub const DEFAULT_LOG_CAPACITY: usize = 300;
@@ -108,12 +109,16 @@ impl<S: Subscriber> Layer<S> for LogRingBuffer {
         let mut visitor = EventFieldVisitor::default();
         event.record(&mut visitor);
 
-        // SAFETY: `GetLocalTime` fills stack-allocated `SYSTEMTIME`.
-        let st = unsafe { GetLocalTime() };
-        let ts = format!(
-            "{:02}:{:02}:{:02}.{:03}",
-            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds
-        );
+        #[cfg(windows)]
+        let (hour, minute, second, ms) = {
+            // SAFETY: `GetLocalTime` fills stack-allocated `SYSTEMTIME`.
+            let st = unsafe { GetLocalTime() };
+            (st.wHour, st.wMinute, st.wSecond, st.wMilliseconds)
+        };
+        #[cfg(not(windows))]
+        let (_, _, _, hour, minute, second, ms) = gh_platform::sys_info::local_time_parts();
+
+        let ts = format!("{:02}:{:02}:{:02}.{:03}", hour, minute, second, ms);
 
         let mut msg = visitor.message.unwrap_or_default();
         if !visitor.extras.is_empty() {
