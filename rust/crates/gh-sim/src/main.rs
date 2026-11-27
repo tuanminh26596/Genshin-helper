@@ -2,6 +2,7 @@
 
 use clap::{Parser, Subcommand};
 use gh_sim::compact::{CompactOptions, CompactProfile, run_compact};
+use gh_sim::frames::{DEFAULT_DATA_DIR, DEFAULT_FRAME_FIXTURES_DIR, FramesOptions, run_frames};
 use gh_sim::import_diag::{ImportDiagArgs, import_diagnostic_bundle};
 use gh_sim::qa::{QaOptions, QaThresholdOverrides, run_qa};
 use gh_sim::replay::{DEFAULT_DRIFT_THRESHOLD_W, ReplayOptions, run_replay};
@@ -277,6 +278,21 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+
+    /// Validate data-driven still-frame UI layout, crop, and M-Map locate fixtures.
+    Frames {
+        /// Directory containing frame fixture JSON files.
+        #[arg(long, default_value = DEFAULT_FRAME_FIXTURES_DIR)]
+        dir: PathBuf,
+
+        /// Optional repository root override for resolving repo-relative fixture image paths.
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+
+        /// Path to map datasets directory containing multimap_v4.json & terrain_n2_v4.npz.
+        #[arg(long, default_value = DEFAULT_DATA_DIR)]
+        data_dir: PathBuf,
+    },
 }
 
 fn main() {
@@ -521,5 +537,24 @@ fn main() {
                 }
             }
         }
+        Cmd::Frames {
+            dir,
+            repo_root,
+            data_dir,
+        } => match run_frames(&FramesOptions {
+            dir,
+            repo_root,
+            data_dir,
+        }) {
+            Ok(report) => {
+                if report.fail > 0 {
+                    std::process::exit(1);
+                }
+            }
+            Err(err) => {
+                eprintln!("[gh-sim frames] ERROR: {err}");
+                std::process::exit(2);
+            }
+        },
     }
 }

@@ -14,6 +14,19 @@ pub const DATASET_FILENAMES: [&str; 4] = [
     OPTIONAL_ASSETS[0],
 ];
 
+/// Repo-relative engine paths replayed by `gh-sim`: commits that leave every path here untouched
+/// report `code=` instead of `code!` in `gh-sim qa`.
+pub const ENGINE_PROVENANCE_PATHS: &[&str] = &[
+    "rust/crates/gh-cv",
+    "rust/crates/gh-app/src/callbacks.rs",
+    "rust/crates/gh-app/src/capture_backend.rs",
+    "rust/crates/gh-app/src/mmap_guide.rs",
+    "rust/crates/gh-app/src/mmap_view.rs",
+    "rust/crates/gh-app/src/state.rs",
+    "rust/crates/gh-app/src/tracking_loop.rs",
+    "rust/crates/gh-app/src/tracking_stack.rs",
+];
+
 /// Per-file lowercase SHA-256 fingerprint of a map dataset directory (`None` / JSON `null` when missing).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -91,6 +104,13 @@ pub struct ReplayProvenance {
     pub replay_datasets: DatasetFingerprint,
     pub datasets_match: Option<bool>,
     pub same_commit: Option<bool>,
+    /// When `same_commit == Some(false)`, whether all [`ENGINE_PROVENANCE_PATHS`] are unchanged
+    /// between `recorded.git_commit` and `current_commit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_code_unchanged: Option<bool>,
+    /// Effective current commit SHA evaluated during replay (runtime HEAD or `BUILD_GIT_COMMIT`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_commit: Option<String>,
 }
 
 /// Ensures `data_source` is a short non-path label (never leaks filesystem paths or usernames).

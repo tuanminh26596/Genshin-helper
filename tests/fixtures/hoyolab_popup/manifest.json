@@ -1,0 +1,27 @@
+{
+  "captured_at": "2026-11-27T14:41:16Z",
+  "source": "https://act.hoyolab.com/ys/app/interactive-map/index.html (guest session, headless Chromium)",
+  "fixtures": [
+    {
+      "id": "vi_unmarked",
+      "file": "vi_unmarked.html",
+      "lang": "vi-vn",
+      "state": "unmarked",
+      "expected_mark_selector": "button.map-popup__btn.gt-button-ys--primary:not(.map-popup__btn--batch)",
+      "expected_mark_text": "ghim",
+      "expected_batch_selector": "button.map-popup__btn.map-popup__btn--batch",
+      "expected_already_marked": false
+    },
+    {
+      "id": "en_unmarked",
+      "file": "en_unmarked.html",
+      "lang": "en-us",
+      "state": "unmarked",
+      "expected_mark_selector": "button.map-popup__btn.gt-button-ys--primary:not(.map-popup__btn--batch)",
+      "expected_mark_text": "mark pin",
+      "expected_batch_selector": "button.map-popup__btn.map-popup__btn--batch",
+      "expected_already_marked": false,
+      "known_bug": "findGhimButton in extension/page_main.js only matches exact 'mark' while live HoYoLAB EN renders 'Mark Pin'"
+    }
+  ]
+}

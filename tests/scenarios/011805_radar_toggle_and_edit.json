@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "name": "radar_toggle_and_edit",
+  "session": "sess_20261127_011805",
+  "description": "Verify radar starts off, toggle radar on, toggle nav_layout on and off while verifying radar_edit_mode tracks nav_edit_mode, then toggle radar back off.",
+  "inputs": [
+    {
+      "frame": 6,
+      "hotkey": "radar_toggle"
+    },
+    {
+      "frame": 10,
+      "hotkey": "nav_layout"
+    },
+    {
+      "frame": 14,
+      "hotkey": "nav_layout"
+    },
+    {
+      "frame": 18,
+      "hotkey": "radar_toggle"
+    }
+  ],
+  "expect": [
+    {
+      "frame": 4,
+      "ui": {
+        "radar_enabled": false,
+        "radar_active": false,
+        "radar_edit_mode": false
+      }
+    },
+    {
+      "frame": 6,
+      "ui": {
+        "radar_enabled": true,
+        "radar_active": true,
+        "radar_edit_mode": false
+      }
+    },
+    {
+      "frame": 10,
+      "ui": {
+        "nav_edit_mode": true,
+        "radar_edit_mode": true
+      }
+    },
+    {
+      "frame": 14,
+      "ui": {
+        "nav_edit_mode": false,
+        "radar_edit_mode": false
+      }
+    },
+    {
+      "frame": 18,
+      "ui": {
+        "radar_enabled": false,
+        "radar_active": false,
+        "radar_edit_mode": false
+      }
+    }
+  ]
+}

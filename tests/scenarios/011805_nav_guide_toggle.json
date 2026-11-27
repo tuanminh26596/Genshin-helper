@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "name": "nav_guide_toggle",
+  "session": "sess_20261127_011805",
+  "description": "Verify guide card starts closed, then press nav_guide through default GuideZoomMode::Cycle (closed -> open compact -> open zoomed -> closed).",
+  "inputs": [
+    {
+      "frame": 6,
+      "hotkey": "nav_guide"
+    },
+    {
+      "frame": 10,
+      "hotkey": "nav_guide"
+    },
+    {
+      "frame": 14,
+      "hotkey": "nav_guide"
+    }
+  ],
+  "expect": [
+    {
+      "frame": 4,
+      "ui": {
+        "guide_open": false,
+        "guide_zoomed": false
+      }
+    },
+    {
+      "frame": 6,
+      "ui": {
+        "guide_open": true,
+        "guide_zoomed": false
+      }
+    },
+    {
+      "frame": 10,
+      "ui": {
+        "guide_open": true,
+        "guide_zoomed": true
+      }
+    },
+    {
+      "frame": 14,
+      "ui": {
+        "guide_open": false,
+        "guide_zoomed": false
+      }
+    }
+  ]
+}

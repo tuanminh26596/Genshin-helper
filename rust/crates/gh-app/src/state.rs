@@ -15,7 +15,7 @@ use gh_core::frame::RectI32;
 use gh_core::i18n::{get_language, set_language, t};
 use gh_core::map_bridge::PerMapAffineRegistry;
 use gh_core::multimap::MultimapDb;
-use gh_core::nav_controller::{FloorResolver, NavPin, NavigationController};
+use gh_core::nav_controller::{FloorResolver, InitialNavControllerState, NavPin, NavigationController};
 use gh_core::paths::AppPaths;
 use gh_core::protocol::format_hotkey_display_name;
 use gh_core::route_doc::{
@@ -49,6 +49,7 @@ use gh_win32::hotkey_conflicts::HotkeyConflictAdvisor;
 use gh_win32::locale::Win32LocaleProvider;
 use gh_win32::switcher::WindowSwitcher;
 use gh_win32::tray::{SystemTrayApp, TrayState};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -115,7 +116,20 @@ pub struct RouteState {
 #[derive(Debug, Clone, Default)]
 pub struct NavMarkConfirm {
     pub pin_id: Option<String>,
-    pub until: Option<Instant>,
+    pub until: Option<f64>,
+}
+
+/// Read-only snapshot of user-visible HUD/Radar toggle and edit-mode flags captured post-tick
+/// during offline replay scenarios.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiFrameSnapshot {
+    pub guide_open: bool,
+    pub guide_zoomed: bool,
+    pub nav_edit_mode: bool,
+    pub nav_hud_enabled: bool,
+    pub radar_enabled: bool,
+    pub radar_active: bool,
+    pub radar_edit_mode: bool,
 }
 
 pub struct AppFloorResolver {
@@ -332,6 +346,112 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         snapshot_nav_state(&nav)
+    }
+
+    pub fn snapshot_ui_state(&self) -> UiFrameSnapshot {
+        let (nav_hud_enabled, radar_enabled) = {
+            let cfg = self.config.read().expect("config lock poisoned");
+            (cfg.nav_hud_enabled, cfg.radar_enabled)
+        };
+        let radar_edit_mode = self
+            .radar_map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|c| c.is_edit_mode());
+        UiFrameSnapshot {
+            guide_open: self.nav_hud.is_guide_open(),
+            guide_zoomed: self.nav_hud.is_guide_zoomed(),
+            nav_edit_mode: self.nav_hud.is_edit_mode(),
+            nav_hud_enabled,
+            radar_enabled,
+            radar_active: self.is_radar_active(),
+            radar_edit_mode,
+        }
+    }
+
+    /// Captures all carried-over navigation/HUD/route state at session recording start so offline
+    /// replay can rebuild exact pre-frame-1 nav state without waiting for the next web callback.
+    pub fn capture_initial_nav_state(&self) -> Value {
+        let nav_hud_enabled = self
+            .config
+            .read()
+            .expect("config lock poisoned")
+            .nav_hud_enabled;
+        let nav_state = {
+            let nav = self
+                .nav_controller
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            nav.export_initial_state()
+        };
+        let (route_legs, last_route) = {
+            let rs = self.route_state.lock().unwrap_or_else(|e| e.into_inner());
+            (rs.legs.clone(), rs.last_route.clone())
+        };
+        let last_pos = self
+            .game_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last_pos
+            .clone();
+        json!({
+            "schema_version": 1,
+            "nav_hud_enabled": nav_hud_enabled,
+            "nav_controller": nav_state,
+            "route_state": {
+                "legs": route_legs,
+                "last_route": last_route,
+            },
+            "last_pos": last_pos,
+        })
+    }
+
+    /// Restores a payload previously produced by [`Self::capture_initial_nav_state`].
+    /// Returns `true` if a valid initial nav state payload was applied.
+    pub fn apply_initial_nav_state(&self, payload: &Value) -> bool {
+        let Some(obj) = payload.as_object() else {
+            return false;
+        };
+        if let Some(enabled) = obj.get("nav_hud_enabled").and_then(Value::as_bool) {
+            let mut cfg = self.config.write().expect("config lock poisoned");
+            cfg.nav_hud_enabled = enabled;
+        }
+        let mut applied_nav = false;
+        if let Some(nav_val) = obj.get("nav_controller")
+            && let Ok(nav_st) = serde_json::from_value::<InitialNavControllerState>(nav_val.clone())
+        {
+            let mut nav = self
+                .nav_controller
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            nav.restore_initial_state(nav_st);
+            applied_nav = true;
+        }
+        if let Some(rs_obj) = obj.get("route_state").and_then(Value::as_object) {
+            let mut rs = self.route_state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(legs) = rs_obj.get("legs").and_then(Value::as_array) {
+                rs.legs = legs.clone();
+            }
+            rs.last_route = rs_obj.get("last_route").filter(|v| !v.is_null()).cloned();
+        }
+        if let Some(lp) = obj.get("last_pos").filter(|v| !v.is_null()) {
+            let mut gs = self.game_state.lock().unwrap_or_else(|e| e.into_inner());
+            gs.last_pos = Some(lp.clone());
+        }
+        applied_nav
+    }
+
+    /// Installs an active [`SessionRecorder`] and immediately records the carried-over initial
+    /// navigation state snapshot into `web_inputs.jsonl` before frame 1.
+    pub fn attach_session_recorder(&self, srec: Arc<SessionRecorder>) {
+        let ts = self.start_instant.elapsed().as_secs_f64();
+        let init_payload = self.capture_initial_nav_state();
+        srec.record_initial_state(ts, &init_payload);
+        *self
+            .session_recorder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(srec);
     }
 
     pub fn floor_resolver(&self) -> AppFloorResolver {
@@ -2004,7 +2124,7 @@ impl AppState {
         if !self.engine_active.load(Ordering::Acquire) {
             return;
         }
-        let (target, dist, ready) = {
+        let (target, dist, ready, now_s) = {
             let mut nav = self.nav_controller.lock().unwrap_or_else(|e| e.into_inner());
             let tgt = nav.current_target().cloned();
             let d = nav.last_guidance().and_then(|g| {
@@ -2014,7 +2134,7 @@ impl AppState {
                     None
                 }
             });
-            (tgt, d, nav.selection_ready())
+            (tgt, d, nav.selection_ready(), nav.now_s())
         };
         let Some(target) = target else {
             self.nav_flash("hud.flash.no_target", HudPalette::Warning, 2.6, &[]);
@@ -2027,14 +2147,13 @@ impl AppState {
             return;
         }
 
-        let now = Instant::now();
         let confirmed = {
             let conf = self
                 .nav_mark_confirm
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             conf.pin_id.as_deref() == Some(target.id.as_str())
-                && conf.until.is_some_and(|u| now < u)
+                && conf.until.is_some_and(|u| now_s < u)
         };
         if let Some(d) = dist
             && d > NAV_MARK_CONFIRM_DIST_M
@@ -2045,7 +2164,7 @@ impl AppState {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             conf.pin_id = Some(target.id.clone());
-            conf.until = Some(now + std::time::Duration::from_secs(3));
+            conf.until = Some(now_s + 3.0);
             let meters = (d.round() as i64).to_string();
             let hk = self.hotkey_mgr.get_display_name("nav_mark");
             self.nav_flash(

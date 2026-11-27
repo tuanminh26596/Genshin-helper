@@ -2120,6 +2120,15 @@ impl RadarMapController {
         }
     }
 
+    pub fn is_edit_mode(&self) -> bool {
+        !self.closed.load(Ordering::Acquire)
+            && self
+                .shared
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .edit_mode
+    }
+
     pub fn set_layout_params(&self, rel_rect: Option<[f64; 4]>, zoom: f64, opacity: f64) {
         if self.closed.load(Ordering::Acquire) {
             return;
