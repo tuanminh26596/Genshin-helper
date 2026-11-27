@@ -180,7 +180,7 @@ enum Cmd {
         bless: bool,
 
         /// Optional CLI override for per-frame position drift threshold (world units).
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         pos_threshold_w: Option<f64>,
 
         /// Optional CLI override for max frames allowed above pos-threshold-w.
@@ -208,11 +208,11 @@ enum Cmd {
         min_mmap_view_acquired: Option<usize>,
 
         /// Optional CLI stricter ceiling for p95 position delta vs blessed (world units).
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         max_p95_pos_delta_w: Option<f64>,
 
         /// Optional CLI stricter ceiling for max position delta vs blessed (world units).
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         max_pos_delta_w: Option<f64>,
     },
 }

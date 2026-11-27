@@ -61,21 +61,99 @@ pub struct QaThresholdOverrides {
 }
 
 impl QaThresholdOverrides {
-    pub fn apply_to(&self, base: &QaThresholds) -> QaThresholds {
-        QaThresholds {
-            pos_threshold_w: self.pos_threshold_w.unwrap_or(base.pos_threshold_w),
-            max_over_threshold_frames: self
-                .max_over_threshold_frames
-                .unwrap_or(base.max_over_threshold_frames),
-            max_map_mismatches: self.max_map_mismatches.unwrap_or(base.max_map_mismatches),
-            max_lost_pos_frames: self
-                .max_lost_pos_frames
-                .unwrap_or(base.max_lost_pos_frames),
-            max_map_m_synced_drop: self
-                .max_map_m_synced_drop
-                .unwrap_or(base.max_map_m_synced_drop),
-            max_mmap_view_drop: self.max_mmap_view_drop.unwrap_or(base.max_mmap_view_drop),
+    /// Applies CLI overrides onto baseline thresholds.
+    ///
+    /// Rejects any override that loosens a baseline-backed threshold (exceeds baseline)
+    /// or provides a non-finite (`NaN`, `±inf`) or negative `f64` value.
+    pub fn apply_to(&self, base: &QaThresholds) -> Result<QaThresholds, String> {
+        let mut errors = Vec::new();
+
+        let pos_threshold_w = match self.pos_threshold_w {
+            Some(v) if !v.is_finite() || v < 0.0 => {
+                errors.push(format!(
+                    "--pos-threshold-w={v} is invalid (must be finite and >= 0; baseline={})",
+                    base.pos_threshold_w
+                ));
+                base.pos_threshold_w
+            }
+            Some(v) if v > base.pos_threshold_w => {
+                errors.push(format!(
+                    "--pos-threshold-w={v} loosens baseline ({})",
+                    base.pos_threshold_w
+                ));
+                base.pos_threshold_w
+            }
+            Some(v) => v,
+            None => base.pos_threshold_w,
+        };
+
+        let mut check_usize = |flag: &str, ov: Option<usize>, base_val: usize| -> usize {
+            match ov {
+                Some(v) if v > base_val => {
+                    errors.push(format!("{flag}={v} loosens baseline ({base_val})"));
+                    base_val
+                }
+                Some(v) => v,
+                None => base_val,
+            }
+        };
+
+        let max_over_threshold_frames = check_usize(
+            "--max-over-threshold",
+            self.max_over_threshold_frames,
+            base.max_over_threshold_frames,
+        );
+        let max_map_mismatches = check_usize(
+            "--max-map-mismatches",
+            self.max_map_mismatches,
+            base.max_map_mismatches,
+        );
+        let max_lost_pos_frames = check_usize(
+            "--max-lost-pos-frames",
+            self.max_lost_pos_frames,
+            base.max_lost_pos_frames,
+        );
+        let max_map_m_synced_drop = check_usize(
+            "--max-map-m-synced-drop",
+            self.max_map_m_synced_drop,
+            base.max_map_m_synced_drop,
+        );
+        let max_mmap_view_drop = check_usize(
+            "--max-mmap-view-drop",
+            self.max_mmap_view_drop,
+            base.max_mmap_view_drop,
+        );
+
+        if let Some(v) = self.max_p95_pos_delta_w
+            && (!v.is_finite() || v < 0.0)
+        {
+            errors.push(format!(
+                "--max-p95-pos-delta-w={v} is invalid (must be finite and >= 0)"
+            ));
         }
+        if let Some(v) = self.max_pos_delta_w
+            && (!v.is_finite() || v < 0.0)
+        {
+            errors.push(format!(
+                "--max-pos-delta-w={v} is invalid (must be finite and >= 0)"
+            ));
+        }
+
+        if !errors.is_empty() {
+            return Err(format!(
+                "invalid QA threshold override(s) (cannot loosen baseline without user approval): {}",
+                errors.join("; ")
+            ));
+        }
+
+        Ok(QaThresholds {
+            pos_threshold_w,
+            max_over_threshold_frames,
+            max_map_mismatches,
+            max_lost_pos_frames,
+            max_map_m_synced_drop,
+            max_mmap_view_drop,
+        })
     }
 }
 
@@ -605,7 +683,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
         baseline.policy = DEFAULT_QA_POLICY.to_owned();
     }
 
-    let eff_thresholds = opts.overrides.apply_to(&baseline.thresholds);
+    let eff_thresholds = opts.overrides.apply_to(&baseline.thresholds)?;
     let total_t0 = Instant::now();
 
     let header = format_qa_header();
@@ -1171,5 +1249,334 @@ mod tests {
         assert!(!tamper_rep.passed);
         assert_eq!(tamper_rep.sessions[0].status, "KHÔNG ĐẠT");
         assert!(!tamper_rep.sessions[0].blessed_sha256_ok);
+    }
+
+    #[test]
+    fn apply_to_rejects_looser_and_allows_equal_or_tighter_for_all_baseline_fields() {
+        let base = QaThresholds {
+            pos_threshold_w: 15.0,
+            max_over_threshold_frames: 3,
+            max_map_mismatches: 2,
+            max_lost_pos_frames: 4,
+            max_map_m_synced_drop: 2,
+            max_mmap_view_drop: 5,
+        };
+
+        // 1. pos_threshold_w (--pos-threshold-w)
+        let err = QaThresholdOverrides {
+            pos_threshold_w: Some(15.5),
+            ..Default::default()
+        }
+        .apply_to(&base)
+        .unwrap_err();
+        assert!(err.contains("--pos-threshold-w"), "got: {err}");
+        assert!(err.contains("15.5"), "got: {err}");
+        assert!(err.contains("15"), "got: {err}");
+
+        let eq = QaThresholdOverrides {
+            pos_threshold_w: Some(15.0),
+            ..Default::default()
+        }
+        .apply_to(&base)
+        .unwrap();
+        assert_eq!(eq.pos_threshold_w, 15.0);
+
+        let tight = QaThresholdOverrides {
+            pos_threshold_w: Some(8.5),
+            ..Default::default()
+        }
+        .apply_to(&base)
+        .unwrap();
+        assert_eq!(tight.pos_threshold_w, 8.5);
+        assert_eq!(tight.max_mmap_view_drop, base.max_mmap_view_drop);
+
+        // 2. max_over_threshold_frames (--max-over-threshold)
+        let err = QaThresholdOverrides {
+            max_over_threshold_frames: Some(4),
+            ..Default::default()
+        }
+        .apply_to(&base)
+        .unwrap_err();
+        assert!(err.contains("--max-over-threshold"), "got: {err}");
+        assert!(err.contains('4'), "got: {err}");
+        assert!(err.contains('3'), "got: {err}");
+
+        assert_eq!(
+            QaThresholdOverrides {
+                max_over_threshold_frames: Some(3),
+                ..Default::default()
+            }
+            .apply_to(&base)
+            .unwrap()
+            .max_over_threshold_frames,
+            3
+        );
+        assert_eq!(
+            QaThresholdOverrides {
+                max_over_threshold_frames: Some(1),
+                ..Default::default()
+            }
+            .apply_to(&base)
+            .unwrap()
+            .max_over_threshold_frames,
+            1
+        );
+
+        // 3. max_map_mismatches (--max-map-mismatches)
+        let err = QaThresholdOverrides {
+            max_map_mismatches: Some(999),
+            ..Default::default()
+        }
+        .apply_to(&base)
+        .unwrap_err();
+        assert!(err.contains("--max-map-mismatches"), "got: {err}");
+        assert!(err.contains("999"), "got: {err}");
+        assert!(err.contains('2'), "got: {err}");
+
+        assert_eq!(
+            QaThresholdOverrides {
+                max_map_mismatches: Some(2),
+                ..Default::default()
+            }
+            .apply_to(&base)
+            .unwrap()
+            .max_map_mismatches,
+            2
+        );
+        assert_eq!(
+            QaThresholdOverrides {
+                max_map_mismatches: Some(0),
+                ..Default::default()
+            }
+            .apply_to(&base)
+            .unwrap()
+            .max_map_mismatches,
+            0
+        );
+
+        // 4. max_lost_pos_frames (--max-lost-pos-frames)
+        let err = QaThresholdOverrides {
+            max_lost_pos_frames: Some(5),
+            ..Default::default()
+        }
+        .apply_to(&base)
+        .unwrap_err();
+        assert!(err.contains("--max-lost-pos-frames"), "got: {err}");
+        assert!(err.contains('5'), "got: {err}");
+        assert!(err.contains('4'), "got: {err}");
+
+        assert_eq!(
+            QaThresholdOverrides {
+                max_lost_pos_frames: Some(4),
+                ..Default::default()
+            }
+            .apply_to(&base)
+            .unwrap()
+            .max_lost_pos_frames,
+            4
+        );
+        assert_eq!(
+            QaThresholdOverrides {
+                max_lost_pos_frames: Some(2),
+                ..Default::default()
+            }
+            .apply_to(&base)
+            .unwrap()
+            .max_lost_pos_frames,
+            2
+        );
+
+        // 5. max_map_m_synced_drop (--max-map-m-synced-drop)
+        let err = QaThresholdOverrides {
+            max_map_m_synced_drop: Some(3),
+            ..Default::default()
+        }
+        .apply_to(&base)
+        .unwrap_err();
+        assert!(err.contains("--max-map-m-synced-drop"), "got: {err}");
+        assert!(err.contains('3'), "got: {err}");
+        assert!(err.contains('2'), "got: {err}");
+
+        assert_eq!(
+            QaThresholdOverrides {
+                max_map_m_synced_drop: Some(2),
+                ..Default::default()
+            }
+            .apply_to(&base)
+            .unwrap()
+            .max_map_m_synced_drop,
+            2
+        );
+        assert_eq!(
+            QaThresholdOverrides {
+                max_map_m_synced_drop: Some(0),
+                ..Default::default()
+            }
+            .apply_to(&base)
+            .unwrap()
+            .max_map_m_synced_drop,
+            0
+        );
+
+        // 6. max_mmap_view_drop (--max-mmap-view-drop)
+        let err = QaThresholdOverrides {
+            max_mmap_view_drop: Some(6),
+            ..Default::default()
+        }
+        .apply_to(&base)
+        .unwrap_err();
+        assert!(err.contains("--max-mmap-view-drop"), "got: {err}");
+        assert!(err.contains('6'), "got: {err}");
+        assert!(err.contains('5'), "got: {err}");
+
+        assert_eq!(
+            QaThresholdOverrides {
+                max_mmap_view_drop: Some(5),
+                ..Default::default()
+            }
+            .apply_to(&base)
+            .unwrap()
+            .max_mmap_view_drop,
+            5
+        );
+        assert_eq!(
+            QaThresholdOverrides {
+                max_mmap_view_drop: Some(1),
+                ..Default::default()
+            }
+            .apply_to(&base)
+            .unwrap()
+            .max_mmap_view_drop,
+            1
+        );
+
+        // Multiple offending flags are listed together in one error message
+        let multi_err = QaThresholdOverrides {
+            pos_threshold_w: Some(25.0),
+            max_map_mismatches: Some(10),
+            ..Default::default()
+        }
+        .apply_to(&QaThresholds::default())
+        .unwrap_err();
+        assert!(multi_err.contains("--pos-threshold-w"), "got: {multi_err}");
+        assert!(
+            multi_err.contains("--max-map-mismatches"),
+            "got: {multi_err}"
+        );
+    }
+
+    #[test]
+    fn apply_to_rejects_non_finite_and_negative_f64_overrides() {
+        let base = QaThresholds::default();
+        let bad_values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.001, -10.0];
+
+        for bad in bad_values {
+            let err_pos = QaThresholdOverrides {
+                pos_threshold_w: Some(bad),
+                ..Default::default()
+            }
+            .apply_to(&base)
+            .unwrap_err();
+            assert!(
+                err_pos.contains("--pos-threshold-w"),
+                "bad={bad}: {err_pos}"
+            );
+
+            let err_p95 = QaThresholdOverrides {
+                max_p95_pos_delta_w: Some(bad),
+                ..Default::default()
+            }
+            .apply_to(&base)
+            .unwrap_err();
+            assert!(
+                err_p95.contains("--max-p95-pos-delta-w"),
+                "bad={bad}: {err_p95}"
+            );
+
+            let err_max = QaThresholdOverrides {
+                max_pos_delta_w: Some(bad),
+                ..Default::default()
+            }
+            .apply_to(&base)
+            .unwrap_err();
+            assert!(
+                err_max.contains("--max-pos-delta-w"),
+                "bad={bad}: {err_max}"
+            );
+        }
+
+        // Zero is valid (strictest non-negative f64)
+        let zero = QaThresholdOverrides {
+            pos_threshold_w: Some(0.0),
+            max_p95_pos_delta_w: Some(0.0),
+            max_pos_delta_w: Some(0.0),
+            ..Default::default()
+        }
+        .apply_to(&base)
+        .unwrap();
+        assert_eq!(zero.pos_threshold_w, 0.0);
+    }
+
+    #[test]
+    fn apply_to_allows_cli_only_overrides_and_keeps_evaluation_unchanged() {
+        let base = QaThresholds::default();
+        let overrides = QaThresholdOverrides {
+            min_mmap_view_acquired: Some(120),
+            max_p95_pos_delta_w: Some(1.0),
+            max_pos_delta_w: Some(2.0),
+            ..Default::default()
+        };
+        let eff = overrides.apply_to(&base).unwrap();
+        assert_eq!(eff, base);
+
+        let blessed = vec![
+            mk_pose(1, Some(2), Some(100.0), Some(200.0)),
+            mk_pose(2, Some(2), Some(110.0), Some(210.0)),
+        ];
+        let actual = vec![
+            mk_pose(1, Some(2), Some(100.0), Some(200.0)),
+            mk_pose(2, Some(2), Some(113.0), Some(210.0)), // 3.0w delta (<= 15w, > 2.0w max, > 1.0w p95)
+        ];
+        let cmp = compare_poses_against_blessed(&blessed, &actual, eff.pos_threshold_w);
+        let sess_base = mk_base(2, 5, 115);
+        let reasons =
+            evaluate_session_against_baseline(&sess_base, &cmp, 5, 115, 0, &eff, &overrides);
+        assert_eq!(reasons.len(), 3, "got: {reasons:?}");
+        assert!(reasons[0].contains("mmap_view_acquired 115 < ngưỡng CLI 120"));
+        assert!(reasons[1].contains("p95 pos delta"));
+        assert!(reasons[2].contains("max pos delta"));
+    }
+
+    #[test]
+    fn run_qa_rejects_loosening_override_before_replaying_any_session() {
+        let tmp = TempDir::new("gh_sim_qa_reject_early");
+        let sessions_dir = tmp.0.join("qa_sessions");
+        let sdir = sessions_dir.join("sess_unplayable");
+        std::fs::create_dir_all(&sdir).unwrap();
+        // Video session with no ffmpeg_path: replay would fail with a missing-ffmpeg error if reached.
+        std::fs::write(sdir.join("meta.jsonl"), "").unwrap();
+        std::fs::write(sdir.join("video.mkv"), b"not-a-real-mkv").unwrap();
+
+        let baseline_path = tmp.0.join("qa_baseline.json");
+        QaBaselineFile::default().save_atomic(&baseline_path).unwrap();
+
+        let err = run_qa(&QaOptions {
+            sessions_dir,
+            data_dir: tmp.0.join("missing_data"),
+            ffmpeg_path: None,
+            baseline_path,
+            gt_file: tmp.0.join("verified_gt.json"),
+            only: vec![],
+            out_dir: None,
+            bless: false,
+            overrides: QaThresholdOverrides {
+                max_map_mismatches: Some(999),
+                ..Default::default()
+            },
+        })
+        .unwrap_err();
+        assert!(err.contains("--max-map-mismatches"), "got: {err}");
+        assert!(err.contains("999"), "got: {err}");
+        assert!(err.contains("(0)"), "got: {err}");
     }
 }
