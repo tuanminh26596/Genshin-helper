@@ -3,6 +3,7 @@
 pub mod capturer;
 pub mod compact;
 pub mod compositor;
+pub mod frames;
 pub mod import_diag;
 pub mod qa;
 pub mod replay;

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "21x9_2560x1080_hud_shift",
+  "description": "2560x1080 (21:9) borderless gameplay capture showing Genshin's ultrawide HUD inward horizontal shift (+72 px X).",
+  "notes": "Measured on 01_game.png (2560x1080) with OpenCV Sobel radial-gradient circle fit (bilinear sub-pixel search excluding Paimon/N sectors: cx=241.0, cy=124.0, r=106.5; integer grid cx=240.5, cy=123.5, r=107.0) and TM_CCOEFF_NORMED cross-correlation of 6 top-left HUD chrome icons (Paimon face NCC=0.9806, book NCC=0.9646, quest flag NCC=0.9500, eye NCC=0.9927, coop NCC=0.9544) plus Paimon hair connected-component bbox ([108,24,56,55] vs 16:9 [36,24,56,55]), all confirming an exact +72 px X, +0 px Y HUD shift relative to 1920x1080.",
+  "image": "scratch/discord_reports/21x9_noodleofbowl_diag_20261127_170112/diag_20261127_170112/01_game.png",
+  "width": 2560,
+  "height": 1080,
+  "is_gamepad": false,
+  "known_bug": "21:9 ultrawide HUD shifts +72px inward on X at 2560x1080; compute_ui_layout keeps minimap_rect at x=59 (right edge 277) and tracker hud_crop at width=325, clipping the right side of the true minimap circle (cx+r=347.5).",
+  "expected_minimap_rect": {
+    "x": 131,
+    "y": 15,
+    "width": 218,
+    "height": 218
+  },
+  "expected_paimon_rect": {
+    "x": 97,
+    "y": 12,
+    "width": 68,
+    "height": 77
+  },
+  "tolerance_px": 4,
+  "true_minimap_circle": {
+    "cx": 241.0,
+    "cy": 124.0,
+    "radius": 106.5
+  },
+  "expect_circle_in_crop": true
+}

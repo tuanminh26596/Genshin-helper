@@ -14,7 +14,7 @@ scratch\web_scenario_all.json) are absent from the current worktree, they are
 resolved automatically from the main checkout reported by `git worktree list`.
 
 Fixed check order:
-  guards, audit, ext-i18n, clippy, nextest, ext-smoke, blackbox, qa, web-bench
+  guards, audit, ext-i18n, clippy, nextest, frames, ext-smoke, blackbox, qa, web-bench
 
 Additional repeatable parameter:
   -QaOnly <session>
@@ -99,6 +99,7 @@ $script:CheckOrder = @(
     'ext-i18n'
     'clippy'
     'nextest'
+    'frames'
     'ext-smoke'
     'blackbox'
     'qa'
@@ -231,6 +232,14 @@ function Select-CheckPlan {
 
     $extMatches = @($paths | Where-Object { $_ -like 'extension/*' })
     $rustMatches = @($paths | Where-Object { $_ -like 'rust/*' })
+    $framesMatches = @(
+        $paths | Where-Object {
+            $_ -like 'rust/crates/gh-sim/*' -or
+            $_ -eq 'rust/crates/gh-core/src/ui_layout.rs' -or
+            $_ -like 'rust/crates/gh-cv/*' -or
+            $_ -like 'tests/frame_fixtures/*'
+        }
+    )
     $blackboxMatches = @(
         $paths | Where-Object {
             $_ -like 'rust/crates/gh-net/*' -or
@@ -308,6 +317,12 @@ function Select-CheckPlan {
                     if ($rustMatches.Count -gt 0) {
                         $selected = $true
                         $reason = Format-MatchReason -MatchedPaths $rustMatches
+                    }
+                }
+                'frames' {
+                    if ($framesMatches.Count -gt 0) {
+                        $selected = $true
+                        $reason = Format-MatchReason -MatchedPaths $framesMatches
                     }
                 }
                 'ext-smoke' {
@@ -890,6 +905,16 @@ function Build-RealExecutors {
             $outcome.ExitCode = Invoke-NativeStream -FilePath 'cargo' -ArgumentList @('nextest', 'run', '--manifest-path', $manifestPath, '--workspace')
         }.GetNewClosure()
 
+        'frames' = {
+            param($outcome)
+            if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+                [Console]::Out.WriteLine('[frames] FAIL: cargo not found on PATH.')
+                $outcome.ExitCode = 1
+                return
+            }
+            $outcome.ExitCode = Invoke-NativeStream -FilePath 'cargo' -ArgumentList @('run', '-q', '--manifest-path', $manifestPath, '--profile', 'cv-bench', '-p', 'gh-sim', '--', 'frames')
+        }.GetNewClosure()
+
         'ext-smoke' = {
             param($outcome)
             if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
@@ -1063,21 +1088,33 @@ function Invoke-SelfTest {
             RecWb    = $false
         }
         @{
-            Name     = 'rust/crates/gh-cv/** -> clippy, nextest, qa'
+            Name     = 'rust/crates/gh-cv/** -> clippy, nextest, frames, qa'
             Paths    = @('rust/crates/gh-cv/src/locator.rs')
-            Expected = @('guards', 'audit', 'clippy', 'nextest', 'qa')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'frames', 'qa')
             RecWb    = $false
         }
         @{
-            Name     = 'rust/crates/gh-core/** -> clippy, nextest, qa'
+            Name     = 'rust/crates/gh-core/** (non-ui_layout) -> clippy, nextest, qa'
             Paths    = @('rust/crates/gh-core/src/lib.rs')
             Expected = @('guards', 'audit', 'clippy', 'nextest', 'qa')
             RecWb    = $false
         }
         @{
-            Name     = 'rust/crates/gh-sim/** -> clippy, nextest, qa'
+            Name     = 'rust/crates/gh-core/src/ui_layout.rs -> clippy, nextest, frames, qa'
+            Paths    = @('rust/crates/gh-core/src/ui_layout.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'frames', 'qa')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-sim/** -> clippy, nextest, frames, qa'
             Paths    = @('rust/crates/gh-sim/src/qa.rs')
-            Expected = @('guards', 'audit', 'clippy', 'nextest', 'qa')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'frames', 'qa')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'tests/frame_fixtures/** -> frames'
+            Paths    = @('tests/frame_fixtures/21x9_2560x1080_hud_shift.json')
+            Expected = @('guards', 'audit', 'frames')
             RecWb    = $false
         }
         @{
@@ -1101,7 +1138,7 @@ function Invoke-SelfTest {
         @{
             Name     = 'mixed paths (README + extension + gh-cv)'
             Paths    = @('README.md', 'extension/i18n.js', 'rust/crates/gh-cv/src/minimap_tracker.rs')
-            Expected = @('guards', 'audit', 'ext-i18n', 'clippy', 'nextest', 'ext-smoke', 'qa')
+            Expected = @('guards', 'audit', 'ext-i18n', 'clippy', 'nextest', 'frames', 'ext-smoke', 'qa')
             RecWb    = $true
         }
         @{
@@ -1124,12 +1161,12 @@ function Invoke-SelfTest {
     # Tier full, -WebBench, explicit -Checks ordering
     $fullPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'full'
     $fullGot = (@($fullPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
-    $fullExp = 'guards,audit,ext-i18n,clippy,nextest,ext-smoke,blackbox,qa'
+    $fullExp = 'guards,audit,ext-i18n,clippy,nextest,frames,ext-smoke,blackbox,qa'
     Assert-True ($fullGot -eq $fullExp) "tier full without -WebBench: expected=[$fullExp] got=[$fullGot]"
 
     $fullWbPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'full' -WebBench
     $fullWbGot = (@($fullWbPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
-    $fullWbExp = 'guards,audit,ext-i18n,clippy,nextest,ext-smoke,blackbox,qa,web-bench'
+    $fullWbExp = 'guards,audit,ext-i18n,clippy,nextest,frames,ext-smoke,blackbox,qa,web-bench'
     Assert-True ($fullWbGot -eq $fullWbExp) "tier full with -WebBench: expected=[$fullWbExp] got=[$fullWbGot]"
 
     $autoWbPlan = Select-CheckPlan -ChangedPaths @('extension/popup.js') -Tier 'auto' -WebBench
@@ -1137,9 +1174,9 @@ function Invoke-SelfTest {
     Assert-True ($autoWbGot -eq 'guards,audit,ext-i18n,ext-smoke,web-bench') "auto with -WebBench: got=[$autoWbGot]"
     Assert-True (-not $autoWbPlan.RecommendWebBench) 'auto with -WebBench should not duplicate recommendation'
 
-    $explicitPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'auto' -ExplicitChecks @('qa,guards', 'clippy')
+    $explicitPlan = Select-CheckPlan -ChangedPaths @('README.md') -Tier 'auto' -ExplicitChecks @('qa,frames,guards', 'clippy,nextest')
     $explicitGot = (@($explicitPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
-    Assert-True ($explicitGot -eq 'guards,clippy,qa') "explicit -Checks preserves fixed order: got=[$explicitGot]"
+    Assert-True ($explicitGot -eq 'guards,clippy,nextest,frames,qa') "explicit -Checks preserves fixed order (frames after nextest): got=[$explicitGot]"
 
     # Extra args parser for repeatable -QaOnly
     $parsedExtra = Parse-ExtraArgs -RawArgs @('-QaOnly', 'sess_A', '-QaOnly', 'sess_B,sess_C', '-QaOnly:sess_D')
@@ -1208,7 +1245,7 @@ function Invoke-SelfTest {
 
     # 3. Runner tests (fake steps + seeded fault)
     $runnerPlan = (Select-CheckPlan -ChangedPaths @('rust/crates/gh-cv/src/lib.rs') -Tier 'auto').Plan
-    # Selected: guards, audit, clippy, nextest, qa
+    # Selected: guards, audit, clippy, nextest, frames, qa
 
     $passInvoked = New-Object System.Collections.Generic.List[string]
     $passExecs = @{}
@@ -1224,7 +1261,7 @@ function Invoke-SelfTest {
     Assert-True ($passRun.ExitCode -eq 0) "runner all-pass: ExitCode expected=0 got=$($passRun.ExitCode)"
     Assert-True ($passRun.ResultLine -eq 'RESULT: PASS') "runner all-pass: ResultLine expected='RESULT: PASS' got='$($passRun.ResultLine)'"
     Assert-True ($passRun.SummaryLines[-1] -eq 'RESULT: PASS') "runner all-pass: last summary line is RESULT: PASS"
-    Assert-True (($passInvoked -join ',') -eq 'guards,audit,clippy,nextest,qa') "runner all-pass: invoked=[$($passInvoked -join ',')]"
+    Assert-True (($passInvoked -join ',') -eq 'guards,audit,clippy,nextest,frames,qa') "runner all-pass: invoked=[$($passInvoked -join ',')]"
 
     # Seeded fault: flip clippy from 0 -> 1
     $failInvoked = New-Object System.Collections.Generic.List[string]
@@ -1252,6 +1289,7 @@ function Invoke-SelfTest {
     Assert-True ($statusByCheck['ext-i18n'] -eq 'NOT SELECTED') 'runner seeded-fault: ext-i18n=NOT SELECTED'
     Assert-True ($statusByCheck['clippy'] -eq 'FAIL') 'runner seeded-fault: clippy=FAIL'
     Assert-True ($statusByCheck['nextest'] -eq 'NOT RUN') 'runner seeded-fault: nextest=NOT RUN'
+    Assert-True ($statusByCheck['frames'] -eq 'NOT RUN') 'runner seeded-fault: frames=NOT RUN'
     Assert-True ($statusByCheck['qa'] -eq 'NOT RUN') 'runner seeded-fault: qa=NOT RUN'
     Assert-True ($passRun.ResultLine -ne $failRun.ResultLine -and $passRun.ExitCode -ne $failRun.ExitCode) 'runner seeded-fault: flipping fake step flips RESULT and exit code'
 

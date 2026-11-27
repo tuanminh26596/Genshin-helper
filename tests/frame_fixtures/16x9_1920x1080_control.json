@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "16x9_1920x1080_control",
+  "description": "1920x1080 (16:9) gameplay control capture verifying baseline Unity CanvasScaler minimap and Paimon placement.",
+  "notes": "Measured on 01_game.png (1920x1080, markbtn_shiinro_diag_20261126_234109, dark rock background with sharp minimap rim and visible Paimon icon) using OpenCV Sobel radial-gradient circle fit (excluding Paimon/N sectors: cx=167.5, cy=124.5, outer rim peak r=108.0, inner rim peak r=105.5), cyan player-arrow centroid (167.9, 126.0), and Paimon white-hair connected-component bbox ([36,24,56,55], area=1683, matching markbtn_pringleringle 1080p frame with dx=0, dy=0). Circle bounds [59.5,275.5]x[16.5,232.5] sit cleanly inside MINIMAP_RECT_DESKTOP_1080P (59,15,218x218) and tracker hud_crop (325x261).",
+  "image": "scratch/discord_reports/markbtn_shiinro_diag_20261126_234109/diag_20261126_234109/01_game.png",
+  "width": 1920,
+  "height": 1080,
+  "is_gamepad": false,
+  "known_bug": null,
+  "expected_minimap_rect": {
+    "x": 59,
+    "y": 15,
+    "width": 218,
+    "height": 218
+  },
+  "expected_paimon_rect": {
+    "x": 25,
+    "y": 12,
+    "width": 68,
+    "height": 77
+  },
+  "tolerance_px": 4,
+  "true_minimap_circle": {
+    "cx": 167.5,
+    "cy": 124.5,
+    "radius": 108.0
+  },
+  "expect_circle_in_crop": true
+}
