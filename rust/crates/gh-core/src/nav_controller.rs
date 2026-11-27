@@ -1609,6 +1609,11 @@ impl NavigationController {
         self.pins_by_id.get(&locked.id).or(Some(locked))
     }
 
+    /// Returns the user-locked (cycle/selection) pin ID, if any.
+    pub fn user_locked_id(&self) -> Option<&str> {
+        self.user_locked_id.as_deref()
+    }
+
     /// Resets local progress for the active route document or route queue without touching HoYoLAB.
     pub fn reset_route_progress(&mut self) -> bool {
         if let Some(doc) = self.active_route.as_ref() {

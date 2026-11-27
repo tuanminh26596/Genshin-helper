@@ -16,12 +16,14 @@ use crate::{BUILD_APP_VERSION, BUILD_GIT_COMMIT};
 use gh_core::atomic_io::write_json_atomic;
 use gh_core::frame::{FrameBuf, PixelFormat, RectI32};
 use gh_core::multimap::MultimapDb;
+use gh_core::nav_controller::{NavState, NavigationController};
 use gh_core::provenance::{
     DATASET_FILENAMES, SessionProvenance, fingerprint_data_dir, sanitize_data_source_label,
 };
 use gh_core::{CoreError, CoreResult};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -32,6 +34,93 @@ use std::time::Duration;
 
 pub const DEFAULT_SESSION_FPS: f64 = 20.0;
 const DEFAULT_SESSION_QUEUE: usize = 64;
+pub const WEB_INPUTS_FILENAME: &str = "web_inputs.jsonl";
+
+/// Callbacks whose raw payloads are recorded to `web_inputs.jsonl` while session recording is active.
+pub const RECORDED_WEB_CALLBACKS: &[&str] = &[
+    "on_nearby_pins",
+    "on_nav_command",
+    "on_route_command",
+    "on_plan_tsp_route",
+    "on_set_nav_hud",
+];
+
+/// Case-insensitive object-key substrings dropped recursively before writing `web_inputs.jsonl`.
+pub const SENSITIVE_KEY_SUBSTRINGS: &[&str] = &[
+    "cookie",
+    "token",
+    "authorization",
+    "ltuid",
+    "ltoken",
+    "stoken",
+    "account",
+    "password",
+    "secret",
+];
+
+/// Snapshot of live `NavigationController` state recorded into each kept frame's `meta.jsonl` `nav` field.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NavFrameSnapshot {
+    pub target_id: Option<String>,
+    pub locked_target_id: Option<String>,
+    pub user_locked_id: Option<String>,
+    pub state: String,
+}
+
+/// Captures read-only live navigation state without mutating `NavigationController`.
+pub fn snapshot_nav_state(nav: &NavigationController) -> NavFrameSnapshot {
+    NavFrameSnapshot {
+        target_id: nav.current_target_peek().map(|p| p.id.clone()),
+        locked_target_id: nav.locked_target_pin().map(|p| p.id.clone()),
+        user_locked_id: nav.user_locked_id().map(str::to_owned),
+        state: nav
+            .last_guidance()
+            .map(|g| g.state.as_str().to_owned())
+            .unwrap_or_else(|| NavState::Idle.as_str().to_owned()),
+    }
+}
+
+/// One line in `<session>/web_inputs.jsonl`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WebInputRecord {
+    pub ts: f64,
+    pub callback: String,
+    pub payload: Value,
+}
+
+/// Recursively drops any JSON object key whose ASCII-lowercased name contains any substring in
+/// [`SENSITIVE_KEY_SUBSTRINGS`].
+pub fn sanitize_web_input_payload(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut clean = Map::with_capacity(map.len());
+            for (k, v) in map {
+                let low = k.to_ascii_lowercase();
+                if SENSITIVE_KEY_SUBSTRINGS
+                    .iter()
+                    .any(|needle| low.contains(needle))
+                {
+                    continue;
+                }
+                clean.insert(k.clone(), sanitize_web_input_payload(v));
+            }
+            Value::Object(clean)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(sanitize_web_input_payload).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Writes `WebInputRecord` entries as compact JSONL (one JSON object per line).
+pub fn write_web_inputs_jsonl(path: &Path, records: &[WebInputRecord]) -> std::io::Result<()> {
+    let f = File::create(path)?;
+    let mut w = BufWriter::new(f);
+    for rec in records {
+        serde_json::to_writer(&mut w, rec).map_err(std::io::Error::other)?;
+        w.write_all(b"\n")?;
+    }
+    w.flush()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionCodec {
@@ -124,6 +213,11 @@ struct RecorderShared {
     capture_paths_seen: BTreeSet<String>,
     pending_hotkeys: Vec<Value>,
     pending_events: Vec<Value>,
+    pending_web_inputs: VecDeque<WebInputRecord>,
+    last_web_payload_by_cb: HashMap<String, Value>,
+    web_inputs_recorded: usize,
+    web_inputs_skipped_duplicates: usize,
+    web_inputs_skipped_by_callback: BTreeMap<String, usize>,
     visited_coords: Vec<(i32, f64, f64)>,
     visited_floors: HashSet<(i32, i32)>,
 }
@@ -214,6 +308,11 @@ impl SessionRecorder {
                     capture_paths_seen: BTreeSet::new(),
                     pending_hotkeys: Vec::new(),
                     pending_events: Vec::new(),
+                    pending_web_inputs: VecDeque::new(),
+                    last_web_payload_by_cb: HashMap::new(),
+                    web_inputs_recorded: 0,
+                    web_inputs_skipped_duplicates: 0,
+                    web_inputs_skipped_by_callback: BTreeMap::new(),
                     visited_coords: Vec::new(),
                     visited_floors: HashSet::new(),
                 }),
@@ -265,6 +364,11 @@ impl SessionRecorder {
                     capture_paths_seen: BTreeSet::new(),
                     pending_hotkeys: Vec::new(),
                     pending_events: Vec::new(),
+                    pending_web_inputs: VecDeque::new(),
+                    last_web_payload_by_cb: HashMap::new(),
+                    web_inputs_recorded: 0,
+                    web_inputs_skipped_duplicates: 0,
+                    web_inputs_skipped_by_callback: BTreeMap::new(),
                     visited_coords: Vec::new(),
                     visited_floors: HashSet::new(),
                 }),
@@ -324,6 +428,55 @@ impl SessionRecorder {
         let (lock, _) = &*self.shared;
         let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
         sh.pending_events.push(entry);
+    }
+
+    /// Sanitizes and records a navigation/HUD web-callback payload to `web_inputs.jsonl`.
+    ///
+    /// Skips calls whose sanitized payload is identical to the previous recorded payload of the
+    /// same callback and increments the duplicate skip counters stored in `info.json`.
+    /// Returns `true` if queued for writing, `false` if inactive or skipped as duplicate.
+    pub fn record_web_input(&self, ts: f64, callback: &str, payload: &Value) -> bool {
+        if !self.active() {
+            return false;
+        }
+        let clean = sanitize_web_input_payload(payload);
+        let (lock, cv) = &*self.shared;
+        let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if sh.last_web_payload_by_cb.get(callback) == Some(&clean) {
+            sh.web_inputs_skipped_duplicates += 1;
+            *sh.web_inputs_skipped_by_callback
+                .entry(callback.to_owned())
+                .or_insert(0) += 1;
+            return false;
+        }
+        sh.last_web_payload_by_cb
+            .insert(callback.to_owned(), clean.clone());
+        sh.web_inputs_recorded += 1;
+        sh.pending_web_inputs.push_back(WebInputRecord {
+            ts: ((ts * 10_000.0).round()) / 10_000.0,
+            callback: callback.to_owned(),
+            payload: clean,
+        });
+        cv.notify_one();
+        true
+    }
+
+    /// Drains any pending recorded web inputs not yet flushed by the worker thread.
+    pub fn drain_pending_web_inputs(&self) -> Vec<WebInputRecord> {
+        let (lock, _) = &*self.shared;
+        let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+        sh.pending_web_inputs.drain(..).collect()
+    }
+
+    /// Returns `(recorded, skipped_duplicates, skipped_by_callback)` for recorded web inputs.
+    pub fn web_input_stats(&self) -> (usize, usize, BTreeMap<String, usize>) {
+        let (lock, _) = &*self.shared;
+        let sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            sh.web_inputs_recorded,
+            sh.web_inputs_skipped_duplicates,
+            sh.web_inputs_skipped_by_callback.clone(),
+        )
     }
 
     #[cfg(test)]
@@ -573,25 +726,66 @@ impl SessionRecorder {
         height: u32,
     ) {
         let mut ffmpeg_in = child.stdin.take();
+        let mut web_writer: Option<BufWriter<File>> = None;
         let (lock, cv) = &*self.shared;
 
+        let mut flush_web_batch = |batch: Vec<WebInputRecord>| -> usize {
+            let mut errs = 0usize;
+            for rec in batch {
+                if web_writer.is_none() {
+                    match File::create(self.out_dir.join(WEB_INPUTS_FILENAME)) {
+                        Ok(f) => web_writer = Some(BufWriter::new(f)),
+                        Err(_) => {
+                            errs += 1;
+                            continue;
+                        }
+                    }
+                }
+                if let Some(ref mut w) = web_writer {
+                    let ok = serde_json::to_string(&rec)
+                        .map_err(std::io::Error::other)
+                        .and_then(|s| writeln!(w, "{s}"))
+                        .is_ok();
+                    if !ok {
+                        errs += 1;
+                    }
+                }
+            }
+            errs
+        };
+
         loop {
-            let item = {
+            let (item, web_batch) = {
                 let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
-                while sh.queue.is_empty() && !sh.stopped {
+                while sh.queue.is_empty() && sh.pending_web_inputs.is_empty() && !sh.stopped {
                     sh = cv.wait(sh).unwrap_or_else(|e| e.into_inner());
                 }
-                if let Some(next) = sh.queue.pop_front() {
-                    Some(next)
-                } else if sh.stopped {
-                    None
+                let batch: Vec<WebInputRecord> = sh.pending_web_inputs.drain(..).collect();
+                let next_item = sh.queue.pop_front();
+                if next_item.is_none() && batch.is_empty() && sh.stopped {
+                    (None, Vec::new())
                 } else {
-                    continue;
+                    (next_item, batch)
                 }
             };
 
+            if !web_batch.is_empty() {
+                let web_errs = flush_web_batch(web_batch);
+                if web_errs > 0 {
+                    let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    sh.write_errors += web_errs;
+                }
+            }
+
             let Some(item) = item else {
-                break;
+                let done = {
+                    let sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    sh.stopped && sh.queue.is_empty() && sh.pending_web_inputs.is_empty()
+                };
+                if done {
+                    break;
+                }
+                continue;
             };
 
             let video_ok = if let Some(ref mut stdin) = ffmpeg_in {
@@ -615,6 +809,22 @@ impl SessionRecorder {
             }
         }
 
+        // Flush any remaining web inputs queued right before shutdown
+        let tail_web: Vec<WebInputRecord> = {
+            let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+            sh.pending_web_inputs.drain(..).collect()
+        };
+        if !tail_web.is_empty() {
+            let web_errs = flush_web_batch(tail_web);
+            if web_errs > 0 {
+                let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+                sh.write_errors += web_errs;
+            }
+        }
+        if let Some(ref mut w) = web_writer {
+            let _ = w.flush();
+        }
+
         // Flush & wait for ffmpeg to finalize the Matroska container
         drop(ffmpeg_in);
         let ffmpeg_exit = child.wait().ok().and_then(|s| s.code());
@@ -628,6 +838,9 @@ impl SessionRecorder {
             capture_paths,
             visited_coords,
             visited_floors,
+            web_inputs_recorded,
+            web_inputs_skipped_duplicates,
+            web_inputs_skipped_by_callback,
         ) = {
             let sh = lock.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -638,6 +851,9 @@ impl SessionRecorder {
                 sh.capture_paths_seen.iter().cloned().collect::<Vec<_>>(),
                 sh.visited_coords.clone(),
                 sh.visited_floors.clone(),
+                sh.web_inputs_recorded,
+                sh.web_inputs_skipped_duplicates,
+                sh.web_inputs_skipped_by_callback.clone(),
             )
         };
 
@@ -667,6 +883,9 @@ impl SessionRecorder {
                 write_errors,
                 ffmpeg_exit_code: ffmpeg_exit,
                 capture_paths_seen: capture_paths,
+                web_inputs_recorded,
+                web_inputs_skipped_duplicates,
+                web_inputs_skipped_by_callback,
             },
         );
         tracing::info!(
@@ -920,6 +1139,9 @@ struct SessionInfoInputs {
     write_errors: usize,
     ffmpeg_exit_code: Option<i32>,
     capture_paths_seen: Vec<String>,
+    web_inputs_recorded: usize,
+    web_inputs_skipped_duplicates: usize,
+    web_inputs_skipped_by_callback: BTreeMap<String, usize>,
 }
 
 fn build_session_provenance(data_dir: &Path, data_source: &str) -> SessionProvenance {
@@ -977,6 +1199,11 @@ fn finalize_session_artifacts(
             "tiles_copied": assets_snap.tiles_copied,
             "ug_overlays_copied": assets_snap.ug_overlays_copied,
             "paimon_copied": assets_snap.paimon_copied,
+        },
+        "web_inputs": {
+            "recorded": inputs.web_inputs_recorded,
+            "skipped_duplicates": inputs.web_inputs_skipped_duplicates,
+            "skipped_by_callback": inputs.web_inputs_skipped_by_callback,
         },
         "provenance": provenance,
     });
@@ -1275,6 +1502,9 @@ mod tests {
                 write_errors: 0,
                 ffmpeg_exit_code: Some(0),
                 capture_paths_seen: vec!["gdi".to_owned()],
+                web_inputs_recorded: 0,
+                web_inputs_skipped_duplicates: 0,
+                web_inputs_skipped_by_callback: BTreeMap::new(),
             },
         );
         assert_eq!(st.datasets_copied, 3);
@@ -1625,5 +1855,105 @@ mod tests {
         eprintln!(
             "[forced_frame_cost_1440p] add_frame_arc(Bgr8 zero-copy)={bgr_arc_us:.1} us/frame, add_frame(Bgra8->Bgr8)={bgra_ms:.2} ms/frame"
         );
+    }
+
+    #[test]
+    fn sanitize_web_input_payload_drops_sensitive_keys_recursively_case_insensitive() {
+        let raw = json!({
+            "map_id": 2,
+            "Cookie": "sid=123",
+            "auth_TOKEN_v2": "abc",
+            "X-Authorization": "Bearer xyz",
+            "ltuid_v2": "999",
+            "LTOKEN": "secret-ltoken",
+            "stoken_v2": "secret-stoken",
+            "account_id": "42",
+            "userPassword": "pw",
+            "client_secret": "shh",
+            "pins": [
+                {
+                    "id": "101",
+                    "name": "Chest",
+                    "cookieJar": "drop-me",
+                    "nested": {
+                        "safe_key": "keep",
+                        "MY_SECRET_KEY": "drop-me-too",
+                        "deeper": [
+                            {"Authorization": "drop", "lat": 12.5}
+                        ]
+                    }
+                }
+            ]
+        });
+
+        let clean = sanitize_web_input_payload(&raw);
+        let obj = clean.as_object().expect("root object");
+        assert_eq!(obj.len(), 2, "only map_id and pins should remain: {clean}");
+        assert_eq!(obj["map_id"], json!(2));
+        let pin0 = obj["pins"][0].as_object().expect("pin0 object");
+        assert_eq!(pin0.len(), 3);
+        assert_eq!(pin0["id"], json!("101"));
+        assert_eq!(pin0["name"], json!("Chest"));
+        assert!(pin0.get("cookieJar").is_none());
+        let nested = pin0["nested"].as_object().expect("nested object");
+        assert_eq!(nested["safe_key"], json!("keep"));
+        assert!(nested.get("MY_SECRET_KEY").is_none());
+        assert_eq!(nested["deeper"][0], json!({"lat": 12.5}));
+    }
+
+    #[test]
+    fn record_web_input_deduplicates_per_callback_sanitizes_and_counts_skips() {
+        let root = std::env::temp_dir().join(format!("gh_sess_web_in_{}", std::process::id()));
+        let rec = SessionRecorder::new_dry_run_for_test(&root, 20.0, 16);
+
+        // First call records and sanitizes secret keys
+        assert!(rec.record_web_input(
+            1.23456,
+            "on_nearby_pins",
+            &json!({"map_id": 2, "pins": [{"id": "1"}], "cookie": "drop"})
+        ));
+        // Identical sanitized payload for same callback is skipped and counted
+        assert!(!rec.record_web_input(
+            1.5,
+            "on_nearby_pins",
+            &json!({"map_id": 2, "pins": [{"id": "1"}], "cookie": "different_but_dropped"})
+        ));
+        // Same payload on a DIFFERENT callback is recorded independently
+        assert!(rec.record_web_input(
+            1.6,
+            "on_nav_command",
+            &json!({"action": "lock_target", "pin": {"id": "1"}})
+        ));
+        // Changed payload on original callback is recorded again
+        assert!(rec.record_web_input(
+            1.8,
+            "on_nearby_pins",
+            &json!({"map_id": 2, "pins": [{"id": "1"}, {"id": "2"}]})
+        ));
+        // Repeat of new payload is skipped again
+        assert!(!rec.record_web_input(
+            1.9,
+            "on_nearby_pins",
+            &json!({"map_id": 2, "pins": [{"id": "1"}, {"id": "2"}]})
+        ));
+
+        let (recorded, skipped, by_cb) = rec.web_input_stats();
+        assert_eq!(recorded, 3);
+        assert_eq!(skipped, 2);
+        assert_eq!(by_cb.get("on_nearby_pins"), Some(&2));
+        assert_eq!(by_cb.get("on_nav_command"), None);
+
+        let items = rec.drain_pending_web_inputs();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].ts, 1.2346);
+        assert_eq!(items[0].callback, "on_nearby_pins");
+        assert!(items[0].payload.get("cookie").is_none());
+        assert_eq!(items[1].callback, "on_nav_command");
+        assert_eq!(items[2].callback, "on_nearby_pins");
+
+        // Inactive recorder ignores web inputs
+        rec.finish();
+        assert!(!rec.record_web_input(2.0, "on_set_nav_hud", &json!({"enabled": false})));
+        assert!(rec.drain_pending_web_inputs().is_empty());
     }
 }

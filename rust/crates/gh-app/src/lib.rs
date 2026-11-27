@@ -19,3 +19,7 @@ pub mod state;
 pub mod tracking_loop;
 pub mod tracking_stack;
 pub mod updater;
+
+pub use state::{
+    REPLAY_DISPATCHABLE_HOTKEYS, dispatch_hotkey_action, is_replay_dispatchable_hotkey,
+};

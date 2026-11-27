@@ -2130,7 +2130,7 @@ pub async fn run_tracking_loop(state: Arc<AppState>, mut shutdown_rx: watch::Rec
             capture_session_frame: want_session_frame,
             session_rec_active,
         };
-        let tick_out = if let Some(ref w) = worker {
+        let mut tick_out = if let Some(ref w) = worker {
             match w.run_tick(Arc::clone(&state), tick_params).await {
                 Some(out) => out,
                 None => continue,
@@ -2145,25 +2145,27 @@ pub async fn run_tracking_loop(state: Arc<AppState>, mut shutdown_rx: watch::Rec
             }
         };
 
-        // Enqueue the exact atomic frame captured inside `run_tick_worker` (zero second capture,
-        // zero extra await, zero timestamp skew against the tracker pose). Every tick that ran
-        // while recording was active either keeps its frame (flushing `unrecorded_ticks`) or
-        // increments the per-mode `unrecorded_ticks` counter and monotonic `tick_seq`.
-        if let Some(ref srec) = session_rec_opt {
-            let post_state = tick_out.step_res.as_ref().map(|s| s.state);
+        // Stage the exact atomic frame captured inside `run_tick_worker` (zero second capture,
+        // zero timestamp skew against the tracker pose) and enqueue it immediately AFTER
+        // `apply_tick_output` so the recorded `nav` snapshot reflects the live navigation state
+        // after this tick.
+        let rec_tick_mode = tick_out.mode;
+        let rec_map_pre_state = tick_out.map_pre_state;
+        let rec_map_post_state = tick_out.step_res.as_ref().map(|s| s.state);
+        let rec_tick_ts = tick_out.tick_ts;
+        let pending_session_frame = if session_rec_opt.is_some() {
             let decision = decide_session_frame_keep(
                 true,
                 want_session_frame,
-                tick_out.mode,
-                tick_out.map_pre_state,
-                post_state,
+                rec_tick_mode,
+                rec_map_pre_state,
+                rec_map_post_state,
             );
-            let mut kept = false;
             if decision.should_keep()
-                && let Some(ref frame_arc) = tick_out.session_frame
+                && let Some(frame_arc) = tick_out.session_frame.take()
             {
                 let mut extra = Map::new();
-                extra.insert("mode".to_owned(), json!(tick_mode_str(tick_out.mode)));
+                extra.insert("mode".to_owned(), json!(tick_mode_str(rec_tick_mode)));
                 if let Some(ref pose) = tick_out.pose {
                     extra.insert("state".to_owned(), json!(pose.state.as_str()));
                     extra.insert("match".to_owned(), json!(pose.match_method));
@@ -2178,24 +2180,14 @@ pub async fn run_tracking_loop(state: Arc<AppState>, mut shutdown_rx: watch::Rec
                 } else if let Some(ref sr) = tick_out.step_res {
                     extra.insert("state".to_owned(), json!(format!("MAP_M_{:?}", sr.state)));
                 }
-                kept = srec.add_frame_arc(
-                    frame_arc,
-                    tick_out.tick_ts,
-                    SessionFrameMeta {
-                        client_rect: game_rect,
-                        cursor_client_pos: cursor_client,
-                        capture_path: tick_out.session_capture_path.unwrap_or("gdi").to_owned(),
-                        extra,
-                    },
-                    decision.is_forced(),
-                );
+                let cap_path = tick_out.session_capture_path.unwrap_or("gdi").to_owned();
+                Some((frame_arc, extra, cap_path, decision.is_forced()))
+            } else {
+                None
             }
-            if !kept {
-                let bucket =
-                    unrecorded_tick_bucket(tick_out.mode, tick_out.map_pre_state, post_state);
-                srec.record_unrecorded_tick(bucket);
-            }
-        }
+        } else {
+            None
+        };
 
         match tick_out.mode {
             TickMode::Minimap => {
@@ -2299,6 +2291,32 @@ pub async fn run_tracking_loop(state: Arc<AppState>, mut shutdown_rx: watch::Rec
             locate_res,
             &mut hide_mmap_overlay,
         );
+
+        if let Some(ref srec) = session_rec_opt {
+            let mut kept = false;
+            if let Some((frame_arc, mut extra, cap_path, forced)) = pending_session_frame {
+                extra.insert(
+                    "nav".to_owned(),
+                    serde_json::to_value(state.snapshot_nav_state()).unwrap_or(Value::Null),
+                );
+                kept = srec.add_frame_arc(
+                    &frame_arc,
+                    rec_tick_ts,
+                    SessionFrameMeta {
+                        client_rect: game_rect,
+                        cursor_client_pos: cursor_client,
+                        capture_path: cap_path,
+                        extra,
+                    },
+                    forced,
+                );
+            }
+            if !kept {
+                let bucket =
+                    unrecorded_tick_bucket(rec_tick_mode, rec_map_pre_state, rec_map_post_state);
+                srec.record_unrecorded_tick(bucket);
+            }
+        }
 
         let cur_state = state
             .state_machine

@@ -3,7 +3,7 @@
 use crate::capture_backend::FrameCapturer;
 use crate::diagnostics::{DiagnosticManager, MinimapPreLostRingBuffer};
 use crate::minimap_recorder::MinimapRecorder;
-use crate::session_recorder::SessionRecorder;
+use crate::session_recorder::{NavFrameSnapshot, SessionRecorder, snapshot_nav_state};
 use crate::updater::AppUpdater;
 use crate::mmap_guide::{
     FallbackInput, GuideInput, SINGLE_PIN_MMAP_DISTANCE_M, build_single_pin_route_doc,
@@ -59,6 +59,44 @@ use tokio::sync::watch;
 
 pub const WINDOW_TITLES: [&str; 2] = ["Genshin Impact", "原神"];
 pub const NAV_MARK_CONFIRM_DIST_M: f64 = 25.0;
+
+/// Hotkey actions whose handlers are pure app-state changes safe to dispatch during offline replay.
+/// Excludes `sync` (real game window capture), `switch` (real window focus), and `debug` (writes a
+/// diagnostic bundle).
+pub const REPLAY_DISPATCHABLE_HOTKEYS: &[&str] = &[
+    "nav_next",
+    "nav_unlock",
+    "nav_guide",
+    "nav_layout",
+    "nav_toggle",
+    "nav_mark",
+    "nav_undo",
+    "radar_toggle",
+];
+
+pub fn is_replay_dispatchable_hotkey(action: &str) -> bool {
+    REPLAY_DISPATCHABLE_HOTKEYS.contains(&action)
+}
+
+/// Shared production hotkey dispatcher invoked by both live `GenshinHelper.exe` and `gh-sim` replay.
+pub fn dispatch_hotkey_action(state: &Arc<AppState>, action: &str) {
+    match action {
+        "sync" => state.handle_hotkey_action(),
+        "debug" => {
+            let _ = state.handle_debug_action("hotkey_debug", "", true);
+        }
+        "switch" => state.handle_switch_hotkey(),
+        "nav_mark" => state.handle_nav_mark_hotkey(),
+        "nav_undo" => state.handle_nav_undo_hotkey(),
+        "nav_guide" => state.handle_nav_guide_hotkey(),
+        "nav_next" => state.handle_nav_next_hotkey(),
+        "nav_layout" => state.handle_nav_layout_hotkey(),
+        "nav_toggle" => state.handle_nav_toggle_hotkey(),
+        "nav_unlock" => state.handle_nav_unlock_hotkey(),
+        "radar_toggle" => state.handle_radar_toggle_hotkey(),
+        _ => {}
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct GameState {
@@ -228,6 +266,9 @@ pub struct AppState {
     pub radar_map: Mutex<Option<RadarMapController>>,
     pub radar_active: AtomicBool,
     pub radar_pins: Mutex<Option<(i32, Arc<Vec<RadarPin>>)>>,
+    /// Screen offset passed to `RadarMapController::new_with_offset` (`(0, 0)` live;
+    /// `OFFSCREEN_TEST_OFFSET` in tests and offline replay).
+    pub radar_screen_offset: (i32, i32),
     pub pin_icon_cache: PinIconCache,
     pub hud_toast: Arc<HudToastOverlay>,
     pub audio: Arc<AudioFeedback>,
@@ -267,6 +308,30 @@ impl AppState {
                 build_fields(),
             );
         }
+    }
+
+    pub fn record_web_input(&self, callback: &str, payload: &Value) {
+        if let Some(srec) = self
+            .session_recorder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            && srec.active()
+        {
+            srec.record_web_input(
+                self.start_instant.elapsed().as_secs_f64(),
+                callback,
+                payload,
+            );
+        }
+    }
+
+    pub fn snapshot_nav_state(&self) -> NavFrameSnapshot {
+        let nav = self
+            .nav_controller
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        snapshot_nav_state(&nav)
     }
 
     pub fn floor_resolver(&self) -> AppFloorResolver {
@@ -2231,10 +2296,7 @@ impl AppState {
                     );
                 }
             });
-        #[cfg(test)]
-        let radar_offset = gh_hud::layered::OFFSCREEN_TEST_OFFSET;
-        #[cfg(not(test))]
-        let radar_offset = (0, 0);
+        let radar_offset = self.radar_screen_offset;
         let ctrl = RadarMapController::new_with_offset(
             assets,
             cfg.radar_rect,
@@ -2755,6 +2817,7 @@ fn make_test_state_full(
         radar_map: Mutex::new(None),
         radar_active: AtomicBool::new(false),
         radar_pins: Mutex::new(None),
+        radar_screen_offset: gh_hud::layered::OFFSCREEN_TEST_OFFSET,
         pin_icon_cache: PinIconCache::new(
             test_icons_dir,
             Arc::new(HoYoLABLabelCatalog::new()),

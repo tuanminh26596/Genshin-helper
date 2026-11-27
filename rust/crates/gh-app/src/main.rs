@@ -486,6 +486,7 @@ async fn main() {
         radar_map: Mutex::new(None),
         radar_active: AtomicBool::new(false),
         radar_pins: Mutex::new(None),
+        radar_screen_offset: (0, 0),
         pin_icon_cache: PinIconCache::new(
             paths.cache_dir.join("lan_icons"),
             Arc::new(label_catalog.clone()),
@@ -547,22 +548,7 @@ async fn main() {
                 {
                     srec.record_hotkey_event(st.start_instant.elapsed().as_secs_f64(), &act_owned);
                 }
-                match act_owned.as_str() {
-                    "sync" => st.handle_hotkey_action(),
-                    "debug" => {
-                        let _ = st.handle_debug_action("hotkey_debug", "", true);
-                    }
-                    "switch" => st.handle_switch_hotkey(),
-                    "nav_mark" => st.handle_nav_mark_hotkey(),
-                    "nav_undo" => st.handle_nav_undo_hotkey(),
-                    "nav_guide" => st.handle_nav_guide_hotkey(),
-                    "nav_next" => st.handle_nav_next_hotkey(),
-                    "nav_layout" => st.handle_nav_layout_hotkey(),
-                    "nav_toggle" => st.handle_nav_toggle_hotkey(),
-                    "nav_unlock" => st.handle_nav_unlock_hotkey(),
-                    "radar_toggle" => st.handle_radar_toggle_hotkey(),
-                    _ => {}
-                }
+                gh_app::dispatch_hotkey_action(&st, &act_owned);
             }),
             enabled,
             None,

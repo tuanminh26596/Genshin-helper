@@ -4,7 +4,7 @@
 //! re-encodes with `libx264rgb -qp 0 -preset <preset>` (bit-exact lossless RGB), copies
 //! `assets_cache/`, and writes an updated `info.json` into a new output directory.
 
-use gh_app::session_recorder::validate_ffmpeg_path;
+use gh_app::session_recorder::{WEB_INPUTS_FILENAME, validate_ffmpeg_path};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs::{self, File};
@@ -125,6 +125,19 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<usize, String> {
     Ok(copied)
 }
 
+fn copy_optional_sidecar(src_dir: &Path, dst_dir: &Path, filename: &str) -> Result<bool, String> {
+    let src = src_dir.join(filename);
+    if !src.is_file() {
+        return Ok(false);
+    }
+    fs::create_dir_all(dst_dir)
+        .map_err(|e| format!("failed to create directory {}: {e}", dst_dir.display()))?;
+    let dst = dst_dir.join(filename);
+    fs::copy(&src, &dst)
+        .map_err(|e| format!("failed to copy {} -> {}: {e}", src.display(), dst.display()))?;
+    Ok(true)
+}
+
 pub fn default_compact_out_dir(source_dir: &Path) -> PathBuf {
     let name = source_dir
         .file_name()
@@ -217,11 +230,12 @@ pub fn run_compact(opts: &CompactOptions) -> Result<CompactReport, String> {
     fs::create_dir_all(&out_dir)
         .map_err(|e| format!("failed to create {}: {e}", out_dir.display()))?;
 
-    // Copy assets_cache/ so compacted session stays 100% hermetic offline
+    // Copy assets_cache/ and optional web_inputs.jsonl so compacted session stays 100% hermetic offline
     let _ = copy_dir_recursive(
         &opts.source_dir.join("assets_cache"),
         &out_dir.join("assets_cache"),
     )?;
+    let _ = copy_optional_sidecar(&opts.source_dir, &out_dir, WEB_INPUTS_FILENAME)?;
 
     // Write trimmed & re-indexed meta.jsonl
     let kept_slice = &rows[(start_frame - 1)..end_frame];
@@ -498,6 +512,33 @@ mod tests {
         assert_eq!(info["codec"], json!("libx265"));
         assert_eq!(info["trimmed_range"], json!([10, 59]));
         assert_eq!(info["provenance"], provenance);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compact_preserves_web_inputs_jsonl_when_present_and_ignores_when_absent() {
+        let root = std::env::temp_dir().join(format!(
+            "gh_sim_compact_web_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("sess_src");
+        let dst = root.join("sess_dst");
+        fs::create_dir_all(&src).unwrap();
+
+        // Absent -> returns false without creating file
+        assert!(!copy_optional_sidecar(&src, &dst, WEB_INPUTS_FILENAME).unwrap());
+        assert!(!dst.join(WEB_INPUTS_FILENAME).exists());
+
+        // Present -> copied byte-for-byte
+        let content = "{\"ts\":1.0,\"callback\":\"on_nearby_pins\",\"payload\":{\"pins\":[]}}\n";
+        fs::write(src.join(WEB_INPUTS_FILENAME), content).unwrap();
+        assert!(copy_optional_sidecar(&src, &dst, WEB_INPUTS_FILENAME).unwrap());
+        assert_eq!(
+            fs::read_to_string(dst.join(WEB_INPUTS_FILENAME)).unwrap(),
+            content
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
