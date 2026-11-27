@@ -30,6 +30,63 @@ impl AppServerCallbacks {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
     }
+
+    fn record_in_game_feedback(&self, event_type: &str, status: &str, seq: u64, fb: &InGameFeedback<'_>) {
+        self.state.record_session_event_with("hud_feedback", || {
+            json!({
+                "event_type": event_type,
+                "status": status,
+                "seq": seq,
+                "shown": fb.shown,
+                "reason": fb.reason,
+                "output": fb.output,
+                "delivered": fb.delivered,
+                "sound": fb.sound,
+                "sound_played": fb.sound_played,
+            })
+        });
+    }
+}
+
+/// Whether the in-game HUD toast + chime should answer this web feedback.
+///
+/// A position-only M-Map sync (`SYNC_POSITION_ONLY` / `synced`) is always confirmed in game:
+/// the HoYoLAB page never beeps or toasts for it, so deferring to a visible map tab (for example
+/// on a second monitor) left the user with no feedback at all. Other feedback (marks, errors)
+/// keeps the visibility rule because the page plays its own beep for those.
+fn app_owns_feedback(event_type: &str, status: &str, native_feedback_wanted: impl FnOnce() -> bool) -> bool {
+    let position_only_sync =
+        event_type.eq_ignore_ascii_case("SYNC_POSITION_ONLY") && status.eq_ignore_ascii_case("synced");
+    position_only_sync || native_feedback_wanted()
+}
+
+/// What the app did in game for one web feedback. Recorded as a `hud_feedback` session event
+/// next to the `web_feedback` it answers, so `gh-sim qa` can check from a live recording that
+/// every confirmed M-Map sync got a toast and a chime.
+struct InGameFeedback<'a> {
+    shown: bool,
+    /// Why nothing was shown (empty when `shown`).
+    reason: &'a str,
+    /// `toast`, `nav_flash`, or empty when nothing was shown.
+    output: &'a str,
+    /// The toast/flash was handed to its HUD window (`show_toast` posted it).
+    delivered: bool,
+    sound: &'a str,
+    /// The chime was queued (false when the user muted sounds).
+    sound_played: bool,
+}
+
+impl<'a> InGameFeedback<'a> {
+    fn skipped(reason: &'a str) -> Self {
+        Self {
+            shown: false,
+            reason,
+            output: "",
+            delivered: false,
+            sound: "",
+            sound_played: false,
+        }
+    }
 }
 
 impl ServerCallbacks for AppServerCallbacks {
@@ -197,13 +254,28 @@ impl ServerCallbacks for AppServerCallbacks {
                 self.state
                     .nav_hud
                     .flash(&msg, gh_hud::nav_hud::HudPalette::Warning, 3.5);
-                self.state.audio.play("warning", false);
+                let sound_played = self.state.audio.play("warning", false);
+                self.record_in_game_feedback(
+                    &event_type,
+                    &status,
+                    seq,
+                    &InGameFeedback {
+                        shown: true,
+                        reason: "",
+                        output: "nav_flash",
+                        delivered: true,
+                        sound: "warning",
+                        sound_played,
+                    },
+                );
                 return Ok(json!(true));
             }
+            self.record_in_game_feedback(&event_type, &status, seq, &InGameFeedback::skipped("page_handles"));
             return Ok(json!(false));
         }
 
-        if !self.state.native_feedback_wanted() {
+        if !app_owns_feedback(&event_type, &status, || self.state.native_feedback_wanted()) {
+            self.record_in_game_feedback(&event_type, &status, seq, &InGameFeedback::skipped("map_tab_visible"));
             return Ok(json!(false));
         }
 
@@ -214,57 +286,40 @@ impl ServerCallbacks for AppServerCallbacks {
             .unwrap_or_else(|e| e.into_inner())
             .rect;
 
-        match status.as_str() {
-            "marked" => {
-                let title = if title_raw.is_empty() {
-                    t("toast.marked.title", &[])
-                } else {
-                    title_raw
-                };
-                self.state
-                    .hud_toast
-                    .show_toast(&title, &detail_raw, ToastKind::Success, 2400, rect);
-                self.state.audio.play("success", false);
-                Ok(json!(true))
+        let (title_key, kind, duration_ms, sound) = match status.as_str() {
+            "marked" => ("toast.marked.title", ToastKind::Success, 2400, "success"),
+            "already_marked" => ("toast.already_marked.title", ToastKind::Info, 2200, "info"),
+            "synced" => ("toast.synced.title", ToastKind::Info, 2000, "info"),
+            "no_nearby" | "no_coords" | "error" => ("toast.no_nearby.title", ToastKind::Warning, 2500, "warning"),
+            _ => {
+                self.record_in_game_feedback(&event_type, &status, seq, &InGameFeedback::skipped("unknown_status"));
+                return Ok(json!(false));
             }
-            "already_marked" => {
-                let title = if title_raw.is_empty() {
-                    t("toast.already_marked.title", &[])
-                } else {
-                    title_raw
-                };
-                self.state
-                    .hud_toast
-                    .show_toast(&title, &detail_raw, ToastKind::Info, 2200, rect);
-                self.state.audio.play("info", false);
-                Ok(json!(true))
-            }
-            "synced" => {
-                let title = if title_raw.is_empty() {
-                    t("toast.synced.title", &[])
-                } else {
-                    title_raw
-                };
-                self.state
-                    .hud_toast
-                    .show_toast(&title, &detail_raw, ToastKind::Info, 2000, rect);
-                self.state.audio.play("info", false);
-                Ok(json!(true))
-            }
-            "no_nearby" | "no_coords" | "error" => {
-                let title = if title_raw.is_empty() {
-                    t("toast.no_nearby.title", &[])
-                } else {
-                    title_raw
-                };
-                self.state
-                    .hud_toast
-                    .show_toast(&title, &detail_raw, ToastKind::Warning, 2500, rect);
-                self.state.audio.play("warning", false);
-                Ok(json!(true))
-            }
-            _ => Ok(json!(false)),
-        }
+        };
+        let title = if title_raw.is_empty() {
+            t(title_key, &[])
+        } else {
+            title_raw
+        };
+        let delivered = self
+            .state
+            .hud_toast
+            .show_toast(&title, &detail_raw, kind, duration_ms, rect);
+        let sound_played = self.state.audio.play(sound, false);
+        self.record_in_game_feedback(
+            &event_type,
+            &status,
+            seq,
+            &InGameFeedback {
+                shown: true,
+                reason: "",
+                output: "toast",
+                delivered,
+                sound,
+                sound_played,
+            },
+        );
+        Ok(json!(true))
     }
 
     fn on_quick_switch(&self) -> CoreResult<String> {
@@ -1336,6 +1391,20 @@ mod tests {
     }
 
     #[test]
+    fn m_map_position_sync_is_always_confirmed_in_game_even_with_a_visible_map_tab() {
+        // A visible map tab on a second monitor makes native_feedback_wanted() false.
+        assert!(app_owns_feedback("SYNC_POSITION_ONLY", "synced", || false));
+        assert!(app_owns_feedback("sync_position_only", "SYNCED", || false));
+        // Marks and errors keep deferring to a visible page (it beeps itself).
+        assert!(!app_owns_feedback("SYNC_AND_MARK", "marked", || false));
+        assert!(!app_owns_feedback("SYNC_POSITION_ONLY", "error", || false));
+        assert!(!app_owns_feedback("SYNC_AND_MARK", "synced", || false));
+        // Nobody can see a map tab: the app answers everything, as before.
+        assert!(app_owns_feedback("SYNC_AND_MARK", "marked", || true));
+        assert!(app_owns_feedback("SYNC_POSITION_ONLY", "error", || true));
+    }
+
+    #[test]
     fn on_action_feedback_records_web_feedback_event_only_when_recorder_active() {
         let seq_id = CB_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp_root = std::env::temp_dir().join(format!(
@@ -1380,18 +1449,33 @@ mod tests {
             }))
             .unwrap();
 
+        // Every web feedback is followed by one `hud_feedback` saying what the game showed.
         let evs = rec.take_pending_events_for_test();
-        assert_eq!(evs.len(), 2);
+        assert_eq!(evs.len(), 4, "events: {evs:?}");
         assert_eq!(evs[0]["kind"], "web_feedback");
         assert_eq!(evs[0]["event_type"], "SYNC_POSITION_ONLY");
         assert_eq!(evs[0]["status"], "synced");
         assert_eq!(evs[0]["seq"], 42);
         assert!(evs[0]["ts"].as_f64().is_some());
 
-        assert_eq!(evs[1]["kind"], "web_feedback");
-        assert_eq!(evs[1]["event_type"], "NAV_MARK");
-        assert_eq!(evs[1]["status"], "marked");
-        assert_eq!(evs[1]["seq"], 0);
+        // A confirmed M-Map sync always gets a toast + info chime in game, whatever the tab state.
+        assert_eq!(evs[1]["kind"], "hud_feedback");
+        assert_eq!(evs[1]["event_type"], "SYNC_POSITION_ONLY");
+        assert_eq!(evs[1]["seq"], 42);
+        assert_eq!(evs[1]["shown"], true);
+        assert_eq!(evs[1]["output"], "toast");
+        assert_eq!(evs[1]["sound"], "info");
+
+        assert_eq!(evs[2]["kind"], "web_feedback");
+        assert_eq!(evs[2]["event_type"], "NAV_MARK");
+        assert_eq!(evs[2]["status"], "marked");
+        assert_eq!(evs[2]["seq"], 0);
+
+        // A successful NAV_MARK is the page's to confirm.
+        assert_eq!(evs[3]["kind"], "hud_feedback");
+        assert_eq!(evs[3]["event_type"], "NAV_MARK");
+        assert_eq!(evs[3]["shown"], false);
+        assert_eq!(evs[3]["reason"], "page_handles");
 
         // Finished recorder records nothing
         rec.finish();

@@ -295,6 +295,13 @@ pub struct MMapOpenLatency {
     pub engine_synced_s: Option<f64>,
     pub broadcast_s: Option<f64>,
     pub hud_s: Option<f64>,
+    /// Whether the game answered the web `synced` with a toast (`hud_feedback` event).
+    /// `None` when the web never confirmed or the session predates `hud_feedback` events.
+    #[serde(default)]
+    pub in_game_feedback: Option<bool>,
+    /// Reason the app gave for not showing anything (`hud_feedback.reason`), when it said one.
+    #[serde(default)]
+    pub in_game_skip_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -303,6 +310,15 @@ pub struct MMapLatencySummary {
     pub median_hud_s: Option<f64>,
     pub max_hud_s: Option<f64>,
     pub no_hud_count: usize,
+    /// The recording carries `hud_feedback` events, so in-game output can be checked.
+    #[serde(default)]
+    pub in_game_audited: bool,
+    /// Web-confirmed M-opens answered in game with a toast.
+    #[serde(default)]
+    pub in_game_ok: usize,
+    /// Web-confirmed M-opens with no in-game toast: the user got no confirmation.
+    #[serde(default)]
+    pub in_game_missing: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -686,6 +702,10 @@ struct MetaAppEvent {
     kind: String,
     seq: u64,
     status: Option<String>,
+    event_type: Option<String>,
+    shown: Option<bool>,
+    delivered: Option<bool>,
+    reason: Option<String>,
 }
 
 struct MMapOpenSpan {
@@ -720,6 +740,14 @@ pub fn compute_live_mmap_latency(records: &[Value]) -> LiveMMapLatency {
                     kind: kind.to_owned(),
                     seq: parse_event_seq(ev.get("seq")),
                     status: ev.get("status").and_then(Value::as_str).map(str::to_owned),
+                    event_type: ev.get("event_type").and_then(Value::as_str).map(str::to_owned),
+                    shown: ev.get("shown").and_then(Value::as_bool),
+                    delivered: ev.get("delivered").and_then(Value::as_bool),
+                    reason: ev
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .filter(|r| !r.is_empty())
+                        .map(str::to_owned),
                 });
             }
         }
@@ -745,6 +773,7 @@ pub fn compute_live_mmap_latency(records: &[Value]) -> LiveMMapLatency {
     }
 
     events.sort_by(|a, b| a.ts.total_cmp(&b.ts));
+    let in_game_audited = events.iter().any(|e| e.kind == "hud_feedback");
 
     let mut seen_non_map_m = false;
     let mut cur_open: Option<MMapOpenSpan> = None;
@@ -819,12 +848,34 @@ pub fn compute_live_mmap_latency(records: &[Value]) -> LiveMMapLatency {
             })
             .and_then(|f| f.map_id);
 
+        // The app records `hud_feedback` in the same call that handles the web feedback, so the
+        // answer sits right after it with the same event type and seq.
+        let in_game_ev = hud_ev.filter(|_| in_game_audited).map(|web| {
+            events.iter().find(|e| {
+                e.kind == "hud_feedback"
+                    && e.seq == web.seq
+                    && e.event_type.as_deref().map(str::to_ascii_uppercase)
+                        == web.event_type.as_deref().map(str::to_ascii_uppercase)
+                    && e.ts >= web.ts - 0.5
+                    && e.ts <= web.ts + 2.0
+            })
+        });
+        let in_game_feedback = in_game_ev.map(|answer| {
+            answer.is_some_and(|e| e.shown == Some(true) && e.delivered != Some(false))
+        });
+        let in_game_skip_reason = in_game_ev
+            .flatten()
+            .filter(|e| e.shown != Some(true))
+            .and_then(|e| e.reason.clone());
+
         opens.push(MMapOpenLatency {
             open_ts: span.open_ts,
             map_id,
             engine_synced_s: span.engine_synced_ts.map(|t| round3(t - span.open_ts)),
             broadcast_s: broadcast_ev.map(|e| round3(e.ts - span.open_ts)),
             hud_s: hud_ev.map(|e| round3(e.ts - span.open_ts)),
+            in_game_feedback,
+            in_game_skip_reason,
         });
     }
 
@@ -836,6 +887,9 @@ pub fn compute_live_mmap_latency(records: &[Value]) -> LiveMMapLatency {
         median_hud_s: median_f64(&hud_vals).map(round3),
         max_hud_s: hud_vals.iter().copied().reduce(f64::max).map(round3),
         no_hud_count,
+        in_game_audited,
+        in_game_ok: opens.iter().filter(|o| o.in_game_feedback == Some(true)).count(),
+        in_game_missing: opens.iter().filter(|o| o.in_game_feedback == Some(false)).count(),
     };
 
     LiveMMapLatency {
@@ -1095,7 +1149,7 @@ fn fmt_opt_w(v: Option<f64>) -> String {
 
 pub fn format_qa_header() -> String {
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:>6}  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:>6}  {}",
         "Session",
         "Status",
         "Frames",
@@ -1105,9 +1159,27 @@ pub fn format_qa_header() -> String {
         "vs Meta[ref]",
         "Arrow (b/c flips)",
         "HUD(p50/max)",
+        "InGame",
         "Time",
         "Reason"
     )
+}
+
+/// `ok/total` web-confirmed M-opens that got an in-game toast, `MISS` when any did not, `-` when
+/// none were confirmed, `n/a` for recordings without `hud_feedback` events.
+fn format_in_game_col(lat: &LiveMMapLatency) -> String {
+    if !lat.available || !lat.summary.in_game_audited {
+        return "n/a".to_owned();
+    }
+    let ok = lat.summary.in_game_ok;
+    let total = ok + lat.summary.in_game_missing;
+    if total == 0 {
+        "-".to_owned()
+    } else if lat.summary.in_game_missing == 0 {
+        format!("{ok}/{total}")
+    } else {
+        format!("{ok}/{total} MISS")
+    }
 }
 
 pub fn format_qa_row(r: &QaSessionResult) -> String {
@@ -1148,8 +1220,9 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
         (true, Some(med), Some(max)) => format!("{med:.1}/{max:.1}s"),
         _ => "n/a".to_owned(),
     };
+    let in_game_col = format_in_game_col(&r.live_mmap_latency);
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:>5.1}s  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:>5.1}s  {}",
         r.session_name,
         r.status,
         r.frames,
@@ -1159,6 +1232,7 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
         meta_col,
         arrow_col,
         hud_col,
+        in_game_col,
         r.wall_elapsed_s,
         r.reason
     )
@@ -2428,6 +2502,7 @@ mod tests {
                 median_hud_s: Some(0.9),
                 max_hud_s: Some(4.2),
                 no_hud_count: 0,
+                ..MMapLatencySummary::default()
             },
         };
         let formatted_hud = format_qa_row(&row_with_hud);
@@ -2435,6 +2510,83 @@ mod tests {
             formatted_hud.contains("0.9/4.2s"),
             "unexpected HUD column in row: {formatted_hud}"
         );
+        assert!(hdr.contains("InGame"), "header missing InGame: {hdr}");
+
+        let mut row_missing = row_with_hud;
+        row_missing.live_mmap_latency.summary.in_game_audited = true;
+        row_missing.live_mmap_latency.summary.in_game_ok = 1;
+        row_missing.live_mmap_latency.summary.in_game_missing = 2;
+        let formatted_missing = format_qa_row(&row_missing);
+        assert!(
+            formatted_missing.contains("1/3 MISS"),
+            "missing in-game feedback must show: {formatted_missing}"
+        );
+        row_missing.live_mmap_latency.summary.in_game_ok = 3;
+        row_missing.live_mmap_latency.summary.in_game_missing = 0;
+        let formatted_ok = format_qa_row(&row_missing);
+        assert!(
+            formatted_ok.contains("3/3") && !formatted_ok.contains("MISS"),
+            "unexpected InGame column: {formatted_ok}"
+        );
+    }
+
+    #[test]
+    fn live_in_game_feedback_audit_flags_web_synced_opens_without_a_toast() {
+        let tmp = TempDir::new("gh_sim_in_game_fb");
+        let mp = tmp.0.join("meta.jsonl");
+
+        // 3 M-opens, each confirmed by the web (`synced`):
+        // - #1 answered in game with a toast (ok).
+        // - #2 the app skipped it because a map tab was visible (the 2nd-monitor regression).
+        // - #3 no `hud_feedback` answer at all.
+        let lines = vec![
+            json!({"i": 1, "ts": 9.5, "mode": "minimap", "state": "TRACKING", "map_id": 2}),
+            json!({"i": 2, "ts": 10.0, "mode": "map_m", "state": "MAP_M_SyncedIdle", "events": [
+                {"ts": 10.3, "kind": "sync_broadcast", "seq": 10, "msg_type": "SYNC_POSITION_ONLY", "map_id": 2}
+            ]}),
+            json!({"i": 3, "ts": 11.0, "mode": "minimap", "state": "TRACKING", "map_id": 2, "events": [
+                {"ts": 10.6, "kind": "web_feedback", "event_type": "SYNC_POSITION_ONLY", "status": "synced", "seq": 10},
+                {"ts": 10.61, "kind": "hud_feedback", "event_type": "SYNC_POSITION_ONLY", "status": "synced", "seq": 10,
+                 "shown": true, "reason": "", "output": "toast", "delivered": true, "sound": "info", "sound_played": true}
+            ]}),
+            json!({"i": 4, "ts": 20.0, "mode": "map_m", "state": "MAP_M_SyncedIdle", "events": [
+                {"ts": 20.3, "kind": "sync_broadcast", "seq": 20, "msg_type": "SYNC_POSITION_ONLY", "map_id": 2}
+            ]}),
+            json!({"i": 5, "ts": 21.0, "mode": "minimap", "state": "TRACKING", "map_id": 2, "events": [
+                {"ts": 20.6, "kind": "web_feedback", "event_type": "SYNC_POSITION_ONLY", "status": "synced", "seq": 20},
+                {"ts": 20.61, "kind": "hud_feedback", "event_type": "SYNC_POSITION_ONLY", "status": "synced", "seq": 20,
+                 "shown": false, "reason": "map_tab_visible", "output": "", "delivered": false, "sound": "", "sound_played": false}
+            ]}),
+            json!({"i": 6, "ts": 30.0, "mode": "map_m", "state": "MAP_M_SyncedIdle", "events": [
+                {"ts": 30.3, "kind": "sync_broadcast", "seq": 30, "msg_type": "SYNC_POSITION_ONLY", "map_id": 2}
+            ]}),
+            json!({"i": 7, "ts": 31.0, "mode": "minimap", "state": "TRACKING", "map_id": 2, "events": [
+                {"ts": 30.6, "kind": "web_feedback", "event_type": "SYNC_POSITION_ONLY", "status": "synced", "seq": 30},
+                // An answer for another seq must not count for this open.
+                {"ts": 30.61, "kind": "hud_feedback", "event_type": "SYNC_POSITION_ONLY", "status": "synced", "seq": 31,
+                 "shown": true, "output": "toast", "delivered": true}
+            ]}),
+        ];
+        let mut content = String::new();
+        for l in &lines {
+            content.push_str(&serde_json::to_string(l).unwrap());
+            content.push('\n');
+        }
+        std::fs::write(&mp, content).unwrap();
+
+        let lat = load_live_mmap_latency(&mp);
+        assert!(lat.available);
+        assert_eq!(lat.opens.len(), 3);
+        assert_eq!(lat.opens[0].in_game_feedback, Some(true));
+        assert_eq!(lat.opens[0].in_game_skip_reason, None);
+        assert_eq!(lat.opens[1].in_game_feedback, Some(false));
+        assert_eq!(lat.opens[1].in_game_skip_reason.as_deref(), Some("map_tab_visible"));
+        assert_eq!(lat.opens[2].in_game_feedback, Some(false));
+        assert_eq!(lat.opens[2].in_game_skip_reason, None);
+        assert!(lat.summary.in_game_audited);
+        assert_eq!(lat.summary.in_game_ok, 1);
+        assert_eq!(lat.summary.in_game_missing, 2);
+        assert_eq!(format_in_game_col(&lat), "1/3 MISS");
     }
 
     #[test]
@@ -2521,6 +2673,11 @@ mod tests {
         assert_eq!(lat.summary.median_hud_s, Some(2.55));
         assert_eq!(lat.summary.max_hud_s, Some(4.2));
         assert_eq!(lat.summary.no_hud_count, 1);
+
+        // Recorded before `hud_feedback` existed: in-game output cannot be checked.
+        assert!(!lat.summary.in_game_audited);
+        assert!(lat.opens.iter().all(|o| o.in_game_feedback.is_none()));
+        assert_eq!(format_in_game_col(&lat), "n/a");
 
         // Legacy meta with no `events` key reports unavailable
         let mp_legacy = tmp.0.join("meta_legacy.jsonl");
