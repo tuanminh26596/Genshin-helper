@@ -117,9 +117,85 @@ pub enum TickMode {
     IdleClosed,
 }
 
+pub const fn tick_mode_str(mode: TickMode) -> &'static str {
+    match mode {
+        TickMode::MinimapFast => "minimap_fast",
+        TickMode::Minimap => "minimap",
+        TickMode::MapM => "map_m",
+        TickMode::MapMPaused => "map_m_paused",
+        TickMode::IdleClosed => "idle_closed",
+    }
+}
+
+/// Bucket name used for `unrecorded_ticks` in `meta.jsonl`: matches the existing `mode` strings,
+/// with a dedicated `"map_m_settling"` key for M-Map ticks involving `MapState::Settling` before or
+/// after the step.
+pub const fn unrecorded_tick_bucket(
+    mode: TickMode,
+    map_pre_state: Option<MapState>,
+    map_post_state: Option<MapState>,
+) -> &'static str {
+    if matches!(mode, TickMode::MapM)
+        && (matches!(map_pre_state, Some(MapState::Settling))
+            || matches!(map_post_state, Some(MapState::Settling)))
+    {
+        "map_m_settling"
+    } else {
+        tick_mode_str(mode)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionFrameDecision {
+    Drop,
+    KeepByGate,
+    KeepForcedSettling,
+}
+
+impl SessionFrameDecision {
+    pub const fn should_keep(self) -> bool {
+        !matches!(self, Self::Drop)
+    }
+
+    pub const fn is_forced(self) -> bool {
+        matches!(self, Self::KeepForcedSettling)
+    }
+}
+
+/// Pure keep/drop decision for `SessionRecorder` frames on each tracking-loop tick:
+/// - Recording inactive -> `Drop`.
+/// - Inter-frame fps gate elapsed (`gate_ok`) -> `KeepByGate`.
+/// - Gate not elapsed + `TickMode::MapM` with `MapState::Settling` before or after the step ->
+///   `KeepForcedSettling` (keeps every open, settling, and sync transition tick by reusing the
+///   already-captured M-Map frame).
+/// - All other ticks -> `Drop`.
+pub const fn decide_session_frame_keep(
+    recording_active: bool,
+    gate_ok: bool,
+    mode: TickMode,
+    map_pre_state: Option<MapState>,
+    map_post_state: Option<MapState>,
+) -> SessionFrameDecision {
+    if !recording_active {
+        return SessionFrameDecision::Drop;
+    }
+    if gate_ok {
+        return SessionFrameDecision::KeepByGate;
+    }
+    if matches!(mode, TickMode::MapM)
+        && (matches!(map_pre_state, Some(MapState::Settling))
+            || matches!(map_post_state, Some(MapState::Settling)))
+    {
+        return SessionFrameDecision::KeepForcedSettling;
+    }
+    SessionFrameDecision::Drop
+}
+
 pub struct TickOutput {
     pub mode: TickMode,
     pub full_frame: Option<Arc<FrameBuf>>,
+    /// M-Map FSM state immediately before `step_frame` ran (populated only when `step_map_frame` executes).
+    pub map_pre_state: Option<MapState>,
     pub step_res: Option<MapStepResult>,
     pub pose: Option<MinimapPose>,
     /// M-Map view tracking result (route guidance only).
@@ -282,6 +358,10 @@ pub struct TickParams {
     /// When `true`, captures a single full-client frame and slices the HUD crop from that exact
     /// same buffer so `SessionRecorder` and CV share zero-skew pixels without an extra capture.
     pub capture_session_frame: bool,
+    /// `true` whenever a `SessionRecorder` is active on this tick (even when `capture_session_frame`
+    /// is `false` due to the 45 ms fps gate), allowing `step_map_frame` to reuse its already-captured
+    /// full frame on Settling ticks without adding any capture to minimap or closed-probe ticks.
+    pub session_rec_active: bool,
 }
 
 fn crop_top_left_bgra(full: &FrameBuf, w: usize, h: usize) -> Option<FrameBuf> {
@@ -316,11 +396,15 @@ fn step_map_frame(
     overlay_capture_safe: bool,
 ) -> TickOutput {
     let tick_ts = resolve_tick_ts(state, p.now_s);
-    let step = state
-        .state_machine
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .step_frame(Some(frame.as_view()));
+    let (pre_state, step) = {
+        let mut sm = state
+            .state_machine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let pre = sm.state();
+        let res = sm.step_frame(Some(frame.as_view()));
+        (pre, res)
+    };
     let frame = Arc::new(frame);
     let view = match state.mmap_view.as_ref() {
         Some(engine) if p.guide_view && step.state != MapState::Closed => {
@@ -328,7 +412,15 @@ fn step_map_frame(
         }
         _ => None,
     };
-    let (session_frame, session_capture_path) = if p.capture_session_frame {
+    let keep = decide_session_frame_keep(
+        p.session_rec_active,
+        p.capture_session_frame,
+        TickMode::MapM,
+        Some(pre_state),
+        Some(step.state),
+    )
+    .should_keep();
+    let (session_frame, session_capture_path) = if keep {
         let cap_path = if overlay_capture_safe {
             "wgc_window"
         } else if state.capturer.is_region_hdr(p.cl, p.ct, p.cw, p.ch) {
@@ -343,6 +435,7 @@ fn step_map_frame(
     TickOutput {
         mode: TickMode::MapM,
         full_frame: Some(frame),
+        map_pre_state: Some(pre_state),
         step_res: Some(step),
         pose: None,
         view,
@@ -396,6 +489,7 @@ pub fn run_tick_worker(state: &AppState, p: TickParams) -> TickOutput {
                 return TickOutput {
                     mode: TickMode::MinimapFast,
                     full_frame: None,
+                    map_pre_state: None,
                     step_res: None,
                     pose: Some(pose),
                     view: None,
@@ -470,6 +564,7 @@ pub fn run_tick_worker(state: &AppState, p: TickParams) -> TickOutput {
                     return TickOutput {
                         mode: TickMode::MapM,
                         full_frame: None,
+                        map_pre_state: None,
                         step_res: None,
                         pose: None,
                         view: None,
@@ -497,6 +592,7 @@ pub fn run_tick_worker(state: &AppState, p: TickParams) -> TickOutput {
             return TickOutput {
                 mode: TickMode::MapMPaused,
                 full_frame: None,
+                map_pre_state: None,
                 step_res: None,
                 pose: None,
                 view: None,
@@ -619,6 +715,7 @@ pub fn run_tick_worker(state: &AppState, p: TickParams) -> TickOutput {
                 return TickOutput {
                     mode: TickMode::Minimap,
                     full_frame: None,
+                    map_pre_state: None,
                     step_res: None,
                     pose: Some(pose),
                     view: None,
@@ -647,6 +744,7 @@ pub fn run_tick_worker(state: &AppState, p: TickParams) -> TickOutput {
         return TickOutput {
             mode: TickMode::IdleClosed,
             full_frame: None,
+            map_pre_state: None,
             step_res: None,
             pose: None,
             view: None,
@@ -687,6 +785,7 @@ pub fn run_tick_worker(state: &AppState, p: TickParams) -> TickOutput {
         return TickOutput {
             mode: TickMode::MapM,
             full_frame: None,
+            map_pre_state: None,
             step_res: None,
             pose: None,
             view: None,
@@ -2003,7 +2102,7 @@ pub async fn run_tracking_loop(state: Arc<AppState>, mut shutdown_rx: watch::Rec
             2
         };
 
-        let cursor_client = if route_needs_mmap || want_session_frame {
+        let cursor_client = if route_needs_mmap || session_rec_active {
             WindowFinder::cursor_screen_pos()
                 .map(|(x, y)| (f64::from(x - left), f64::from(y - top)))
                 .filter(|&(x, y)| x >= 0.0 && y >= 0.0 && x < f64::from(width) && y < f64::from(height))
@@ -2029,6 +2128,7 @@ pub async fn run_tracking_loop(state: Arc<AppState>, mut shutdown_rx: watch::Rec
             now_s: None,
             cursor_client,
             capture_session_frame: want_session_frame,
+            session_rec_active,
         };
         let tick_out = if let Some(ref w) = worker {
             match w.run_tick(Arc::clone(&state), tick_params).await {
@@ -2046,45 +2146,55 @@ pub async fn run_tracking_loop(state: Arc<AppState>, mut shutdown_rx: watch::Rec
         };
 
         // Enqueue the exact atomic frame captured inside `run_tick_worker` (zero second capture,
-        // zero extra await, zero timestamp skew against the tracker pose).
-        if let Some(ref srec) = session_rec_opt
-            && let Some(ref frame_arc) = tick_out.session_frame
-        {
-            let mut extra = Map::new();
-            extra.insert(
-                "mode".to_owned(),
-                json!(match tick_out.mode {
-                    TickMode::MinimapFast => "minimap_fast",
-                    TickMode::Minimap => "minimap",
-                    TickMode::MapM => "map_m",
-                    TickMode::MapMPaused => "map_m_paused",
-                    TickMode::IdleClosed => "idle_closed",
-                }),
+        // zero extra await, zero timestamp skew against the tracker pose). Every tick that ran
+        // while recording was active either keeps its frame (flushing `unrecorded_ticks`) or
+        // increments the per-mode `unrecorded_ticks` counter and monotonic `tick_seq`.
+        if let Some(ref srec) = session_rec_opt {
+            let post_state = tick_out.step_res.as_ref().map(|s| s.state);
+            let decision = decide_session_frame_keep(
+                true,
+                want_session_frame,
+                tick_out.mode,
+                tick_out.map_pre_state,
+                post_state,
             );
-            if let Some(ref pose) = tick_out.pose {
-                extra.insert("state".to_owned(), json!(pose.state.as_str()));
-                extra.insert("match".to_owned(), json!(pose.match_method));
-                extra.insert("map_id".to_owned(), json!(pose.map_id));
-                extra.insert("world_x".to_owned(), json!(pose.world_x));
-                extra.insert("world_y".to_owned(), json!(pose.world_y));
-                extra.insert("underground".to_owned(), json!(pose.is_underground));
-                extra.insert("floor_id".to_owned(), json!(pose.floor_id));
-                extra.insert("camera".to_owned(), json!(pose.camera_heading));
-                extra.insert("body".to_owned(), json!(pose.body_heading));
-                extra.insert("view".to_owned(), json!(pose.view_heading));
-            } else if let Some(ref sr) = tick_out.step_res {
-                extra.insert("state".to_owned(), json!(format!("MAP_M_{:?}", sr.state)));
+            let mut kept = false;
+            if decision.should_keep()
+                && let Some(ref frame_arc) = tick_out.session_frame
+            {
+                let mut extra = Map::new();
+                extra.insert("mode".to_owned(), json!(tick_mode_str(tick_out.mode)));
+                if let Some(ref pose) = tick_out.pose {
+                    extra.insert("state".to_owned(), json!(pose.state.as_str()));
+                    extra.insert("match".to_owned(), json!(pose.match_method));
+                    extra.insert("map_id".to_owned(), json!(pose.map_id));
+                    extra.insert("world_x".to_owned(), json!(pose.world_x));
+                    extra.insert("world_y".to_owned(), json!(pose.world_y));
+                    extra.insert("underground".to_owned(), json!(pose.is_underground));
+                    extra.insert("floor_id".to_owned(), json!(pose.floor_id));
+                    extra.insert("camera".to_owned(), json!(pose.camera_heading));
+                    extra.insert("body".to_owned(), json!(pose.body_heading));
+                    extra.insert("view".to_owned(), json!(pose.view_heading));
+                } else if let Some(ref sr) = tick_out.step_res {
+                    extra.insert("state".to_owned(), json!(format!("MAP_M_{:?}", sr.state)));
+                }
+                kept = srec.add_frame_arc(
+                    frame_arc,
+                    tick_out.tick_ts,
+                    SessionFrameMeta {
+                        client_rect: game_rect,
+                        cursor_client_pos: cursor_client,
+                        capture_path: tick_out.session_capture_path.unwrap_or("gdi").to_owned(),
+                        extra,
+                    },
+                    decision.is_forced(),
+                );
             }
-            srec.add_frame(
-                frame_arc,
-                tick_out.tick_ts,
-                SessionFrameMeta {
-                    client_rect: game_rect,
-                    cursor_client_pos: cursor_client,
-                    capture_path: tick_out.session_capture_path.unwrap_or("gdi").to_owned(),
-                    extra,
-                },
-            );
+            if !kept {
+                let bucket =
+                    unrecorded_tick_bucket(tick_out.mode, tick_out.map_pre_state, post_state);
+                srec.record_unrecorded_tick(bucket);
+            }
         }
 
         match tick_out.mode {
@@ -2457,6 +2567,7 @@ mod tests {
                 now_s: Some(12.34),
                 cursor_client: None,
                 capture_session_frame: true,
+                session_rec_active: true,
             },
         );
         assert_eq!(out_rec.mode, TickMode::Minimap);
@@ -2512,6 +2623,7 @@ mod tests {
                 now_s: None,
                 cursor_client: None,
                 capture_session_frame: false,
+                session_rec_active: false,
             },
         );
         assert_eq!(out_live.mode, TickMode::Minimap);
@@ -2594,5 +2706,289 @@ mod tests {
             assert_eq!(actual["lat"], 456.25);
             assert_eq!(actual["lng"], 123.5);
         }
+    }
+
+    #[test]
+    fn decide_session_frame_keep_covers_gate_settling_minimap_idle_and_inactive() {
+        // 1. Gate ok -> keep by gate across all modes when recording is active
+        for mode in [
+            TickMode::Minimap,
+            TickMode::MinimapFast,
+            TickMode::MapM,
+            TickMode::MapMPaused,
+            TickMode::IdleClosed,
+        ] {
+            let d = decide_session_frame_keep(true, true, mode, None, None);
+            assert_eq!(d, SessionFrameDecision::KeepByGate, "mode={mode:?}");
+            assert!(d.should_keep());
+            assert!(!d.is_forced());
+        }
+
+        // 2. Gate not ok + pre or post state Settling (MapM tick) -> keep forced
+        for (pre, post) in [
+            (MapState::Closed, MapState::Settling),     // open tick
+            (MapState::Settling, MapState::Settling),   // settling step
+            (MapState::Settling, MapState::SyncedIdle), // sync tick
+            (MapState::Settling, MapState::Closed),     // quick close from settling
+            (MapState::SyncedIdle, MapState::Settling), // retry / scene-cut re-entering settling
+            (MapState::Panning, MapState::Settling),
+        ] {
+            let d = decide_session_frame_keep(true, false, TickMode::MapM, Some(pre), Some(post));
+            assert_eq!(
+                d,
+                SessionFrameDecision::KeepForcedSettling,
+                "transition {pre:?} -> {post:?}"
+            );
+            assert!(d.should_keep());
+            assert!(d.is_forced());
+        }
+
+        // 3. Gate not ok + minimap / closed / paused ticks -> drop (even if Settling were passed)
+        for mode in [
+            TickMode::Minimap,
+            TickMode::MinimapFast,
+            TickMode::MapMPaused,
+            TickMode::IdleClosed,
+        ] {
+            let d = decide_session_frame_keep(true, false, mode, None, None);
+            assert_eq!(d, SessionFrameDecision::Drop, "mode={mode:?}");
+            assert!(!d.should_keep());
+            let d_s = decide_session_frame_keep(
+                true,
+                false,
+                mode,
+                Some(MapState::Settling),
+                Some(MapState::Settling),
+            );
+            assert_eq!(d_s, SessionFrameDecision::Drop, "non-MapM must not force");
+        }
+
+        // 4. Gate not ok + SyncedIdle / Panning / Closed with no Settling involved -> drop
+        for (pre, post) in [
+            (Some(MapState::SyncedIdle), Some(MapState::SyncedIdle)),
+            (Some(MapState::SyncedIdle), Some(MapState::Panning)),
+            (Some(MapState::Panning), Some(MapState::Panning)),
+            (Some(MapState::Panning), Some(MapState::SyncedIdle)),
+            (Some(MapState::SyncedIdle), Some(MapState::Closed)),
+            (Some(MapState::Closed), Some(MapState::Closed)),
+            (None, None),
+        ] {
+            let d = decide_session_frame_keep(true, false, TickMode::MapM, pre, post);
+            assert_eq!(
+                d,
+                SessionFrameDecision::Drop,
+                "non-settling MapM {pre:?} -> {post:?}"
+            );
+        }
+
+        // 5. Recording inactive -> always drop (even if gate_ok or Settling)
+        assert_eq!(
+            decide_session_frame_keep(false, true, TickMode::Minimap, None, None),
+            SessionFrameDecision::Drop
+        );
+        assert_eq!(
+            decide_session_frame_keep(
+                false,
+                false,
+                TickMode::MapM,
+                Some(MapState::Settling),
+                Some(MapState::SyncedIdle),
+            ),
+            SessionFrameDecision::Drop
+        );
+        assert_eq!(
+            decide_session_frame_keep(
+                false,
+                true,
+                TickMode::MapM,
+                Some(MapState::Closed),
+                Some(MapState::Settling),
+            ),
+            SessionFrameDecision::Drop
+        );
+    }
+
+    #[test]
+    fn unrecorded_tick_bucket_separates_settling_map_ticks() {
+        assert_eq!(
+            unrecorded_tick_bucket(TickMode::Minimap, None, None),
+            "minimap"
+        );
+        assert_eq!(
+            unrecorded_tick_bucket(TickMode::MinimapFast, None, None),
+            "minimap_fast"
+        );
+        assert_eq!(
+            unrecorded_tick_bucket(TickMode::MapMPaused, None, None),
+            "map_m_paused"
+        );
+        assert_eq!(
+            unrecorded_tick_bucket(TickMode::IdleClosed, None, None),
+            "idle_closed"
+        );
+        assert_eq!(
+            unrecorded_tick_bucket(
+                TickMode::MapM,
+                Some(MapState::SyncedIdle),
+                Some(MapState::SyncedIdle)
+            ),
+            "map_m"
+        );
+        assert_eq!(
+            unrecorded_tick_bucket(
+                TickMode::MapM,
+                Some(MapState::Closed),
+                Some(MapState::Settling)
+            ),
+            "map_m_settling"
+        );
+        assert_eq!(
+            unrecorded_tick_bucket(
+                TickMode::MapM,
+                Some(MapState::Settling),
+                Some(MapState::SyncedIdle)
+            ),
+            "map_m_settling"
+        );
+    }
+
+    #[test]
+    fn step_map_frame_reuses_single_capture_for_settling_when_recording_and_skips_when_inactive() {
+        use crate::capture_backend::FrameCapturer;
+        use gh_win32::wgc_hdr::WgcWindowCaptureOutcome;
+        use std::sync::atomic::AtomicUsize;
+
+        struct FullCountingCapturer {
+            region_calls: AtomicUsize,
+        }
+
+        impl FrameCapturer for FullCountingCapturer {
+            fn capture_region(&self, _l: i32, _t: i32, w: i32, h: i32) -> Option<FrameBuf> {
+                self.region_calls.fetch_add(1, Ordering::Relaxed);
+                Some(FrameBuf::new_zeroed(w as u32, h as u32, PixelFormat::Bgr8))
+            }
+
+            fn capture_region_bgra(&self, _l: i32, _t: i32, _w: i32, _h: i32) -> Option<FrameBuf> {
+                None
+            }
+
+            fn capture_window_client_outcome(
+                &self,
+                _hwnd: isize,
+                _l: i32,
+                _t: i32,
+                _w: i32,
+                _h: i32,
+            ) -> WgcWindowCaptureOutcome {
+                WgcWindowCaptureOutcome::Failed
+            }
+
+            fn window_capture_status(&self) -> String {
+                "test".to_owned()
+            }
+
+            fn release_window_capture(&self) {}
+            fn close(&self) {}
+        }
+
+        let tmp = std::env::temp_dir().join(format!(
+            "gh_settling_reuse_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+
+        let cap = Arc::new(FullCountingCapturer {
+            region_calls: AtomicUsize::new(0),
+        });
+        let state = crate::state::make_test_state_with_capturer(
+            &tmp,
+            Arc::clone(&cap) as Arc<dyn FrameCapturer>,
+        );
+
+        // Force FSM into Settling (request_retry sets state = Settling)
+        state
+            .state_machine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .request_retry();
+        assert_eq!(
+            state
+                .state_machine
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .state(),
+            MapState::Settling
+        );
+
+        // 1) Recording active + gate NOT ok (capture_session_frame = false):
+        //    must reuse the single M-Map full capture without adding a second capture.
+        let out_rec = run_tick_worker(
+            &state,
+            TickParams {
+                game_hwnd: 0,
+                cl: 0,
+                ct: 0,
+                cw: 640,
+                ch: 360,
+                is_closed: false,
+                do_auto_sync: true,
+                do_minimap: false,
+                fast_ok: false,
+                guide_view: false,
+                guide_map: 2,
+                want_window_capture: false,
+                now_s: Some(5.0),
+                cursor_client: None,
+                capture_session_frame: false,
+                session_rec_active: true,
+            },
+        );
+        assert_eq!(out_rec.mode, TickMode::MapM);
+        assert_eq!(out_rec.map_pre_state, Some(MapState::Settling));
+        assert_eq!(cap.region_calls.load(Ordering::Relaxed), 1);
+        let full_arc = out_rec.full_frame.as_ref().expect("full_frame present");
+        let sess_arc = out_rec
+            .session_frame
+            .as_ref()
+            .expect("session_frame must be populated for Settling tick");
+        assert!(
+            Arc::ptr_eq(full_arc, sess_arc),
+            "session_frame must reuse the exact same Arc<FrameBuf>"
+        );
+
+        // 2) Recording inactive: session_frame must stay None even during Settling.
+        state
+            .state_machine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .request_retry();
+        let out_off = run_tick_worker(
+            &state,
+            TickParams {
+                game_hwnd: 0,
+                cl: 0,
+                ct: 0,
+                cw: 640,
+                ch: 360,
+                is_closed: false,
+                do_auto_sync: true,
+                do_minimap: false,
+                fast_ok: false,
+                guide_view: false,
+                guide_map: 2,
+                want_window_capture: false,
+                now_s: Some(5.025),
+                cursor_client: None,
+                capture_session_frame: false,
+                session_rec_active: false,
+            },
+        );
+        assert_eq!(out_off.mode, TickMode::MapM);
+        assert_eq!(out_off.map_pre_state, Some(MapState::Settling));
+        assert!(out_off.session_frame.is_none());
+        assert_eq!(cap.region_calls.load(Ordering::Relaxed), 2);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -59,6 +59,27 @@ use tokio::sync::watch;
 
 pub const REPORT_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_DRIFT_THRESHOLD_W: f64 = 15.0;
+pub const RECORDING_TICK_MODES: [&str; 6] = [
+    "minimap",
+    "minimap_fast",
+    "map_m",
+    "map_m_settling",
+    "map_m_paused",
+    "idle_closed",
+];
+
+/// Informational summary of live recording tick fidelity parsed from `meta.jsonl`
+/// (`tick_seq` and per-mode `unrecorded_ticks`).
+///
+/// `None` on [`ReplayReport`] when the recording predates `tick_seq` (treated as unknown, never zero).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingFidelityReport {
+    pub frames_with_tick_seq: usize,
+    pub first_tick_seq: Option<u64>,
+    pub last_tick_seq: Option<u64>,
+    pub total_unrecorded_ticks: u64,
+    pub unrecorded_by_mode: BTreeMap<String, u64>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -211,6 +232,8 @@ pub struct ReplayReport {
     pub accuracy: AccuracyReport,
     #[serde(default)]
     pub provenance: ReplayProvenance,
+    #[serde(default)]
+    pub recording_fidelity: Option<RecordingFidelityReport>,
 }
 
 #[derive(Debug, Clone)]
@@ -227,6 +250,8 @@ struct MetaRecord {
     base_world_x: Option<f64>,
     base_world_y: Option<f64>,
     base_heading: Option<f64>,
+    tick_seq: Option<u64>,
+    unrecorded_ticks: Option<BTreeMap<String, u64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -373,6 +398,16 @@ fn load_meta_jsonl(path: &Path) -> Result<Vec<MetaRecord>, String> {
             .or_else(|| v.get("body"))
             .and_then(Value::as_f64)
             .filter(|f| f.is_finite());
+        let tick_seq = v.get("tick_seq").and_then(Value::as_u64);
+        let unrecorded_ticks = v.get("unrecorded_ticks").and_then(Value::as_object).map(|obj| {
+            let mut counts = BTreeMap::new();
+            for (k, val) in obj {
+                if let Some(n) = val.as_u64() {
+                    counts.insert(k.clone(), n);
+                }
+            }
+            counts
+        });
         out.push(MetaRecord {
             idx,
             ts,
@@ -386,9 +421,50 @@ fn load_meta_jsonl(path: &Path) -> Result<Vec<MetaRecord>, String> {
             base_world_x,
             base_world_y,
             base_heading,
+            tick_seq,
+            unrecorded_ticks,
         });
     }
     Ok(out)
+}
+
+fn summarize_recording_fidelity(records: &[MetaRecord]) -> Option<RecordingFidelityReport> {
+    let mut frames_with_tick_seq = 0usize;
+    let mut first_tick_seq: Option<u64> = None;
+    let mut last_tick_seq: Option<u64> = None;
+    for rec in records {
+        if let Some(seq) = rec.tick_seq {
+            frames_with_tick_seq += 1;
+            if first_tick_seq.is_none() {
+                first_tick_seq = Some(seq);
+            }
+            last_tick_seq = Some(seq);
+        }
+    }
+    if frames_with_tick_seq == 0 {
+        return None;
+    }
+
+    let mut unrecorded_by_mode: BTreeMap<String, u64> = RECORDING_TICK_MODES
+        .iter()
+        .map(|&m| (m.to_owned(), 0u64))
+        .collect();
+    let mut total_unrecorded_ticks = 0u64;
+    for rec in records {
+        if let Some(ref map) = rec.unrecorded_ticks {
+            for (mode, &count) in map {
+                *unrecorded_by_mode.entry(mode.clone()).or_insert(0) += count;
+                total_unrecorded_ticks += count;
+            }
+        }
+    }
+    Some(RecordingFidelityReport {
+        frames_with_tick_seq,
+        first_tick_seq,
+        last_tick_seq,
+        total_unrecorded_ticks,
+        unrecorded_by_mode,
+    })
 }
 
 fn load_png_as_bgra(path: &Path) -> Result<FrameBuf, String> {
@@ -1102,6 +1178,8 @@ pub fn run_replay_full(
                 base_world_x: cv_tel.and_then(|c| c.get("world_x")).and_then(Value::as_f64),
                 base_world_y: cv_tel.and_then(|c| c.get("world_y")).and_then(Value::as_f64),
                 base_heading: None,
+                tick_seq: None,
+                unrecorded_ticks: None,
             }];
         }
     }
@@ -1187,6 +1265,7 @@ pub fn run_replay_full(
             now_s: Some(now_s),
             cursor_client: rec.cursor_client,
             capture_session_frame: false,
+            session_rec_active: false,
         };
 
         let t0 = Instant::now();
@@ -1396,6 +1475,7 @@ pub fn run_replay_full(
         DEFAULT_DRIFT_THRESHOLD_W
     };
     let regression = compute_regression(&records[..frames_processed], &observed, drift_thresh);
+    let recording_fidelity = summarize_recording_fidelity(&records[..frames_processed]);
     let accuracy = evaluate_session_accuracy(&opts.gt_file, &session_name, &observed)?;
     let tc_stats = tile_cache.stats();
 
@@ -1431,6 +1511,7 @@ pub fn run_replay_full(
         regression,
         accuracy,
         provenance,
+        recording_fidelity,
     };
 
     state.capturer.close();
@@ -1522,6 +1603,7 @@ mod tests {
         assert_eq!(report.provenance.replay_data_source, "data_dir");
         assert_eq!(report.provenance.datasets_match, None);
         assert_eq!(report.provenance.same_commit, None);
+        assert_eq!(report.recording_fidelity, None);
         assert!(
             report
                 .provenance
@@ -1661,6 +1743,8 @@ mod tests {
             base_world_x: Some(wx),
             base_world_y: Some(0.0),
             base_heading: Some(90.0),
+            tick_seq: None,
+            unrecorded_ticks: None,
         };
         let mk_obs = |i: usize, wx: f64| ObservedFrame {
             idx: i,
@@ -1770,6 +1854,7 @@ mod tests {
                     capture_path: "gdi".to_owned(),
                     extra,
                 },
+                false,
             );
         }
         rec.join_timeout(Duration::from_secs(15));
@@ -1824,5 +1909,56 @@ mod tests {
         assert_eq!(rep.performance.frames_processed, 4);
         assert_eq!(rep.capture_coverage.unserved.total(), 0);
         assert_eq!(rep.offline_assets.hd_downloads, 0);
+        let fid = rep
+            .recording_fidelity
+            .as_ref()
+            .expect("recording_fidelity must be populated for newly recorded session");
+        assert_eq!(fid.frames_with_tick_seq, 4);
+        assert_eq!(fid.first_tick_seq, Some(1));
+        assert_eq!(fid.last_tick_seq, Some(4));
+        assert_eq!(fid.total_unrecorded_ticks, 0);
+    }
+
+    #[test]
+    fn recording_fidelity_parses_tick_seq_and_unrecorded_ticks_and_treats_legacy_as_none() {
+        let sandbox = TempSandboxDir::new("gh_sim_fidelity_meta").unwrap();
+
+        // 1. Legacy meta without tick_seq -> None (unknown, never zero)
+        let legacy_path = sandbox.0.join("meta_legacy.jsonl");
+        std::fs::write(
+            &legacy_path,
+            concat!(
+                "{\"i\":1,\"ts\":1.0,\"frame_w\":2560,\"frame_h\":1440,\"mode\":\"minimap\"}\n",
+                "{\"i\":2,\"ts\":1.05,\"frame_w\":2560,\"frame_h\":1440,\"mode\":\"map_m\"}\n"
+            ),
+        )
+        .unwrap();
+        let legacy_recs = load_meta_jsonl(&legacy_path).unwrap();
+        assert_eq!(summarize_recording_fidelity(&legacy_recs), None);
+
+        // 2. New meta with tick_seq + unrecorded_ticks (mixing empty objects and sparse mode keys)
+        let new_path = sandbox.0.join("meta_new.jsonl");
+        std::fs::write(
+            &new_path,
+            concat!(
+                "{\"i\":1,\"ts\":1.0,\"tick_seq\":1,\"unrecorded_ticks\":{},\"frame_w\":2560,\"frame_h\":1440,\"mode\":\"minimap\"}\n",
+                "{\"i\":2,\"ts\":1.05,\"tick_seq\":4,\"unrecorded_ticks\":{\"minimap_fast\":2},\"frame_w\":2560,\"frame_h\":1440,\"mode\":\"minimap\"}\n",
+                "{\"i\":3,\"ts\":1.10,\"tick_seq\":7,\"unrecorded_ticks\":{\"minimap\":1,\"minimap_fast\":1,\"map_m\":1},\"frame_w\":2560,\"frame_h\":1440,\"mode\":\"map_m\"}\n",
+                "{\"i\":4,\"ts\":1.125,\"tick_seq\":8,\"unrecorded_ticks\":{},\"frame_w\":2560,\"frame_h\":1440,\"mode\":\"map_m\"}\n"
+            ),
+        )
+        .unwrap();
+        let new_recs = load_meta_jsonl(&new_path).unwrap();
+        let summary = summarize_recording_fidelity(&new_recs).expect("should parse fidelity");
+        assert_eq!(summary.frames_with_tick_seq, 4);
+        assert_eq!(summary.first_tick_seq, Some(1));
+        assert_eq!(summary.last_tick_seq, Some(8));
+        assert_eq!(summary.total_unrecorded_ticks, 5);
+        assert_eq!(summary.unrecorded_by_mode.get("minimap"), Some(&1));
+        assert_eq!(summary.unrecorded_by_mode.get("minimap_fast"), Some(&3));
+        assert_eq!(summary.unrecorded_by_mode.get("map_m"), Some(&1));
+        assert_eq!(summary.unrecorded_by_mode.get("map_m_settling"), Some(&0));
+        assert_eq!(summary.unrecorded_by_mode.get("map_m_paused"), Some(&0));
+        assert_eq!(summary.unrecorded_by_mode.get("idle_closed"), Some(&0));
     }
 }

@@ -6,8 +6,8 @@
 //! recorded for reference only — never used for pass/fail grading.
 
 use crate::replay::{
-    DEFAULT_DRIFT_THRESHOLD_W, ObservedFrame, ReplayOptions, ReplayReport, angle_diff_deg,
-    percentile, round3, run_replay_with_poses,
+    DEFAULT_DRIFT_THRESHOLD_W, ObservedFrame, RecordingFidelityReport, ReplayOptions, ReplayReport,
+    angle_diff_deg, percentile, round3, run_replay_with_poses,
 };
 use gh_app::BUILD_GIT_COMMIT;
 use gh_core::atomic_io::{write_bytes_atomic, write_json_atomic};
@@ -360,6 +360,8 @@ pub struct QaSessionResult {
     pub live_mmap_latency: LiveMMapLatency,
     #[serde(default)]
     pub provenance: Option<ReplayProvenance>,
+    #[serde(default)]
+    pub recording_fidelity: Option<RecordingFidelityReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1153,7 +1155,7 @@ fn fmt_opt_w(v: Option<f64>) -> String {
 
 pub fn format_qa_header() -> String {
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:>6}  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:<20} {:>6}  {}",
         "Session",
         "Status",
         "Frames",
@@ -1165,9 +1167,28 @@ pub fn format_qa_header() -> String {
         "HUD(p50/max)",
         "InGame",
         "Prov",
+        "Unrec",
         "Time",
         "Reason"
     )
+}
+
+/// Informational unrecorded-ticks column (`mm <minimap+fast> map <map_m+paused> set <settling>`,
+/// appending `idl <n>` when `idle_closed > 0`), or `n/a` when `meta.jsonl` has no `tick_seq`.
+pub fn format_unrec_col(fidelity: Option<&RecordingFidelityReport>) -> String {
+    let Some(f) = fidelity else {
+        return "n/a".to_owned();
+    };
+    let get = |k: &str| f.unrecorded_by_mode.get(k).copied().unwrap_or(0);
+    let mm = get("minimap") + get("minimap_fast");
+    let map = get("map_m") + get("map_m_paused");
+    let set = get("map_m_settling");
+    let idl = get("idle_closed");
+    if idl > 0 {
+        format!("mm {mm} map {map} set {set} idl {idl}")
+    } else {
+        format!("mm {mm} map {map} set {set}")
+    }
 }
 
 /// Informational provenance column marker (`ok`, `data!`, `code!`, `data!code!`, `code?`,
@@ -1285,8 +1306,9 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
     };
     let in_game_col = format_in_game_col(&r.live_mmap_latency);
     let prov_col = format_prov_col(r.provenance.as_ref());
+    let unrec_col = format_unrec_col(r.recording_fidelity.as_ref());
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:>5.1}s  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:<20} {:>5.1}s  {}",
         r.session_name,
         r.status,
         r.frames,
@@ -1298,6 +1320,7 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
         hud_col,
         in_game_col,
         prov_col,
+        unrec_col,
         r.wall_elapsed_s,
         r.reason
     )
@@ -1368,6 +1391,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
         let live_meta_heading_stability = load_live_meta_heading_stability(&meta_path);
         let live_mmap_latency = load_live_mmap_latency(&meta_path);
         let session_prov = report.provenance.clone();
+        let session_fidelity = report.recording_fidelity.clone();
         let prov_notes = provenance_notes(Some(&session_prov), BUILD_GIT_COMMIT);
         let blessed_path = sdir.join(BLESSED_POSES_FILENAME);
 
@@ -1446,6 +1470,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                 },
                 live_mmap_latency,
                 provenance: Some(session_prov),
+                recording_fidelity: session_fidelity,
             }
         } else {
             match baseline.sessions.get(&session_name) {
@@ -1478,6 +1503,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                     },
                     live_mmap_latency,
                     provenance: Some(session_prov),
+                    recording_fidelity: session_fidelity,
                 },
                 Some(base_sess) => {
                     let mut reasons = Vec::new();
@@ -1578,6 +1604,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                         },
                         live_mmap_latency,
                         provenance: Some(session_prov),
+                        recording_fidelity: session_fidelity,
                     }
                 }
             }
@@ -1927,6 +1954,11 @@ mod tests {
         assert!(qa_rep.passed);
         assert_eq!(qa_rep.sessions[0].status, "ĐẠT");
         assert!(qa_rep.sessions[0].blessed_sha256_ok);
+        assert_eq!(qa_rep.sessions[0].recording_fidelity, None);
+        assert_eq!(
+            format_unrec_col(qa_rep.sessions[0].recording_fidelity.as_ref()),
+            "n/a"
+        );
 
         // Step 3: tampering blessed_poses.jsonl triggers SHA-256 failure
         let mut raw = std::fs::read_to_string(sdir.join(BLESSED_POSES_FILENAME)).unwrap();
@@ -2561,6 +2593,7 @@ mod tests {
             },
             live_mmap_latency: LiveMMapLatency::default(),
             provenance: None,
+            recording_fidelity: None,
         };
         let formatted = format_qa_row(&row_with_live);
         assert!(
@@ -2931,5 +2964,88 @@ mod tests {
         assert!(res.notes.iter().any(|n| n.contains("datasets differ")));
         let row = format_qa_row(res);
         assert!(row.contains(&prov_col), "row missing Prov marker: {row}");
+    }
+
+    #[test]
+    fn qa_unrec_column_formats_counts_and_na_without_affecting_pass_fail() {
+        let hdr = format_qa_header();
+        assert!(hdr.contains("Unrec"), "header missing Unrec: {hdr}");
+
+        // 1. Legacy session without tick_seq -> "n/a"
+        assert_eq!(format_unrec_col(None), "n/a");
+
+        // 2. Session with minimap + minimap_fast + map_m + zero settling
+        let mut by_mode = BTreeMap::new();
+        by_mode.insert("minimap".to_owned(), 12);
+        by_mode.insert("minimap_fast".to_owned(), 800);
+        by_mode.insert("map_m".to_owned(), 3);
+        by_mode.insert("map_m_paused".to_owned(), 0);
+        by_mode.insert("map_m_settling".to_owned(), 0);
+        by_mode.insert("idle_closed".to_owned(), 0);
+        let fid = RecordingFidelityReport {
+            frames_with_tick_seq: 400,
+            first_tick_seq: Some(1),
+            last_tick_seq: Some(1215),
+            total_unrecorded_ticks: 815,
+            unrecorded_by_mode: by_mode.clone(),
+        };
+        assert_eq!(format_unrec_col(Some(&fid)), "mm 812 map 3 set 0");
+
+        // 3. Non-zero idle_closed appends `idl <n>`
+        let mut by_mode_idl = by_mode;
+        by_mode_idl.insert("idle_closed".to_owned(), 4);
+        by_mode_idl.insert("map_m_settling".to_owned(), 1);
+        let fid_idl = RecordingFidelityReport {
+            frames_with_tick_seq: 400,
+            first_tick_seq: Some(1),
+            last_tick_seq: Some(1220),
+            total_unrecorded_ticks: 820,
+            unrecorded_by_mode: by_mode_idl,
+        };
+        assert_eq!(format_unrec_col(Some(&fid_idl)), "mm 812 map 3 set 1 idl 4");
+
+        // 4. QA row formatting renders both `n/a` and formatted counts without affecting pass/fail
+        let mk_row = |fidelity: Option<RecordingFidelityReport>| QaSessionResult {
+            session_name: "sess_unrec_test".to_owned(),
+            passed: true,
+            status: "ĐẠT".to_owned(),
+            reason: "ok".to_owned(),
+            reasons: vec![],
+            notes: vec![],
+            frames: 400,
+            codec: "libx264rgb".to_owned(),
+            color_safe: true,
+            wall_elapsed_s: 2.0,
+            effective_fps: 200.0,
+            hd_downloads: 0,
+            map_m_synced_count: 2,
+            baseline_map_m_synced_count: Some(2),
+            mmap_view_frames: 10,
+            mmap_view_acquired: 10,
+            baseline_mmap_view_acquired: Some(10),
+            mmap_view_drawer_open: 0,
+            blessed_sha256_ok: true,
+            vs_blessed: None,
+            vs_meta_ref: MetaReferenceSummary::default(),
+            heading_stability: SessionHeadingStability::default(),
+            live_mmap_latency: LiveMMapLatency::default(),
+            provenance: None,
+            recording_fidelity: fidelity,
+        };
+
+        let row_legacy = format_qa_row(&mk_row(None));
+        assert!(row_legacy.contains("n/a"), "legacy row missing n/a: {row_legacy}");
+
+        let row_new = format_qa_row(&mk_row(Some(fid)));
+        assert!(
+            row_new.contains("mm 812 map 3 set 0"),
+            "row missing formatted Unrec column: {row_new}"
+        );
+
+        let row_idl = format_qa_row(&mk_row(Some(fid_idl)));
+        assert!(
+            row_idl.contains("mm 812 map 3 set 1 idl 4"),
+            "row missing idle Unrec column: {row_idl}"
+        );
     }
 }
