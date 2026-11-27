@@ -20,8 +20,45 @@
       "expected_mark_selector": "button.map-popup__btn.gt-button-ys--primary:not(.map-popup__btn--batch)",
       "expected_mark_text": "mark pin",
       "expected_batch_selector": "button.map-popup__btn.map-popup__btn--batch",
-      "expected_already_marked": false,
-      "known_bug": "findGhimButton in extension/page_main.js only matches exact 'mark' while live HoYoLAB EN renders 'Mark Pin'"
+      "expected_already_marked": false
+    },
+    {
+      "id": "en_marked",
+      "file": "en_marked.html",
+      "lang": "en-us",
+      "state": "marked",
+      "derived": "derived from a live capture by swapping button labels for HoYoLAB mi18n strings (see file header)",
+      "expected_batch_selector": "button.map-popup__btn.map-popup__btn--batch",
+      "expected_already_marked": true
+    },
+    {
+      "id": "vi_marked",
+      "file": "vi_marked.html",
+      "lang": "vi-vn",
+      "state": "marked",
+      "derived": "derived from a live capture by swapping button labels for HoYoLAB mi18n strings (see file header)",
+      "expected_batch_selector": "button.map-popup__btn.map-popup__btn--batch",
+      "expected_already_marked": true
+    },
+    {
+      "id": "ko_unmarked",
+      "file": "ko_unmarked.html",
+      "lang": "ko-kr",
+      "state": "unmarked",
+      "derived": "derived from a live capture by swapping button labels for HoYoLAB mi18n strings (see file header)",
+      "expected_mark_selector": "button.map-popup__btn.gt-button-ys--primary:not(.map-popup__btn--batch)",
+      "expected_mark_text": "맵 핀",
+      "expected_batch_selector": "button.map-popup__btn.map-popup__btn--batch",
+      "expected_already_marked": false
+    },
+    {
+      "id": "ko_marked",
+      "file": "ko_marked.html",
+      "lang": "ko-kr",
+      "state": "marked",
+      "derived": "derived from a live capture by swapping button labels for HoYoLAB mi18n strings (see file header)",
+      "expected_batch_selector": "button.map-popup__btn.map-popup__btn--batch",
+      "expected_already_marked": true
     }
   ]
 }

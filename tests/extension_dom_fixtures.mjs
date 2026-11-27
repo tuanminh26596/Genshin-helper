@@ -11,7 +11,7 @@
 //   GH_CHROME=<chrome.exe>          Chromium executable override (else Playwright Chromium)
 //   GH_PAGE_MAIN_PATH=<path.js>     Override source JS file (for seeded xpass proofs only)
 // Exit code: 0 iff fail === 0, 1 on fail/error, 2 if Chromium not found.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -30,6 +30,8 @@ const REQUIRED_FUNCTIONS = [
   'findPopupContainer',
   'isButtonDisabled',
   'normalizeBtnText',
+  '_popupMarkLabelSets',
+  '_popupActionButtons',
   'findGhimButton',
   'findAlreadyMarkedButton',
 ];
@@ -412,11 +414,23 @@ async function main() {
     }
   } finally {
     for (const c of sessions) c.close();
-    proc.kill();
+    // Chromium's renderer/crashpad children can outlive the browser process on Windows and keep the
+    // temp profile locked, so stop the whole tree before removing it.
+    if (process.platform === 'win32' && proc.pid) {
+      spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore' });
+    } else {
+      proc.kill();
+    }
     await Promise.race([procExited, sleep(2000)]);
     await sleep(300);
     if (existsSync(profile)) {
-      rmSync(profile, { recursive: true, force: true, maxRetries: 15, retryDelay: 250 });
+      try {
+        rmSync(profile, { recursive: true, force: true, maxRetries: 15, retryDelay: 250 });
+      } catch (e) {
+        // Cleanup only: the fixture results above are already final, so a locked temp dir must not
+        // turn them into a failure. Name it so it can be removed by hand.
+        console.warn(`[WARN] could not remove temp profile ${profile}: ${e && e.code ? e.code : e}`);
+      }
     }
   }
 

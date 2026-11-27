@@ -1,0 +1,99 @@
+<!--
+  Captured from live HoYoLAB Interactive Map (public guest session, zero login/cookies).
+  Capture time: 2026-11-27T14:41:16Z (2026-11-27T21:41:16+07:00)
+  Source URL: https://act.hoyolab.com/ys/app/interactive-map/index.html?lang=vi-vn#/map/2?shown_types=5
+  Language: vi-vn (Vietnamese)
+  Capture method: Headless Chromium (--headless=new, fresh temporary --user-data-dir, --lang=vi-VN)
+    via CDP; dismissed initial overlays, enabled collectible filter (shown_types=5), clicked a
+    collectible canvas pin on map 2, extracted the .expand-popup -> .leaflet-popup-pane ->
+    .leaflet-popup -> .map-popup subtree, and stripped external image/CDN URLs, contributor info,
+    and copyrighted item names while preserving exact popup nesting, classes, attributes, and
+    button markup/text.
+
+  DERIVED FIXTURE (not a live capture): copied from vi_unmarked.html; only the popup button labels
+  were replaced with HoYoLAB's own mi18n strings for vi-vn (keys `mark`, `unmark`,
+  `batch_mark`; https://fastcdn.hoyoverse.com/mi18n/hk4e_global/m03311749131601/m03311749131601-<lang>.json, checked 2026-11-28). The marked button keeps the unmarked button's classes,
+  which is the hardest case for a structure-only matcher. Other popup text is left as captured.
+-->
+<!DOCTYPE html>
+<html lang="vi-VN">
+<head>
+  <meta charset="utf-8">
+  <title>HoYoLAB Pin Popup Fixture (vi-vn, marked; derived)</title>
+  <style>
+    html, body { margin: 0; padding: 0; }
+    .expand-popup { display: flex; position: fixed; inset: 0; width: 1424px; height: 749px; }
+    .mhy-map-container, .mhy-game-gis, .mhy-map { position: relative; width: 100%; height: 100%; }
+    .leaflet-popup { position: relative; display: block; width: 401px; }
+    .leaflet-popup-content { width: 401px; }
+    .map-popup { display: block; padding: 12px; }
+    .map-popup__footer { display: flex; align-items: center; gap: 8px; }
+    .map-popup__btn {
+      display: flex;
+      position: relative;
+      align-items: center;
+      justify-content: center;
+      min-width: 141px;
+      height: 32px;
+      padding: 0 12px;
+    }
+    .map-popup__btn--batch { min-width: 143px; }
+    .leaflet-popup-close-button { display: block; position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; }
+  </style>
+</head>
+<body>
+  <div id="root" class="expand-popup">
+    <div class="mhy-map-container">
+      <div class="mhy-game-gis">
+        <div class="mhy-map leaflet-container leaflet-touch leaflet-grab leaflet-touch-drag leaflet-touch-zoom" tabindex="0">
+          <div class="leaflet-pane leaflet-map-pane">
+            <div class="leaflet-pane leaflet-popup-pane">
+              <div class="leaflet-popup  leaflet-zoom-animated">
+                <div class="leaflet-popup-content-wrapper">
+                  <div class="leaflet-popup-content" style="width: 401px;">
+                    <div class="map-popup">
+                      <h4><span class="map-popup__name-link map-popup__name-link--seas"><span class="label label--seas">Ghim Thu Thập</span></span></h4>
+                      <div class="map-popup__content">
+                        <div class="map-popup__type">
+                          <div class="map-popup__attrs">
+                            <div class="map-popup__attr"><!----> <span class="map-popup__attr-value">Thấp</span></div>
+                          </div>
+                          <!---->
+                        </div>
+                        <!---->
+                        <div class="map-popup__info">
+                          <div class="map-popup__info-switch" style="display: none;">
+                            <div class="map-popup__info-img active"><span></span></div>
+                            <div class="map-popup__info-video"><span></span></div>
+                          </div>
+                          <div preview="previewContainer" class="map-popup__img-container"></div>
+                          <!---->
+                        </div>
+                        <!---->
+                        <div class="map-popup__links"></div>
+                        <div class="map-popup__links"><!----></div>
+                        <div class="map-popup__contribute"><!----></div>
+                        <div class="map-popup__time">
+                          Thời gian cập nhật:2020-09-15 04:20:03
+                        </div>
+                      </div>
+                      <div class="map-popup__footer">
+                        <div title="Gửi miêu tả ghim" class="map-popup__btn-edit map-popup__btn-edit--sea"><!----></div>
+                        <button theme="dark" class="map-popup__btn gt-button-ys--flex gt-button-ys gt-button-ys--size-s gt-button-ys--linear map-popup__btn--vi-vn map-popup__btn--batch"><div theme="dark" class=""></div><!----><!----><span size="s" with-left-icon="0" with-right-icon="0" class="gt_desktop_button_b2_3 gt-button-ys--label gt-button-ys--label-s"> Ghim Nhiều </span><!----><!----></button>
+                        <button theme="dark" class="map-popup__btn gt-button-ys--flex gt-button-ys gt-button-ys--size-s gt-button-ys--primary map-popup__btn--vi-vn"><div theme="dark" class="gt-button-ys--texture gt-button-ys--texture-primary"></div><!----><!----><span size="s" with-left-icon="0" with-right-icon="0" class="gt_desktop_button_b2_3 gt-button-ys--label gt-button-ys--label-s"> Huỷ Ghim </span><!----><!----></button>
+                      </div>
+                      <!---->
+                    </div>
+                  </div>
+                </div>
+                <div class="leaflet-popup-tip-container"><div class="leaflet-popup-tip"></div></div>
+                <a class="leaflet-popup-close-button" role="button" aria-label="Close popup" href="#close"><span aria-hidden="true">×</span></a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
