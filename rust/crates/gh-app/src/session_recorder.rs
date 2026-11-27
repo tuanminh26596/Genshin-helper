@@ -21,7 +21,7 @@ use gh_core::provenance::{
 };
 use gh_core::{CoreError, CoreResult};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -107,7 +107,7 @@ pub struct SessionFrameMeta {
 
 struct RecItem {
     idx: usize,
-    bgr: FrameBuf,
+    bgr: Arc<FrameBuf>,
     meta: Value,
 }
 
@@ -116,6 +116,8 @@ struct RecorderShared {
     max_queue: usize,
     stopped: bool,
     frames: usize,
+    tick_seq: u64,
+    pending_unrecorded_ticks: BTreeMap<String, u64>,
     dropped_queue: usize,
     dropped_resize: usize,
     write_errors: usize,
@@ -153,6 +155,8 @@ pub struct SessionRecorder {
     on_done: Mutex<Option<SessionDoneCallback>>,
     shared: Arc<(Mutex<RecorderShared>, Condvar)>,
     state: Mutex<RecorderState>,
+    #[cfg(test)]
+    skip_worker_spawn: bool,
 }
 
 impl SessionRecorder {
@@ -202,6 +206,8 @@ impl SessionRecorder {
                     max_queue: cfg.max_queue.clamp(8, DEFAULT_SESSION_QUEUE * 4),
                     stopped: false,
                     frames: 0,
+                    tick_seq: 0,
+                    pending_unrecorded_ticks: BTreeMap::new(),
                     dropped_queue: 0,
                     dropped_resize: 0,
                     write_errors: 0,
@@ -221,7 +227,66 @@ impl SessionRecorder {
                 worker_started: false,
                 worker: None,
             }),
+            #[cfg(test)]
+            skip_worker_spawn: false,
         }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_dry_run_for_test(
+        root: &Path,
+        fps: f64,
+        max_queue: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            seconds: 0.0,
+            fps: fps.clamp(1.0, 60.0),
+            codec: SessionCodec::Libx264Rgb,
+            ffmpeg_path: std::env::current_exe().unwrap_or_else(|_| root.join("ffmpeg.exe")),
+            out_dir: root.join("sess_dry_run"),
+            tiles_dir: root.join("tiles"),
+            ug_overlays_dir: root.join("ug"),
+            paimon_cache_path: root.join("paimon.npz"),
+            data_dir: root.to_path_buf(),
+            data_source: "dev".to_owned(),
+            maps_db: Arc::new(MultimapDb::default()),
+            on_done: Mutex::new(None),
+            shared: Arc::new((
+                Mutex::new(RecorderShared {
+                    queue: VecDeque::new(),
+                    max_queue: max_queue.max(1),
+                    stopped: false,
+                    frames: 0,
+                    tick_seq: 0,
+                    pending_unrecorded_ticks: BTreeMap::new(),
+                    dropped_queue: 0,
+                    dropped_resize: 0,
+                    write_errors: 0,
+                    capture_paths_seen: BTreeSet::new(),
+                    pending_hotkeys: Vec::new(),
+                    pending_events: Vec::new(),
+                    visited_coords: Vec::new(),
+                    visited_floors: HashSet::new(),
+                }),
+                Condvar::new(),
+            )),
+            state: Mutex::new(RecorderState {
+                first_ts: None,
+                last_ts: None,
+                expected_dims: None,
+                finished: false,
+                worker_started: false,
+                worker: None,
+            }),
+            skip_worker_spawn: true,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drain_queued_items_for_test(&self) -> Vec<(usize, Value)> {
+        let (lock, _) = &*self.shared;
+        let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+        sh.queue.drain(..).map(|item| (item.idx, item.meta)).collect()
     }
 
     pub fn out_dir(&self) -> &Path {
@@ -275,6 +340,22 @@ impl SessionRecorder {
         std::mem::take(&mut sh.pending_hotkeys)
     }
 
+    /// Records a tracking-loop tick that produced a tick output while recording was active
+    /// but was not kept in `video.mkv` / `meta.jsonl`. Increments `tick_seq` and the per-mode
+    /// `unrecorded_ticks` bucket that will be flushed onto the next kept frame.
+    /// No-op when the recorder is inactive.
+    pub fn record_unrecorded_tick(&self, mode_key: &str) {
+        if !self.active() {
+            return;
+        }
+        let (lock, _) = &*self.shared;
+        let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+        sh.tick_seq += 1;
+        *sh.pending_unrecorded_ticks
+            .entry(mode_key.to_owned())
+            .or_insert(0) += 1;
+    }
+
     /// Returns `true` if enough time elapsed since the last captured session frame to take a new one.
     pub fn should_capture_at(&self, ts: f64) -> bool {
         let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -287,41 +368,104 @@ impl SessionRecorder {
         }
     }
 
-    pub fn add_frame(self: &Arc<Self>, frame: &FrameBuf, ts: f64, fmeta: SessionFrameMeta) {
-        if frame.data.is_empty() || frame.width == 0 || frame.height == 0 {
-            return;
-        }
-        let bgr = match ensure_bgr24(frame) {
-            Some(b) => b,
-            None => return,
-        };
+    /// Enqueues a frame into `video.mkv` + `meta.jsonl`.
+    ///
+    /// When `force` is `true`, bypasses the `0.9 / fps` inter-frame gate (used to preserve every
+    /// M-Map `Settling` tick without dropping transitions). When `force` is `false`, rejects frames
+    /// arriving within `0.9 / fps` of the previous kept frame. Returns `true` if the frame was kept.
+    pub fn add_frame(
+        self: &Arc<Self>,
+        frame: &FrameBuf,
+        ts: f64,
+        fmeta: SessionFrameMeta,
+        force: bool,
+    ) -> bool {
+        self.enqueue_frame_inner(frame, None, ts, fmeta, force)
+    }
 
-        let (idx, reached_target, dropped_so_far, hotkeys, events) = {
-            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+    /// Like [`Self::add_frame`], but reuses `frame` via `Arc::clone` with zero pixel copy when the
+    /// input is already `PixelFormat::Bgr8` (the format produced by M-Map `capture_region`).
+    pub fn add_frame_arc(
+        self: &Arc<Self>,
+        frame: &Arc<FrameBuf>,
+        ts: f64,
+        fmeta: SessionFrameMeta,
+        force: bool,
+    ) -> bool {
+        self.enqueue_frame_inner(frame.as_ref(), Some(frame), ts, fmeta, force)
+    }
+
+    fn enqueue_frame_inner(
+        self: &Arc<Self>,
+        frame: &FrameBuf,
+        shared_arc: Option<&Arc<FrameBuf>>,
+        ts: f64,
+        fmeta: SessionFrameMeta,
+        force: bool,
+    ) -> bool {
+        if frame.data.is_empty() || frame.width == 0 || frame.height == 0 {
+            return false;
+        }
+        // Fast gate/finished check before spending CPU on BGRA -> BGR24 conversion.
+        {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.finished {
-                return;
+                return false;
             }
-            if let Some(prev) = st.last_ts
+            if !force
+                && let Some(prev) = st.last_ts
                 && (ts - prev) < (1.0 / self.fps) * 0.9
             {
-                return;
+                return false;
+            }
+        }
+
+        let bgr: Arc<FrameBuf> = if frame.format == PixelFormat::Bgr8
+            && let Some(arc) = shared_arc
+        {
+            Arc::clone(arc)
+        } else {
+            match ensure_bgr24(frame) {
+                Some(b) => Arc::new(b),
+                None => return false,
+            }
+        };
+
+        let reached_target = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if st.finished {
+                return false;
+            }
+            if !force
+                && let Some(prev) = st.last_ts
+                && (ts - prev) < (1.0 / self.fps) * 0.9
+            {
+                return false;
             }
             if let Some((ew, eh)) = st.expected_dims {
                 if bgr.width != ew || bgr.height != eh {
                     let (lock, _) = &*self.shared;
                     let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
                     sh.dropped_resize += 1;
-                    return;
+                    return false;
                 }
             } else {
                 st.expected_dims = Some((bgr.width, bgr.height));
+            }
+            {
+                let (lock, _) = &*self.shared;
+                let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+                if sh.queue.len() >= sh.max_queue {
+                    sh.dropped_queue += 1;
+                    return false;
+                }
             }
             if !st.worker_started
                 && let Err(e) = self.start_worker_locked(&mut st, bgr.width, bgr.height)
             {
                 tracing::warn!("[SessionRecorder] Failed to start worker: {e}");
                 st.finished = true;
-                return;
+                return false;
             }
             if st.first_ts.is_none() {
                 st.first_ts = Some(ts);
@@ -330,7 +474,7 @@ impl SessionRecorder {
             let reached_target = self.seconds > 0.0
                 && st.first_ts.is_some_and(|t0| (ts - t0) >= self.seconds);
 
-            let (lock, _) = &*self.shared;
+            let (lock, cv) = &*self.shared;
             let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
             sh.capture_paths_seen.insert(fmeta.capture_path.clone());
             if let (Some(mid), Some(wx), Some(wy)) = (
@@ -348,28 +492,31 @@ impl SessionRecorder {
 
             let hotkeys = std::mem::take(&mut sh.pending_hotkeys);
             let events = std::mem::take(&mut sh.pending_events);
+            let unrecorded_ticks = std::mem::take(&mut sh.pending_unrecorded_ticks);
+            sh.tick_seq += 1;
+            let tick_seq = sh.tick_seq;
             sh.frames += 1;
             let idx = sh.frames;
             let dropped = sh.dropped_queue + sh.dropped_resize;
-            (idx, reached_target, dropped, hotkeys, events)
+            let meta = build_frame_meta_record(
+                idx,
+                ts,
+                fmeta,
+                dropped,
+                hotkeys,
+                events,
+                tick_seq,
+                unrecorded_ticks,
+            );
+            sh.queue.push_back(RecItem { idx, bgr, meta });
+            cv.notify_one();
+            reached_target
         };
-
-        let meta = build_frame_meta_record(idx, ts, fmeta, dropped_so_far, hotkeys, events);
-
-        {
-            let (lock, cv) = &*self.shared;
-            let mut sh = lock.lock().unwrap_or_else(|e| e.into_inner());
-            if sh.queue.len() >= sh.max_queue {
-                sh.dropped_queue += 1;
-            } else {
-                sh.queue.push_back(RecItem { idx, bgr, meta });
-                cv.notify_one();
-            }
-        }
 
         if reached_target {
             self.finish();
         }
+        true
     }
 
     fn start_worker_locked(
@@ -378,6 +525,11 @@ impl SessionRecorder {
         width: u32,
         height: u32,
     ) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.skip_worker_spawn {
+            st.worker_started = true;
+            return Ok(());
+        }
         std::fs::create_dir_all(&self.out_dir)?;
         let video_path = self.out_dir.join("video.mkv");
         let child = spawn_ffmpeg_encoder(
@@ -593,6 +745,7 @@ fn format_event_entry(ts: f64, kind: &str, fields: Value) -> Value {
     Value::Object(obj)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_frame_meta_record(
     idx: usize,
     ts: f64,
@@ -600,6 +753,8 @@ fn build_frame_meta_record(
     dropped_so_far: usize,
     hotkeys: Vec<Value>,
     events: Vec<Value>,
+    tick_seq: u64,
+    unrecorded_ticks: BTreeMap<String, u64>,
 ) -> Value {
     let mut rec = Map::new();
     rec.insert("i".to_owned(), json!(idx));
@@ -607,6 +762,14 @@ fn build_frame_meta_record(
         "ts".to_owned(),
         json!(((ts * 10_000.0).round()) / 10_000.0),
     );
+    rec.insert("tick_seq".to_owned(), json!(tick_seq));
+    let mut unrec_obj = Map::new();
+    for (k, v) in unrecorded_ticks {
+        if v > 0 {
+            unrec_obj.insert(k, json!(v));
+        }
+    }
+    rec.insert("unrecorded_ticks".to_owned(), Value::Object(unrec_obj));
     rec.insert("frame_w".to_owned(), json!(fmeta.client_rect.width));
     rec.insert("frame_h".to_owned(), json!(fmeta.client_rect.height));
     rec.insert(
@@ -1230,6 +1393,8 @@ mod tests {
             0,
             hotkeys,
             events,
+            1,
+            BTreeMap::new(),
         );
 
         // hotkeys preserved intact
@@ -1268,6 +1433,8 @@ mod tests {
             0,
             rec.take_pending_hotkeys_for_test(),
             rec.take_pending_events_for_test(),
+            2,
+            BTreeMap::new(),
         );
         assert!(frame_meta_empty.get("events").is_none());
         assert!(frame_meta_empty.get("hotkeys").is_none());
@@ -1283,5 +1450,180 @@ mod tests {
         assert!(rec.take_pending_events_for_test().is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn mk_test_fmeta(w: i32, h: i32, mode: &str) -> SessionFrameMeta {
+        let mut extra = Map::new();
+        extra.insert("mode".to_owned(), json!(mode));
+        SessionFrameMeta {
+            client_rect: RectI32 {
+                x: 0,
+                y: 0,
+                width: w,
+                height: h,
+            },
+            cursor_client_pos: None,
+            capture_path: "gdi".to_owned(),
+            extra,
+        }
+    }
+
+    #[test]
+    fn add_frame_forced_bypasses_gate_while_non_forced_rejects_within_45ms() {
+        let root = std::env::temp_dir().join(format!("gh_sess_force_{}", std::process::id()));
+        let rec = SessionRecorder::new_dry_run_for_test(&root, 20.0, 16);
+        let frame = FrameBuf::new_zeroed(16, 16, PixelFormat::Bgr8);
+
+        // First frame always accepted
+        assert!(rec.add_frame(&frame, 1.000, mk_test_fmeta(16, 16, "minimap"), false));
+        // Non-forced within 45 ms (< 0.9 / 20 = 0.045 s) is rejected
+        assert!(!rec.add_frame(&frame, 1.020, mk_test_fmeta(16, 16, "minimap"), false));
+        assert!(!rec.add_frame(&frame, 1.044, mk_test_fmeta(16, 16, "map_m"), false));
+        // Forced within 45 ms is accepted (e.g. Closed -> Settling at +20 ms, Settling -> SyncedIdle at +25 ms)
+        assert!(rec.add_frame(&frame, 1.020, mk_test_fmeta(16, 16, "map_m"), true));
+        assert!(rec.add_frame(&frame, 1.045, mk_test_fmeta(16, 16, "map_m"), true));
+        // Subsequent non-forced within 45 ms of the forced frame (1.045) is still rejected
+        assert!(!rec.add_frame(&frame, 1.070, mk_test_fmeta(16, 16, "map_m"), false));
+        // Once >= 45 ms elapsed after 1.045 (1.095), non-forced is accepted again
+        assert!(rec.add_frame(&frame, 1.095, mk_test_fmeta(16, 16, "map_m"), false));
+
+        let queued = rec.drain_queued_items_for_test();
+        assert_eq!(queued.len(), 4);
+        for (k, (idx, meta)) in queued.iter().enumerate() {
+            assert_eq!(*idx, k + 1);
+            assert_eq!(meta["i"], json!(k + 1));
+        }
+        assert_eq!(queued[0].1["ts"], json!(1.0));
+        assert_eq!(queued[1].1["ts"], json!(1.02));
+        assert_eq!(queued[2].1["ts"], json!(1.045));
+        assert_eq!(queued[3].1["ts"], json!(1.095));
+    }
+
+    #[test]
+    fn unrecorded_ticks_land_in_next_kept_frame_and_reset_with_monotonic_tick_seq() {
+        let root = std::env::temp_dir().join(format!("gh_sess_unrec_{}", std::process::id()));
+        let rec = SessionRecorder::new_dry_run_for_test(&root, 20.0, 16);
+        let frame = Arc::new(FrameBuf::new_zeroed(16, 16, PixelFormat::Bgr8));
+
+        // 1 unrecorded tick before first kept frame
+        rec.record_unrecorded_tick("idle_closed");
+        assert!(rec.add_frame_arc(&frame, 1.000, mk_test_fmeta(16, 16, "minimap"), false));
+
+        // 3 unrecorded ticks before next kept frame (2 minimap_fast + 1 map_m)
+        rec.record_unrecorded_tick("minimap_fast");
+        rec.record_unrecorded_tick("minimap_fast");
+        rec.record_unrecorded_tick("map_m");
+        assert!(rec.add_frame_arc(&frame, 1.025, mk_test_fmeta(16, 16, "map_m"), true));
+
+        // 0 unrecorded ticks before third kept frame -> empty object (reset verified)
+        assert!(rec.add_frame_arc(&frame, 1.050, mk_test_fmeta(16, 16, "map_m"), true));
+
+        // Inactive recorder ignores record_unrecorded_tick
+        rec.finish();
+        rec.record_unrecorded_tick("minimap");
+
+        let queued = rec.drain_queued_items_for_test();
+        assert_eq!(queued.len(), 3);
+
+        assert_eq!(queued[0].1["i"], json!(1));
+        assert_eq!(queued[0].1["tick_seq"], json!(2));
+        assert_eq!(queued[0].1["unrecorded_ticks"], json!({"idle_closed": 1}));
+
+        assert_eq!(queued[1].1["i"], json!(2));
+        assert_eq!(queued[1].1["tick_seq"], json!(6));
+        assert_eq!(
+            queued[1].1["unrecorded_ticks"],
+            json!({"map_m": 1, "minimap_fast": 2})
+        );
+
+        assert_eq!(queued[2].1["i"], json!(3));
+        assert_eq!(queued[2].1["tick_seq"], json!(7));
+        assert_eq!(queued[2].1["unrecorded_ticks"], json!({}));
+    }
+
+    #[test]
+    fn meta_frame_index_stays_aligned_when_queue_overflows_or_frame_resizes() {
+        let root = std::env::temp_dir().join(format!("gh_sess_align_{}", std::process::id()));
+        // Tiny queue (capacity 2) with dry-run (no consumer popping)
+        let rec = SessionRecorder::new_dry_run_for_test(&root, 20.0, 2);
+        let f16 = FrameBuf::new_zeroed(16, 16, PixelFormat::Bgr8);
+        let f32 = FrameBuf::new_zeroed(32, 32, PixelFormat::Bgr8);
+
+        assert!(rec.add_frame(&f16, 1.00, mk_test_fmeta(16, 16, "minimap"), false));
+        // Resize mismatch -> rejected without advancing `i`
+        assert!(!rec.add_frame(&f32, 1.10, mk_test_fmeta(32, 32, "minimap"), false));
+        rec.record_unrecorded_tick("minimap");
+        assert!(rec.add_frame(&f16, 1.20, mk_test_fmeta(16, 16, "minimap"), false));
+        // Queue is now full (len == 2): next frame must fail without advancing `i`
+        assert!(!rec.add_frame(&f16, 1.30, mk_test_fmeta(16, 16, "map_m"), true));
+        rec.record_unrecorded_tick("map_m_settling");
+
+        let first_batch = rec.drain_queued_items_for_test();
+        assert_eq!(first_batch.len(), 2);
+        assert_eq!(first_batch[0].0, 1);
+        assert_eq!(first_batch[0].1["i"], json!(1));
+        assert_eq!(first_batch[1].0, 2);
+        assert_eq!(first_batch[1].1["i"], json!(2));
+        assert_eq!(first_batch[1].1["unrecorded_ticks"], json!({"minimap": 1}));
+
+        // After draining queue, next frame gets contiguous index 3 (NOT 4) and carries the overflow count
+        assert!(rec.add_frame(&f16, 1.40, mk_test_fmeta(16, 16, "map_m"), false));
+        let next_batch = rec.drain_queued_items_for_test();
+        assert_eq!(next_batch.len(), 1);
+        assert_eq!(next_batch[0].0, 3);
+        assert_eq!(next_batch[0].1["i"], json!(3));
+        assert_eq!(
+            next_batch[0].1["unrecorded_ticks"],
+            json!({"map_m_settling": 1})
+        );
+    }
+
+    #[test]
+    fn forced_frame_cost_1440p_zero_copy_bgr8_and_bgra8_conversion() {
+        let root = std::env::temp_dir().join(format!("gh_sess_cost_{}", std::process::id()));
+        let rec_bgr = SessionRecorder::new_dry_run_for_test(&root, 20.0, 32);
+        let bgr_1440p = Arc::new(FrameBuf::new_zeroed(2560, 1440, PixelFormat::Bgr8));
+        let bgra_1440p = FrameBuf::new_zeroed(2560, 1440, PixelFormat::Bgra8);
+
+        // Warm up once
+        assert!(rec_bgr.add_frame_arc(&bgr_1440p, 1.0, mk_test_fmeta(2560, 1440, "map_m"), true));
+        let _ = rec_bgr.drain_queued_items_for_test();
+
+        let iters = 10usize;
+        let t0 = std::time::Instant::now();
+        for k in 0..iters {
+            assert!(rec_bgr.add_frame_arc(
+                &bgr_1440p,
+                2.0 + k as f64 * 0.025,
+                mk_test_fmeta(2560, 1440, "map_m"),
+                true,
+            ));
+        }
+        let bgr_arc_us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;
+        // Verify zero-copy: queued RecItem shares the exact Arc<FrameBuf> allocation.
+        {
+            let (lock, _) = &*rec_bgr.shared;
+            let sh = lock.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(sh.queue.len(), iters);
+            assert!(Arc::ptr_eq(&sh.queue[0].bgr, &bgr_1440p));
+        }
+        let _ = rec_bgr.drain_queued_items_for_test();
+
+        let rec_bgra = SessionRecorder::new_dry_run_for_test(&root, 20.0, 32);
+        let t1 = std::time::Instant::now();
+        for k in 0..iters {
+            assert!(rec_bgra.add_frame(
+                &bgra_1440p,
+                2.0 + k as f64 * 0.025,
+                mk_test_fmeta(2560, 1440, "map_m"),
+                true,
+            ));
+        }
+        let bgra_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        let _ = rec_bgra.drain_queued_items_for_test();
+
+        eprintln!(
+            "[forced_frame_cost_1440p] add_frame_arc(Bgr8 zero-copy)={bgr_arc_us:.1} us/frame, add_frame(Bgra8->Bgr8)={bgra_ms:.2} ms/frame"
+        );
     }
 }
