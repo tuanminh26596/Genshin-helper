@@ -7,7 +7,6 @@
   "width": 2560,
   "height": 1440,
   "is_gamepad": false,
-  "known_bug": "M-Map locate on Enkanomiya (Map 7) false-locks with 2 inliers (~916w off true 508,-150) although 8 waypoints are visible.",
   "mmap_locate": {
     "expected_map_id": 7,
     "expected_world_x": 508.0,
