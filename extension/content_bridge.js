@@ -19,6 +19,9 @@
     ? chrome.runtime.id
     : null;
   if (window.__gh_bridge_loaded && window.__gh_bridge_runtime_id === currentRuntimeId && window.__gh_bridge_alive) {
+    if (typeof window.__gh_bridge_reconnect_now === 'function') {
+      window.__gh_bridge_reconnect_now();
+    }
     return;
   }
   window.__gh_bridge_loaded = true;
@@ -114,6 +117,23 @@
       scheduleReconnect();
     }
   }
+
+  function reconnectNow() {
+    if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.id) {
+      window.__gh_bridge_alive = false;
+      return false;
+    }
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    reconnectAttempt = 0;
+    if (!port) {
+      connectPort();
+    }
+    return true;
+  }
+  window.__gh_bridge_reconnect_now = reconnectNow;
 
   window.addEventListener('message', (e) => {
     if (e.source !== window || !e.data || e.data.__gh_ext !== true || e.data.dir !== 'to-bg') {
