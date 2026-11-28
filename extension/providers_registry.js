@@ -14,7 +14,10 @@
       matchesUrl: (url) => {
         try {
           const u = new URL(String(url || ''));
-          return u.hostname.includes('hoyolab.com') && u.pathname.includes('/interactive-map/');
+          // Exact host or a real subdomain: a substring test would also accept evil-hoyolab.com
+          // and hoyolab.com.evil.com.
+          const host = u.hostname.toLowerCase();
+          return (host === 'hoyolab.com' || host.endsWith('.hoyolab.com')) && u.pathname.includes('/interactive-map/');
         } catch (e) {
           return false;
         }

@@ -426,15 +426,11 @@ function runSuite() {
         id: 'url_spoof_hoyolab_prefix',
         url: 'https://evil-hoyolab.com/ys/app/interactive-map/index.html',
         expected: null,
-        knownBug:
-          "extension/providers_registry.js uses u.hostname.includes('hoyolab.com') instead of exact/subdomain match",
       },
       {
         id: 'url_spoof_hoyolab_suffix',
         url: 'https://hoyolab.com.evil.com/ys/app/interactive-map/index.html',
         expected: null,
-        knownBug:
-          "extension/providers_registry.js uses u.hostname.includes('hoyolab.com') instead of exact/subdomain match",
       },
       // Empty / invalid strings / non-strings -> null
       {

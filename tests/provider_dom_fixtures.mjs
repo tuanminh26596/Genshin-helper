@@ -762,8 +762,7 @@ async function main() {
     record(
       'appsample_live_surface_vs_underground_classification',
       asUgAccurate,
-      `surface301=${JSON.stringify(asPinsRes.surfacePin301Ug)} ug20413=${JSON.stringify(asPinsRes.ugPin20413Ug)} (expected floor_id="10")`,
-      'provider_runtime.js AppSampleAdapter.collectVisiblePins checks m.sid/m.level>0 (zoom level 4..6 on live surface markers) instead of m.layer.{groupId,floorId}'
+      `surface301=${JSON.stringify(asPinsRes.surfacePin301Ug)} ug20413=${JSON.stringify(asPinsRes.ugPin20413Ug)} (expected floor_id="10")`
     );
 
     // (e) Target lock clearing on AppSample

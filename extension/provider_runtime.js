@@ -18,7 +18,7 @@
   const CT = window.GHCoordTransform;
   const GH_TAB_ID = `gh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const SCRIPT_VERSION = '5.7.0';
-  const SCRIPT_BUILD = 'multi-provider-v1';
+  const SCRIPT_BUILD = 'multi-provider-v2';
 
   // =========================================================================
   // 1. Open Provider Registry & Built-in Tier 1 Adapters
@@ -495,8 +495,10 @@
             iconUrl = String(ctx.catalog.markerIconUrl(m) || '');
           }
         } catch (e) {}
-        const ugFloor = (m.sid && Number(m.sid) > 0) ? Number(m.sid)
-          : ((m.level && Number(m.level) > 0) ? Number(m.level) : 0);
+        // Underground markers carry layer.{groupId, floorId}. m.level is the marker's zoom level
+        // (4..6 on live surface markers), not a floor, so it must not mark a pin underground.
+        const ugFloor = (m.layer && typeof m.layer === 'object' && Number(m.layer.floorId) > 0)
+          ? Number(m.layer.floorId) : 0;
         pins.push({
           id: `appsample:${rawId}`,
           rawId,
