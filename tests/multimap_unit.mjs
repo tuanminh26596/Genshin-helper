@@ -477,6 +477,58 @@ function runSuite() {
     }
   }
 
+  // Server-event parity: a third-party map page (provider_runtime.js) must handle every event the
+  // HoYoLAB page (page_main.js) handles, or the difference must be listed here. Alt+F12 went
+  // silent on AppSample because DIAGNOSTIC_CAPTURED had a HoYoLAB-only handler and nothing said
+  // so. `not_needed` passes; `known_gap` is reported as known-fail until the provider page
+  // handles it (then it turns xpass and the entry must go).
+  {
+    const PROVIDER_EVENT_EXCEPTIONS = {
+      GH_CMD_EXPORT_PINS: ['not_needed', 'cross-map export reads HoYoLAB marks; the app sends it to the HoYoLAB tab only'],
+      HOTKEY_UPDATED: ['not_needed', 'provider pages show no hotkey labels'],
+      SINGLE_MONITOR_UPDATED: ['not_needed', 'deprecated; the HoYoLAB handler is a no-op too'],
+      DIAGNOSTIC_CAPTURED: ['known_gap', 'Alt+F12 is confirmed in game; the optional note dialog for the bundle exists only on HoYoLAB'],
+      LANGUAGE_UPDATED: ['known_gap', 'overlay text already on a provider page is not re-rendered when the app language changes'],
+      LAN_FOCUS_PIN: ['known_gap', 'LAN Companion cannot focus a pin on AppSample / Kongying pages'],
+      LAN_SET_FLOOR: ['known_gap', 'LAN Companion cannot switch the floor on AppSample / Kongying pages'],
+      ROUTE_UPDATED: ['known_gap', 'route documents are drawn only on HoYoLAB pages'],
+      GH_CMD_ROUTE_CLEAR: ['known_gap', 'popup route clear works only on HoYoLAB pages'],
+      GH_CMD_ROUTE_EXPORT: ['known_gap', 'popup route export works only on HoYoLAB pages'],
+      GH_CMD_ROUTE_IMPORT: ['known_gap', 'popup route import works only on HoYoLAB pages'],
+    };
+    const pageSrc = readFileSync(join(ROOT, 'extension', 'page_main.js'), 'utf8');
+    const provSrc = readFileSync(join(ROOT, 'extension', 'provider_runtime.js'), 'utf8');
+    const hoyolabEvents = new Set([...pageSrc.matchAll(/data\.type === '([A-Z_]+)'/g)].map((m) => m[1]));
+    const providerEvents = new Set([
+      ...[...provSrc.matchAll(/case '([A-Z_]+)'/g)].map((m) => m[1]),
+      ...[...provSrc.matchAll(/\.type === '([A-Z_]+)'/g)].map((m) => m[1]),
+    ]);
+    record(
+      'provider_event_parity_sources_parsed',
+      hoyolabEvents.size >= 10 && providerEvents.size >= 5,
+      `page_main=${hoyolabEvents.size} provider_runtime=${providerEvents.size} (a parser change broke the scan)`
+    );
+    for (const type of [...hoyolabEvents].sort()) {
+      const handled = providerEvents.has(type);
+      const exc = PROVIDER_EVENT_EXCEPTIONS[type];
+      if (handled) {
+        record(`provider_event_${type}`, !exc || exc[0] === 'known_gap', `handled by provider_runtime.js but listed as ${exc && exc[0]}`,
+          exc && exc[0] === 'known_gap' ? exc[1] : null);
+      } else if (!exc) {
+        record(`provider_event_${type}`, false,
+          'page_main.js handles it, provider_runtime.js does not; handle it or list it in PROVIDER_EVENT_EXCEPTIONS with a reason');
+      } else if (exc[0] === 'known_gap') {
+        record(`provider_event_${type}`, false, 'not handled on AppSample / Kongying pages', exc[1]);
+      } else {
+        record(`provider_event_${type}`, true, exc[1]);
+      }
+    }
+    for (const type of Object.keys(PROVIDER_EVENT_EXCEPTIONS)) {
+      record(`provider_event_exception_${type}_current`, hoyolabEvents.has(type),
+        'listed in PROVIDER_EVENT_EXCEPTIONS but page_main.js no longer handles it; remove the entry');
+    }
+  }
+
   console.log(
     `Multimap unit: pass ${counts.pass} | fail ${counts.fail} | known-fail ${counts['known-fail']} | xpass ${counts.xpass}`
   );

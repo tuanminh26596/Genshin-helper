@@ -5052,6 +5052,16 @@ impl NavMiniHud {
         ok
     }
 
+    /// Text of the flash line currently set (expired or not), so tests can see it.
+    pub fn flash_text(&self) -> Option<String> {
+        self.shared
+            .lock()
+            .expect("nav hud shared lock poisoned")
+            .flash
+            .as_ref()
+            .map(|f| f.text.clone())
+    }
+
     pub fn flash(&self, text: &str, kind: HudPalette, duration_s: f64) {
         let clean = text.split_whitespace().collect::<Vec<_>>().join(" ");
         let dur_s = if duration_s.is_finite() {

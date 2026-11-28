@@ -66,6 +66,7 @@
   "hud.flash.guide_no_suggestions": "Ghim này không có gợi ý hướng dẫn khác",
   "hud.flash.locked_target": "Đã khóa dẫn đường: {name}",
   "hud.flash.unlocked_target": "Đã bỏ khóa mục tiêu",
+  "hud.flash.no_lock": "Không có ghim nào đang khóa",
   "hud.flash.route_reset": "Đã đặt lại tuyến về đầu chặng 1",
   "hud.flash.web_failed": "Web chưa ghim được — hãy ghim tay trên HoYoLAB",
   "hud.flash.web_unmark_failed": "Web chưa bỏ ghim được — hãy bỏ tay trên HoYoLAB",

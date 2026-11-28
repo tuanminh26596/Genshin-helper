@@ -2469,6 +2469,9 @@ impl AppState {
             self.audio.play("info", false);
             self.broadcast_target_lock_state();
             self.push_lan_snapshot(true);
+        } else {
+            // Nothing was locked: say so instead of staying silent.
+            self.nav_flash("hud.flash.no_lock", HudPalette::Info, 1.8, &[]);
         }
     }
 
@@ -4314,5 +4317,104 @@ mod tests {
         merge_guide_into_pin(&mut hoyolab, &guide);
         assert_eq!(hoyolab.image_url, "https://a/map.jpg", "the map's own image is kept");
         assert_eq!(hoyolab.description, "under the snow");
+    }
+
+    /// Capturer that never returns pixels: hotkey tests must not read the real screen even when
+    /// the game happens to be running on the test machine.
+    struct NoPixelsCapturer;
+
+    impl FrameCapturer for NoPixelsCapturer {
+        fn capture_region(&self, _: i32, _: i32, _: i32, _: i32) -> Option<gh_core::frame::FrameBuf> {
+            None
+        }
+        fn capture_region_bgra(&self, _: i32, _: i32, _: i32, _: i32) -> Option<gh_core::frame::FrameBuf> {
+            None
+        }
+        fn capture_window_client_outcome(
+            &self,
+            _: isize,
+            _: i32,
+            _: i32,
+            _: i32,
+            _: i32,
+        ) -> gh_win32::wgc_hdr::WgcWindowCaptureOutcome {
+            gh_win32::wgc_hdr::WgcWindowCaptureOutcome::Failed
+        }
+        fn window_capture_status(&self) -> String {
+            "test".to_owned()
+        }
+        fn release_window_capture(&self) {}
+        fn close(&self) {}
+    }
+
+    /// What the player can see or hear change after a hotkey: a toast, the HUD flash line, or a
+    /// HUD / Radar state change (guide card, edit mode, HUD or Radar on/off).
+    fn feedback_probe(state: &AppState) -> (u64, Option<String>, UiFrameSnapshot) {
+        (state.hud_toast.last_request().0, state.nav_hud.flash_text(), state.snapshot_ui_state())
+    }
+
+    /// Hotkeys left out of the contract below, each with the reason. Keep this list short: every
+    /// entry is a hotkey whose silence no test would notice.
+    const HOTKEY_FEEDBACK_EXEMPT: &[(&str, &str)] = &[(
+        "switch",
+        "moves focus between the real game and browser windows; the focus change is the feedback \
+         (toast only when no browser is found), and running it would move the tester's windows",
+    )];
+
+    /// Every hotkey the app registers must answer in game, with or without a target pin. A
+    /// hotkey that only talks to the web page leaves the player guessing whenever the page is
+    /// on another monitor, hidden, or a provider page that ignores the event (how Alt+F12 went
+    /// unnoticed). New entries in HOTKEY_ACTIONS are covered automatically.
+    #[test]
+    fn every_hotkey_gives_in_game_feedback() {
+        for (act, why) in HOTKEY_FEEDBACK_EXEMPT {
+            assert!(HOTKEY_ACTIONS.contains(act), "stale exemption {act}: {why}");
+        }
+        let mut silent: Vec<String> = Vec::new();
+        for with_target in [false, true] {
+            for act in HOTKEY_ACTIONS {
+                if HOTKEY_FEEDBACK_EXEMPT.iter().any(|(a, _)| *a == act) {
+                    continue;
+                }
+                let seq = STATE_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+                let root = std::env::temp_dir()
+                    .join(format!("gh_app_state_hk_feedback_{}_{seq}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&root);
+                std::fs::create_dir_all(&root).unwrap();
+                let state = make_test_state_with_capturer(&root, Arc::new(NoPixelsCapturer));
+                if with_target {
+                    let mut nav = state.nav_controller.lock().unwrap();
+                    nav.set_pins(
+                        vec![NavPin {
+                            id: "107596".into(),
+                            name: "Chest".into(),
+                            lat: 100.0,
+                            lng: 200.0,
+                            map_id: 2,
+                            ..Default::default()
+                        }],
+                        true,
+                        None,
+                    );
+                    let g = nav.compute_guidance(100.0, 200.5, Some(0.0), 2, None, false, "TRACKING", "");
+                    assert!(g.target.is_some(), "scenario needs a target");
+                }
+
+                let before = feedback_probe(&state);
+                dispatch_hotkey_action(&state, act);
+                let after = feedback_probe(&state);
+                if after == before {
+                    silent.push(format!("{act} ({})", if with_target { "with target" } else { "no target" }));
+                }
+
+                state.nav_hud.close();
+                state.hud_toast.close();
+                state.guide_fetcher.stop();
+                state.audio.close();
+                state.capturer.close();
+                let _ = std::fs::remove_dir_all(&root);
+            }
+        }
+        assert!(silent.is_empty(), "hotkeys with no in-game feedback: {silent:?}");
     }
 }

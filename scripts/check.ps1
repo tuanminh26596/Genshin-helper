@@ -1014,7 +1014,16 @@ function Build-RealExecutors {
             foreach ($err in $res.Errors) {
                 [Console]::Out.WriteLine("[guards] FAIL: $err")
             }
-            $outcome.ExitCode = if ($res.Passed) { 0 } else { 1 }
+
+            # App locale keys: each must be read by app code or listed as reviewed-unused, so a
+            # planned-but-unbuilt feature (like the silent Alt+F12 toast) cannot hide as a dead key.
+            $localeExit = 1
+            if ([string]::IsNullOrWhiteSpace($EnvInfo.PythonExe)) {
+                [Console]::Out.WriteLine('[guards] FAIL: .venv\Scripts\python.exe not found; cannot check app locale keys.')
+            } else {
+                $localeExit = Invoke-NativeStream -FilePath $EnvInfo.PythonExe -ArgumentList @('-I', (Join-Path $repoRoot 'scripts\check_locale_keys.py'), '--repo', $repoRoot)
+            }
+            $outcome.ExitCode = if ($res.Passed -and $localeExit -eq 0) { 0 } else { 1 }
         }.GetNewClosure()
 
         'audit' = {

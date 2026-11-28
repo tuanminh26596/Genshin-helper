@@ -66,6 +66,7 @@
   "hud.flash.guide_no_suggestions": "No other guide suggestions for this pin",
   "hud.flash.locked_target": "Locked target: {name}",
   "hud.flash.unlocked_target": "Target lock cleared",
+  "hud.flash.no_lock": "No pin is locked",
   "hud.flash.route_reset": "Route progress reset to section 1",
   "hud.flash.web_failed": "Web map could not mark it — mark it manually on HoYoLAB",
   "hud.flash.web_unmark_failed": "Web map could not unmark it — unmark it manually on HoYoLAB",

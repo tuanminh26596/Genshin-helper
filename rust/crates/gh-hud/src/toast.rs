@@ -675,6 +675,13 @@ impl HudToastOverlay {
         self.host.post_message(WM_APP_SHOW, seq as usize, 0)
     }
 
+    /// Sequence number (0 before any) and title of the latest toast request, so tests can see
+    /// that a toast was asked for without reading the window.
+    pub fn last_request(&self) -> (u64, Option<String>) {
+        let guard = self.pending.lock().expect("toast state lock poisoned");
+        (guard.seq(), guard.active_request().map(|r| r.title.clone()))
+    }
+
     pub fn is_thread_spawned(&self) -> bool {
         self.host.is_thread_running()
     }
