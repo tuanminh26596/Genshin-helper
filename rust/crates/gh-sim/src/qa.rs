@@ -45,6 +45,13 @@ pub const QA_REPORT_FILENAME: &str = "qa_report.json";
 pub const HEADING_FLIP_THRESHOLD_DEG: f64 = 120.0;
 pub const HEADING_SPIKE_STEP_THRESHOLD_DEG: f64 = 30.0;
 pub const HEADING_SPIKE_RETURN_THRESHOLD_DEG: f64 = 15.0;
+pub const HEADING_MOVE_STEP_THRESHOLD_DEG: f64 = 4.0;
+pub const HEADING_STUTTER_ENTRY_STEP_DEG: f64 = 5.0;
+pub const HEADING_STUTTER_STALL_CAP_DEG: f64 = 3.0;
+pub const HEADING_STUTTER_STALL_RATIO: f64 = 0.35;
+pub const HEADING_STUTTER_RESUME_STEP_DEG: f64 = 10.0;
+pub const HEADING_STUTTER_RESUME_JERK_DEG: f64 = 10.0;
+pub const HEADING_STUTTER_MAX_STALL_STEPS: usize = 3;
 pub const REBLESS_HEADING_STABILITY_NOTE: &str =
     "re-bless needed for heading stability (blessed_poses.jsonl lacks body_heading/camera_heading)";
 pub const DEFAULT_QA_POLICY: &str = "Agent KHÔNG được chạy --bless, sửa baseline hay nới ngưỡng khi chưa có người dùng đồng ý. / Agents MUST NOT run --bless, modify this baseline, or relax thresholds without explicit user approval.";
@@ -304,11 +311,32 @@ pub struct HeadingStabilityPair {
     pub camera: HeadingStability,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct HeadingSmoothness {
+    pub moving_pairs: usize,
+    pub move_jerk_p50_deg: Option<f64>,
+    pub move_jerk_p95_deg: Option<f64>,
+    pub move_jerk_max_deg: Option<f64>,
+    pub stutters: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct HeadingSmoothnessPair {
+    pub body: HeadingSmoothness,
+    pub camera: HeadingSmoothness,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SessionHeadingStability {
     pub replay: HeadingStabilityPair,
     pub blessed: Option<HeadingStabilityPair>,
     pub live_meta: Option<HeadingStabilityPair>,
+    #[serde(default)]
+    pub replay_smoothness: HeadingSmoothnessPair,
+    #[serde(default)]
+    pub blessed_smoothness: Option<HeadingSmoothnessPair>,
+    #[serde(default)]
+    pub live_meta_smoothness: Option<HeadingSmoothnessPair>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -629,8 +657,7 @@ pub fn compute_heading_stability(samples: &[HeadingSample]) -> HeadingStability 
     }
 }
 
-/// Computes paired body & camera heading stability over observed replay/blessed frames.
-pub fn compute_observed_heading_stability(poses: &[ObservedFrame]) -> HeadingStabilityPair {
+fn collect_observed_heading_samples(poses: &[ObservedFrame]) -> (Vec<HeadingSample>, Vec<HeadingSample>) {
     let body_samples: Vec<HeadingSample> = poses
         .iter()
         .map(|p| HeadingSample {
@@ -647,15 +674,127 @@ pub fn compute_observed_heading_stability(poses: &[ObservedFrame]) -> HeadingSta
             heading: p.camera_heading,
         })
         .collect();
+    (body_samples, camera_samples)
+}
+
+/// Computes paired body & camera heading stability over observed replay/blessed frames.
+pub fn compute_observed_heading_stability(poses: &[ObservedFrame]) -> HeadingStabilityPair {
+    let (body_samples, camera_samples) = collect_observed_heading_samples(poses);
     HeadingStabilityPair {
         body: compute_heading_stability(&body_samples),
         camera: compute_heading_stability(&camera_samples),
     }
 }
 
-/// Loads live `meta.jsonl` and computes body/camera heading stability using only records with
-/// `state == "TRACKING"` and `mode == "minimap"`. Returns `None` if unavailable or missing fields.
-pub fn load_live_meta_heading_stability(meta_path: &Path) -> Option<HeadingStabilityPair> {
+/// Pure function computing informational per-step heading smoothness (`moving_pairs`, move-jerk
+/// percentiles, and mid-sweep `stutters`) for one heading kind over a frame sequence.
+pub fn compute_heading_smoothness(samples: &[HeadingSample]) -> HeadingSmoothness {
+    let valid_heading = |s: &HeadingSample| -> Option<f64> {
+        if s.tracking {
+            s.heading.filter(|h| h.is_finite())
+        } else {
+            None
+        }
+    };
+
+    let mut runs: Vec<Vec<f64>> = Vec::new();
+    let mut cur_run: Vec<f64> = Vec::new();
+    let mut prev_idx: Option<usize> = None;
+
+    for s in samples {
+        if let Some(h) = valid_heading(s) {
+            if prev_idx.is_some_and(|p| p.checked_add(1) == Some(s.idx)) {
+                cur_run.push(h);
+            } else {
+                if cur_run.len() >= 2 {
+                    runs.push(std::mem::take(&mut cur_run));
+                } else {
+                    cur_run.clear();
+                }
+                cur_run.push(h);
+            }
+            prev_idx = Some(s.idx);
+        } else {
+            if cur_run.len() >= 2 {
+                runs.push(std::mem::take(&mut cur_run));
+            } else {
+                cur_run.clear();
+            }
+            prev_idx = None;
+        }
+    }
+    if cur_run.len() >= 2 {
+        runs.push(cur_run);
+    }
+
+    let mut move_jerks = Vec::new();
+    let mut stutters = 0usize;
+
+    for run in &runs {
+        let d: Vec<f64> = run.windows(2).map(|w| wrap_angle_deg(w[1] - w[0])).collect();
+        for pair in d.windows(2) {
+            if pair[0].abs() >= HEADING_MOVE_STEP_THRESHOLD_DEG
+                || pair[1].abs() >= HEADING_MOVE_STEP_THRESHOLD_DEG
+            {
+                move_jerks.push((pair[1] - pair[0]).abs());
+            }
+        }
+
+        let mut t = 0usize;
+        while t + 2 < d.len() {
+            let d_entry = d[t];
+            if d_entry.abs() >= HEADING_STUTTER_ENTRY_STEP_DEG
+                && d_entry.abs() < HEADING_FLIP_THRESHOLD_DEG
+            {
+                let dir = d_entry.signum();
+                let stall_lim =
+                    HEADING_STUTTER_STALL_CAP_DEG.min(d_entry.abs() * HEADING_STUTTER_STALL_RATIO);
+                let mut s = 0usize;
+                while s < HEADING_STUTTER_MAX_STALL_STEPS && t + 1 + s < d.len() {
+                    if d[t + 1 + s].abs() <= stall_lim {
+                        s += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if s >= 1 && t + 1 + s < d.len() {
+                    let d_res = d[t + 1 + s];
+                    if d_res * dir > 0.0
+                        && d_res.abs() < HEADING_FLIP_THRESHOLD_DEG
+                        && d_res.abs() >= HEADING_STUTTER_RESUME_STEP_DEG
+                        && (d_res - d[t + s]).abs() >= HEADING_STUTTER_RESUME_JERK_DEG
+                    {
+                        stutters += 1;
+                        t = t + 1 + s;
+                        continue;
+                    }
+                }
+            }
+            t += 1;
+        }
+    }
+
+    HeadingSmoothness {
+        moving_pairs: move_jerks.len(),
+        move_jerk_p50_deg: percentile(&move_jerks, 0.50).map(round3),
+        move_jerk_p95_deg: percentile(&move_jerks, 0.95).map(round3),
+        move_jerk_max_deg: move_jerks.iter().copied().reduce(f64::max).map(round3),
+        stutters,
+    }
+}
+
+/// Computes paired body & camera heading smoothness over observed replay/blessed frames.
+pub fn compute_observed_heading_smoothness(poses: &[ObservedFrame]) -> HeadingSmoothnessPair {
+    let (body_samples, camera_samples) = collect_observed_heading_samples(poses);
+    HeadingSmoothnessPair {
+        body: compute_heading_smoothness(&body_samples),
+        camera: compute_heading_smoothness(&camera_samples),
+    }
+}
+
+fn load_live_meta_heading_samples(
+    meta_path: &Path,
+) -> Option<(Vec<HeadingSample>, Vec<HeadingSample>)> {
     let file = std::fs::File::open(meta_path).ok()?;
     let reader = BufReader::new(file);
     let mut body_samples = Vec::new();
@@ -700,9 +839,26 @@ pub fn load_live_meta_heading_stability(meta_path: &Path) -> Option<HeadingStabi
         return None;
     }
 
+    Some((body_samples, camera_samples))
+}
+
+/// Loads live `meta.jsonl` and computes body/camera heading stability using only records with
+/// `state == "TRACKING"` and `mode == "minimap"`. Returns `None` if unavailable or missing fields.
+pub fn load_live_meta_heading_stability(meta_path: &Path) -> Option<HeadingStabilityPair> {
+    let (body_samples, camera_samples) = load_live_meta_heading_samples(meta_path)?;
     Some(HeadingStabilityPair {
         body: compute_heading_stability(&body_samples),
         camera: compute_heading_stability(&camera_samples),
+    })
+}
+
+/// Loads live `meta.jsonl` and computes body/camera heading smoothness using only records with
+/// `state == "TRACKING"` and `mode == "minimap"`. Returns `None` if unavailable or missing fields.
+pub fn load_live_meta_heading_smoothness(meta_path: &Path) -> Option<HeadingSmoothnessPair> {
+    let (body_samples, camera_samples) = load_live_meta_heading_samples(meta_path)?;
+    Some(HeadingSmoothnessPair {
+        body: compute_heading_smoothness(&body_samples),
+        camera: compute_heading_smoothness(&camera_samples),
     })
 }
 
@@ -1190,7 +1346,7 @@ fn fmt_opt_w(v: Option<f64>) -> String {
 
 pub fn format_qa_header() -> String {
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:<20} {:<24} {:<26} {:>6}  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<20} {:<13} {:<10} {:<10} {:<20} {:<24} {:<26} {:>6}  {}",
         "Session",
         "Status",
         "Frames",
@@ -1199,6 +1355,7 @@ pub fn format_qa_header() -> String {
         "MMap(sync/acq)",
         "vs Meta[ref]",
         "Arrow (b/c flips)",
+        "Smooth(cSt/p95 bSt)",
         "HUD(p50/max)",
         "InGame",
         "Prov",
@@ -1377,6 +1534,15 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
             hs.replay.body.flips, hs.replay.camera.flips
         ),
     };
+    let smooth_col = {
+        let rs = &hs.replay_smoothness;
+        let p95_s = rs
+            .camera
+            .move_jerk_p95_deg
+            .map(|v| format!("{v:.1}°"))
+            .unwrap_or_else(|| "-".to_owned());
+        format!("c{}/{} b{}", rs.camera.stutters, p95_s, rs.body.stutters)
+    };
     let hud_col = match (
         r.live_mmap_latency.available,
         r.live_mmap_latency.summary.median_hud_s,
@@ -1391,7 +1557,7 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
     let nav_col = format_nav_col(r.input_replay.as_ref());
     let truth_col = format_truth_col(r.truth.as_ref());
     format!(
-        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<13} {:<10} {:<10} {:<20} {:<24} {:<26} {:>5.1}s  {}",
+        "{:<22} {:<10} {:>6} {:<13} {:<25} {:<14} {:<18} {:<20} {:<20} {:<13} {:<10} {:<10} {:<20} {:<24} {:<26} {:>5.1}s  {}",
         r.session_name,
         r.status,
         r.frames,
@@ -1400,6 +1566,7 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
         mmap_col,
         meta_col,
         arrow_col,
+        smooth_col,
         hud_col,
         in_game_col,
         prov_col,
@@ -1457,8 +1624,21 @@ fn finalize_session_result(
     ));
     let meta_ref = meta_ref_from_report(&report);
     let replay_heading_stability = compute_observed_heading_stability(&poses);
+    let replay_heading_smoothness = compute_observed_heading_smoothness(&poses);
     let meta_path = sdir.join("meta.jsonl");
-    let live_meta_heading_stability = load_live_meta_heading_stability(&meta_path);
+    let live_meta_samples = load_live_meta_heading_samples(&meta_path);
+    let live_meta_heading_stability = live_meta_samples
+        .as_ref()
+        .map(|(b, c)| HeadingStabilityPair {
+            body: compute_heading_stability(b),
+            camera: compute_heading_stability(c),
+        });
+    let live_meta_heading_smoothness = live_meta_samples
+        .as_ref()
+        .map(|(b, c)| HeadingSmoothnessPair {
+            body: compute_heading_smoothness(b),
+            camera: compute_heading_smoothness(c),
+        });
     let live_mmap_latency = load_live_mmap_latency(&meta_path);
     let session_prov = report.provenance.clone();
     let session_fidelity = report.recording_fidelity.clone();
@@ -1548,6 +1728,9 @@ fn finalize_session_result(
                 replay: replay_heading_stability,
                 blessed: Some(replay_heading_stability),
                 live_meta: live_meta_heading_stability,
+                replay_smoothness: replay_heading_smoothness,
+                blessed_smoothness: Some(replay_heading_smoothness),
+                live_meta_smoothness: live_meta_heading_smoothness,
             },
             live_mmap_latency,
             provenance: Some(session_prov),
@@ -1585,6 +1768,9 @@ fn finalize_session_result(
                 replay: replay_heading_stability,
                 blessed: None,
                 live_meta: live_meta_heading_stability,
+                replay_smoothness: replay_heading_smoothness,
+                blessed_smoothness: None,
+                live_meta_smoothness: live_meta_heading_smoothness,
             },
             live_mmap_latency,
             provenance: Some(session_prov),
@@ -1598,6 +1784,7 @@ fn finalize_session_result(
             let mut blessed_sha256_ok = false;
             let mut vs_blessed = None;
             let mut blessed_heading_stability = None;
+            let mut blessed_heading_smoothness = None;
 
             if !blessed_path.is_file() {
                 reasons.push(format!("thiếu file {BLESSED_POSES_FILENAME}"));
@@ -1635,6 +1822,8 @@ fn finalize_session_result(
                         if has_heading_fields {
                             blessed_heading_stability =
                                 Some(compute_observed_heading_stability(&blessed_poses));
+                            blessed_heading_smoothness =
+                                Some(compute_observed_heading_smoothness(&blessed_poses));
                         }
                         let hdg_gate = evaluate_heading_stability_gate(
                             &replay_heading_stability,
@@ -1687,6 +1876,9 @@ fn finalize_session_result(
                     replay: replay_heading_stability,
                     blessed: blessed_heading_stability,
                     live_meta: live_meta_heading_stability,
+                    replay_smoothness: replay_heading_smoothness,
+                    blessed_smoothness: blessed_heading_smoothness,
+                    live_meta_smoothness: live_meta_heading_smoothness,
                 },
                 live_mmap_latency,
                 provenance: Some(session_prov),
@@ -2369,6 +2561,98 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
     println!("{sep}");
     if !opts.bless {
         println!("{}", scenario_summary.format_line());
+    }
+    if !results.is_empty() {
+        let rb: usize = results.iter().map(|r| r.heading_stability.replay.body.flips).sum();
+        let rc: usize = results.iter().map(|r| r.heading_stability.replay.camera.flips).sum();
+        let rcs: usize = results
+            .iter()
+            .map(|r| r.heading_stability.replay_smoothness.camera.stutters)
+            .sum();
+        let rbs: usize = results
+            .iter()
+            .map(|r| r.heading_stability.replay_smoothness.body.stutters)
+            .sum();
+        let max_p95 = results
+            .iter()
+            .filter_map(|r| r.heading_stability.replay_smoothness.camera.move_jerk_p95_deg)
+            .reduce(f64::max)
+            .map(|v| format!("{v:.1}°"))
+            .unwrap_or_else(|| "-".to_owned());
+
+        let mut flip_notes = Vec::new();
+        let mut stut_notes = Vec::new();
+        if results.iter().any(|r| r.heading_stability.blessed.is_some()) {
+            let bb: usize = results
+                .iter()
+                .filter_map(|r| r.heading_stability.blessed.map(|b| b.body.flips))
+                .sum();
+            let bc: usize = results
+                .iter()
+                .filter_map(|r| r.heading_stability.blessed.map(|b| b.camera.flips))
+                .sum();
+            flip_notes.push(format!("blessed b{bb}/c{bc}"));
+        }
+        if results.iter().any(|r| r.heading_stability.live_meta.is_some()) {
+            let lb: usize = results
+                .iter()
+                .filter_map(|r| r.heading_stability.live_meta.map(|l| l.body.flips))
+                .sum();
+            let lc: usize = results
+                .iter()
+                .filter_map(|r| r.heading_stability.live_meta.map(|l| l.camera.flips))
+                .sum();
+            flip_notes.push(format!("live b{lb}/c{lc}"));
+        }
+        if results
+            .iter()
+            .any(|r| r.heading_stability.blessed_smoothness.is_some())
+        {
+            let bcs: usize = results
+                .iter()
+                .filter_map(|r| r.heading_stability.blessed_smoothness.map(|b| b.camera.stutters))
+                .sum();
+            let bbs: usize = results
+                .iter()
+                .filter_map(|r| r.heading_stability.blessed_smoothness.map(|b| b.body.stutters))
+                .sum();
+            stut_notes.push(format!("blessed c{bcs}/b{bbs}"));
+        }
+        if results
+            .iter()
+            .any(|r| r.heading_stability.live_meta_smoothness.is_some())
+        {
+            let lcs: usize = results
+                .iter()
+                .filter_map(|r| {
+                    r.heading_stability
+                        .live_meta_smoothness
+                        .map(|l| l.camera.stutters)
+                })
+                .sum();
+            let lbs: usize = results
+                .iter()
+                .filter_map(|r| {
+                    r.heading_stability
+                        .live_meta_smoothness
+                        .map(|l| l.body.stutters)
+                })
+                .sum();
+            stut_notes.push(format!("live c{lcs}/b{lbs}"));
+        }
+        let flip_sfx = if flip_notes.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", flip_notes.join(", "))
+        };
+        let stut_sfx = if stut_notes.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", stut_notes.join(", "))
+        };
+        println!(
+            "Heading: flips b{rb}/c{rc}{flip_sfx} | stutters c{rcs}/b{rbs}{stut_sfx} | cam move-jerk p95 max={max_p95}"
+        );
     }
     println!(
         "Tổng: {passed_sessions}/{total_sessions} {} | thời gian: {total_wall_elapsed_s:.1}s | jobs: {effective_jobs} | cache: {cache_hits}/{total_work} | baseline: {}",
@@ -3144,6 +3428,56 @@ mod tests {
     }
 
     #[test]
+    fn heading_smoothness_measures_sweeps_stutters_wrap_and_gaps() {
+        let mk = |idx: usize, tracking: bool, heading: Option<f64>| HeadingSample {
+            idx,
+            tracking,
+            heading,
+        };
+
+        // 1. Constant +15 deg/step sweep wrapping across 350 -> 5 -> 20: 0 stutters, 0.0 jerk
+        let smooth_wrap: Vec<HeadingSample> = [320.0, 335.0, 350.0, 5.0, 20.0, 35.0]
+            .iter()
+            .enumerate()
+            .map(|(k, &h)| mk(k + 1, true, Some(h)))
+            .collect();
+        let s_wrap = compute_heading_smoothness(&smooth_wrap);
+        assert_eq!(s_wrap.moving_pairs, 4);
+        assert_eq!(s_wrap.move_jerk_p50_deg, Some(0.0));
+        assert_eq!(s_wrap.move_jerk_p95_deg, Some(0.0));
+        assert_eq!(s_wrap.move_jerk_max_deg, Some(0.0));
+        assert_eq!(s_wrap.stutters, 0);
+
+        // 2. Two real stutter signatures separated by a gap (idx 6 -> 10):
+        //    Run A deltas: +15.0, +1.5 (1-frame stall), +28.0 (catch-up) -> 1 stutter
+        //    Run B deltas: -14.0, -1.8, 0.0 (2-frame stall), -32.0 (catch-up) -> 1 stutter
+        let stalled = vec![
+            mk(1, true, Some(100.0)),
+            mk(2, true, Some(115.0)),
+            mk(3, true, Some(116.5)),
+            mk(4, true, Some(144.5)),
+            // Gap breaks contiguous run: 144.5 -> 200.0 must NOT count as step or stutter
+            mk(10, true, Some(200.0)),
+            mk(11, true, Some(186.0)),
+            mk(12, true, Some(184.2)),
+            mk(13, true, Some(184.2)),
+            mk(14, true, Some(152.2)),
+            // Tracking lost mid-run breaks continuity
+            mk(15, false, Some(300.0)),
+            mk(16, true, Some(301.0)),
+            mk(17, true, Some(330.0)),
+        ];
+        let s_stalled = compute_heading_smoothness(&stalled);
+        assert_eq!(s_stalled.stutters, 2, "got {s_stalled:?}");
+        assert_eq!(s_stalled.moving_pairs, 4, "got {s_stalled:?}");
+        assert!(
+            s_stalled.move_jerk_p95_deg.unwrap_or(0.0) >= 26.0,
+            "expected high p95 jerk, got {s_stalled:?}"
+        );
+        assert_eq!(s_stalled.move_jerk_max_deg, Some(32.0));
+    }
+
+    #[test]
     fn heading_stability_gate_handles_worse_equal_better_and_missing_blessed_fields() {
         let blessed = HeadingStabilityPair {
             body: HeadingStability {
@@ -3301,6 +3635,12 @@ mod tests {
         let mp_old = tmp.0.join("meta_old.jsonl");
         std::fs::write(&mp_old, "{\"i\":1,\"state\":\"TRACKING\"}\n").unwrap();
         assert_eq!(load_live_meta_heading_stability(&mp_old), None);
+        assert_eq!(load_live_meta_heading_smoothness(&mp_old), None);
+
+        let smooth_pair =
+            load_live_meta_heading_smoothness(&mp).expect("should parse live meta smoothness");
+        assert_eq!(smooth_pair.body.stutters, 0);
+        assert_eq!(smooth_pair.camera.moving_pairs, 0);
     }
 
     #[test]
@@ -3356,6 +3696,23 @@ mod tests {
                         spikes: 0,
                     },
                 }),
+                replay_smoothness: HeadingSmoothnessPair {
+                    body: HeadingSmoothness {
+                        moving_pairs: 10,
+                        move_jerk_p50_deg: Some(2.0),
+                        move_jerk_p95_deg: Some(15.0),
+                        move_jerk_max_deg: Some(25.0),
+                        stutters: 2,
+                    },
+                    camera: HeadingSmoothness {
+                        moving_pairs: 20,
+                        move_jerk_p50_deg: Some(1.5),
+                        move_jerk_p95_deg: Some(12.4),
+                        move_jerk_max_deg: Some(28.0),
+                        stutters: 1,
+                    },
+                },
+                ..SessionHeadingStability::default()
             },
             live_mmap_latency: LiveMMapLatency::default(),
             provenance: None,
@@ -3364,9 +3721,14 @@ mod tests {
             truth: None,
         };
         let formatted = format_qa_row(&row_with_live);
+        assert!(hdr.contains("Smooth"), "header missing Smooth: {hdr}");
         assert!(
             formatted.contains("b8/c0 live b8/c0"),
             "unexpected row: {formatted}"
+        );
+        assert!(
+            formatted.contains("c1/12.4° b2"),
+            "missing Smooth column in row: {formatted}"
         );
         assert!(hdr.contains("HUD"), "header missing HUD: {hdr}");
         assert!(formatted.contains("n/a"), "unavailable latency should print n/a: {formatted}");

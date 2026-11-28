@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "210311_f308_mm_cone_dark_terrain",
+  "description": "Real minimap crop where the camera cone sits on dark terrain flanked by brighter rock, failing global wedge_ok.",
+  "notes": "Exported from sess_20261127_210311 frame i=308 (0-based n=307, 2560x1440 crop 291x291+79+20). Cone center is ~23.9 deg with prior 7.7 deg; baseline held at 356.3 deg and jumped +36.5 deg on f309.",
+  "image": "scratch/frame_fixtures/sess_20261127_210311_f308_mm.png",
+  "width": 291,
+  "height": 291,
+  "is_gamepad": false,
+  "known_bug": null,
+  "minimap_heading": {
+    "expected_cone_deg": 23.9,
+    "cone_tolerance_deg": 8.0,
+    "cone_prior_deg": 7.7,
+    "require_trusted_cone": true,
+    "perturb_seeds": [101, 202]
+  }
+}

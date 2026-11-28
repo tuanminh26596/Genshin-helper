@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "210905_f700_mm_cone_dark_terrain",
+  "description": "Real minimap crop where a strong white-veil cone over dark terrain fails global wedge_ok.",
+  "notes": "Exported from sess_20261127_210905 frame i=700 (0-based n=699, 2560x1440 crop 291x291+79+20). Cone center is ~120.9 deg with prior 112.5 deg; baseline stalled at 112.2 deg and jumped +20.1 deg on f701.",
+  "image": "scratch/frame_fixtures/sess_20261127_210905_f700_mm.png",
+  "width": 291,
+  "height": 291,
+  "is_gamepad": false,
+  "known_bug": null,
+  "minimap_heading": {
+    "expected_cone_deg": 120.9,
+    "cone_tolerance_deg": 8.0,
+    "cone_prior_deg": 112.5,
+    "require_trusted_cone": true,
+    "perturb_seeds": [101, 202]
+  }
+}

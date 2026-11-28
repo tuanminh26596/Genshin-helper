@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "011544_f149_mm_cone_distractor",
+  "description": "Real minimap crop where a static bright terrain edge near 24 deg hijacks argmax away from the sweeping cone at ~268.6 deg.",
+  "notes": "Exported from sess_20261127_011544 frame i=149 (0-based n=148, 2560x1440 crop 291x291+79+20). Prior cone heading from f148 is ~280.5 deg; baseline stalled for 2 frames before jumping -30.8 deg on f151.",
+  "image": "scratch/frame_fixtures/sess_20261127_011544_f149_mm.png",
+  "width": 291,
+  "height": 291,
+  "is_gamepad": false,
+  "known_bug": null,
+  "minimap_heading": {
+    "expected_cone_deg": 268.6,
+    "cone_tolerance_deg": 10.0,
+    "cone_prior_deg": 280.5,
+    "require_trusted_cone": true,
+    "perturb_seeds": [101, 202]
+  }
+}

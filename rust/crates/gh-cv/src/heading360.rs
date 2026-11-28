@@ -448,6 +448,7 @@ fn extract_cone_white_veil_joint(
     ann: ArrayView3<'_, u8>,
     _v_prof: &[f32; POLAR_BINS],
     _s_prof: &[f32; POLAR_BINS],
+    prior_heading: Option<f64>,
 ) -> Option<(f64, f64)> {
     let h_rad = ann.dim().1;
     if h_rad < 4 {
@@ -545,64 +546,55 @@ fn extract_cone_white_veil_joint(
         }
     }
 
-    let mut best_idx = 0usize;
-    let mut pk = f32::NEG_INFINITY;
-    for (i, &v) in best_pair.iter().enumerate() {
-        if v > pk {
-            pk = v;
-            best_idx = i;
-        }
-    }
-    let pk_f = pk as f64;
-    if pk_f < 0.065 {
-        return None;
-    }
-
-    let mut bg_sum = 0.0f64;
-    let mut bg_cnt = 0usize;
-    let mut second_pk = 0.0f64;
-    for (i, &v) in best_pair.iter().enumerate() {
-        if circular_bin_dist(i, best_idx) > 28 {
-            let vf = v as f64;
-            bg_sum += vf;
-            bg_cnt += 1;
-            if vf > second_pk {
-                second_pk = vf;
+    // Without a fresh prior, inspect only the strongest global peak (preserving zero extra
+    // false-positive risk on negative backgrounds). With a trusted prior during an active sweep,
+    // inspect top-3 separated peaks so static bright terrain edges cannot hijack or stall.
+    let max_cands = if prior_heading.is_some() { 3 } else { 1 };
+    let mut raw_peaks: Vec<(usize, f64)> = Vec::with_capacity(max_cands);
+    for _ in 0..max_cands {
+        let mut b_idx = None;
+        let mut b_val = f32::NEG_INFINITY;
+        for (i, &v) in best_pair.iter().enumerate() {
+            if raw_peaks
+                .iter()
+                .all(|&(chosen, _)| circular_bin_dist(i, chosen) > 28)
+                && v > b_val
+            {
+                b_val = v;
+                b_idx = Some(i);
             }
         }
+        if let Some(idx) = b_idx
+            && (b_val as f64) >= 0.065
+        {
+            raw_peaks.push((idx, b_val as f64));
+        } else {
+            break;
+        }
     }
-    if bg_cnt == 0 {
-        return None;
-    }
-    let bg_mean = bg_sum / bg_cnt as f64;
-    let snr = pk_f / (bg_mean + 1e-4);
-    if snr < 3.2 {
-        return None;
-    }
-    // Reject ambiguous peaks competing with a bright static terrain/snow edge (>20 deg away)
-    // so snow maps never flip-flop between two near-tied terrain edges.
-    if pk_f < 0.22 && second_pk > 0.0 && pk_f < 1.25 * second_pk {
-        return None;
-    }
+    let &(top_idx, top_raw_pk) = raw_peaks.first()?;
 
-    // Evaluate wedge brightness & desaturation on the active inner cone band (r = 26..76)
-    // so outer snow/border clutter does not drown out the cone's contrast signal.
+    let mut bg_g_sum = 0.0f64;
+    let mut bg_g_cnt = 0usize;
+    for (i, &v) in best_pair.iter().enumerate() {
+        if circular_bin_dist(i, top_idx) > 28 {
+            bg_g_sum += v as f64;
+            bg_g_cnt += 1;
+        }
+    }
+    if bg_g_cnt == 0 {
+        return None;
+    }
+    let bg_mean_global = bg_g_sum / bg_g_cnt as f64;
+
+    // Precompute per-row brightness & desaturation on the active inner cone band (r = 26..76)
+    // once so candidate evaluation and local edge checks reuse it cleanly.
     let inner_rad = ((h_rad * 2) / 3).max(4).min(h_rad);
-    let mut in_v_sum = 0.0f64;
-    let mut in_s_sum = 0.0f64;
-    let mut in_cnt = 0usize;
-    let mut out_v_sum = 0.0f64;
-    let mut out_s_sum = 0.0f64;
-    let mut out_cnt = 0usize;
     let inv_v = 1.0 / (255.0 * inner_rad as f64);
     let inv_r = 1.0 / inner_rad as f64;
+    let mut row_v = [0.0f64; POLAR_BINS];
+    let mut row_s = [0.0f64; POLAR_BINS];
     for i in 0..POLAR_BINS {
-        let cd = circular_bin_dist(i, best_idx);
-        let is_in = cd <= 56;
-        let is_out = (72..=112).contains(&cd);
-        if !is_in && !is_out {
-            continue;
-        }
         let row_off = i * h_rad;
         let mut rv = 0u64;
         let mut rs = 0.0f64;
@@ -618,63 +610,196 @@ fn extract_cone_white_veil_joint(
                 rs += (mx - mn) as f64 / mx as f64;
             }
         }
-        let vf = rv as f64 * inv_v;
-        let sf = rs * inv_r;
-        if is_in {
-            in_v_sum += vf;
-            in_s_sum += sf;
-            in_cnt += 1;
-        } else {
-            out_v_sum += vf;
-            out_s_sum += sf;
-            out_cnt += 1;
+        row_v[i] = rv as f64 * inv_v;
+        row_s[i] = rs * inv_r;
+    }
+
+    #[derive(Clone, Copy)]
+    struct VeilCand {
+        idx: usize,
+        pk: f64,
+        snr: f64,
+        heading_cw: f64,
+    }
+
+    let mut valid: Vec<VeilCand> = Vec::with_capacity(raw_peaks.len());
+    for &(cand_idx, pk_f) in &raw_peaks {
+        let mut bg_sum = 0.0f64;
+        let mut bg_cnt = 0usize;
+        for (i, &v) in best_pair.iter().enumerate() {
+            if circular_bin_dist(i, cand_idx) > 28 {
+                bg_sum += v as f64;
+                bg_cnt += 1;
+            }
         }
+        if bg_cnt == 0 {
+            continue;
+        }
+        let bg_m = bg_sum / bg_cnt as f64;
+        let snr = pk_f / (bg_m.min(bg_mean_global) + 1e-4);
+        if snr < 3.2 {
+            continue;
+        }
+
+        let mut in_v_sum = 0.0f64;
+        let mut in_s_sum = 0.0f64;
+        let mut in_cnt = 0usize;
+        let mut out_v_sum = 0.0f64;
+        let mut out_s_sum = 0.0f64;
+        let mut out_cnt = 0usize;
+        let mut loc_in_v_sum = 0.0f64;
+        let mut loc_in_s_sum = 0.0f64;
+        let mut loc_in_cnt = 0usize;
+        let mut loc_out_v_sum = 0.0f64;
+        let mut loc_out_s_sum = 0.0f64;
+        let mut loc_out_cnt = 0usize;
+
+        for i in 0..POLAR_BINS {
+            let cd = circular_bin_dist(i, cand_idx);
+            if cd <= 56 {
+                in_v_sum += row_v[i];
+                in_s_sum += row_s[i];
+                in_cnt += 1;
+            } else if (72..=112).contains(&cd) {
+                out_v_sum += row_v[i];
+                out_s_sum += row_s[i];
+                out_cnt += 1;
+            }
+            if (48..=62).contains(&cd) {
+                loc_in_v_sum += row_v[i];
+                loc_in_s_sum += row_s[i];
+                loc_in_cnt += 1;
+            } else if (70..=84).contains(&cd) {
+                loc_out_v_sum += row_v[i];
+                loc_out_s_sum += row_s[i];
+                loc_out_cnt += 1;
+            }
+        }
+        if in_cnt == 0 || out_cnt == 0 || loc_in_cnt == 0 || loc_out_cnt == 0 {
+            continue;
+        }
+
+        let in_v = in_v_sum / in_cnt as f64;
+        let out_v = out_v_sum / out_cnt as f64;
+        let in_s = in_s_sum / in_cnt as f64;
+        let out_s = out_s_sum / out_cnt as f64;
+        let loc_in_v = loc_in_v_sum / loc_in_cnt as f64;
+        let loc_in_s = loc_in_s_sum / loc_in_cnt as f64;
+        let loc_out_v = loc_out_v_sum / loc_out_cnt as f64;
+        let loc_out_s = loc_out_s_sum / loc_out_cnt as f64;
+
+        // Require either global brightness/desaturation contrast, local cone-edge brightening
+        // without saturation jump (dark terrain corridor flanked by brighter rock), or
+        // strong high-SNR 90-deg edge pairing. Still blocks dark desaturated structures.
+        let wedge_ok = in_v > out_v + 0.005
+            || (out_s > in_s + 0.015 && in_v >= out_v - 0.03)
+            || (out_s > in_s + 0.08 && in_v >= out_v - 0.07)
+            || (loc_in_v > loc_out_v + 0.015
+                && loc_out_s >= loc_in_s - 0.01
+                && in_v >= out_v - 0.08)
+            || (snr >= 12.0 && pk_f >= 0.22 && in_v >= out_v - 0.08)
+            || (snr >= 15.0 && pk_f >= 0.22);
+        if !wedge_ok {
+            continue;
+        }
+
+        let c_sub = circular_subpixel_peak(&best_pair, cand_idx, false);
+        let heading_cw = wrap_angle_360((c_sub / POLAR_BINS as f64) * 360.0 + 90.0);
+        valid.push(VeilCand {
+            idx: cand_idx,
+            pk: pk_f,
+            snr,
+            heading_cw,
+        });
     }
-    if in_cnt == 0 || out_cnt == 0 {
-        return None;
-    }
-    let in_v = in_v_sum / in_cnt as f64;
-    let out_v = out_v_sum / out_cnt as f64;
-    let in_s = in_s_sum / in_cnt as f64;
-    let out_s = out_s_sum / out_cnt as f64;
-    // Block dark desaturated structures (e.g. brown/grey buildings bordered by blue snow with
-    // in_v << out_v) from passing on desaturation alone.
-    let wedge_ok = in_v > out_v + 0.005
-        || (out_s > in_s + 0.015 && in_v >= out_v - 0.03)
-        || (snr >= 15.0 && pk_f >= 0.22);
-    if !wedge_ok {
+
+    if valid.is_empty() {
         return None;
     }
 
-    let c_sub = circular_subpixel_peak(&best_pair, best_idx, false);
-    let heading_cw = wrap_angle_360((c_sub / POLAR_BINS as f64) * 360.0 + 90.0);
-    let fill_sc = (pk_f / 0.35).min(1.0);
-    let snr_sc = ((snr - 3.0) / 14.0).clamp(0.0, 1.0);
-    let dom_ratio = if second_pk > 1e-4 {
-        (pk_f / second_pk).clamp(1.0, 3.0)
+    let (chosen, prior_matched) = if let Some(prior) = prior_heading {
+        let d_top = shortest_angle_delta(prior, valid[0].heading_cw).abs();
+        if let Some(&p_cand) = valid
+            .iter()
+            .filter(|c| {
+                let d_prior = shortest_angle_delta(prior, c.heading_cw).abs();
+                d_prior <= 32.0
+                    && c.pk >= 0.075
+                    && c.pk >= 0.50 * top_raw_pk
+                    && (d_top > 60.0 || c.pk >= 0.75 * valid[0].pk)
+            })
+            .max_by(|a, b| a.pk.total_cmp(&b.pk))
+        {
+            (p_cand, true)
+        } else {
+            (valid[0], false)
+        }
+    } else {
+        (valid[0], false)
+    };
+
+    let mut other_pk = 0.0f64;
+    for (i, &v) in best_pair.iter().enumerate() {
+        if circular_bin_dist(i, chosen.idx) > 28 {
+            if prior_matched
+                && let Some(prior) = prior_heading
+            {
+                let h = wrap_angle_360((i as f64 / POLAR_BINS as f64) * 360.0 + 90.0);
+                if shortest_angle_delta(prior, h).abs() > 55.0 {
+                    continue;
+                }
+            }
+            let vf = v as f64;
+            if vf > other_pk {
+                other_pk = vf;
+            }
+        }
+    }
+
+    if !prior_matched && chosen.pk < 0.22 && other_pk > 0.0 && chosen.pk < 1.25 * other_pk {
+        // Reject un-priored ambiguous peaks competing with a bright static terrain/snow edge
+        // (>20 deg away) so snow maps never flip-flop between two near-tied terrain edges.
+        return None;
+    }
+
+    let fill_sc = (chosen.pk / 0.35).min(1.0);
+    let snr_sc = ((chosen.snr - 3.0) / 14.0).clamp(0.0, 1.0);
+    let dom_ratio = if other_pk > 1e-4 {
+        (chosen.pk / other_pk).clamp(1.0, 3.0)
     } else {
         3.0
     };
     let dom_sc = ((dom_ratio - 1.0) / 1.5).clamp(0.0, 1.0);
     let conf = (0.48 + 0.24 * fill_sc + 0.16 * snr_sc + 0.08 * dom_sc).clamp(0.48, 0.96);
-    Some((heading_cw, conf))
+    Some((chosen.heading_cw, conf))
 }
 
 fn extract_cone_bgr_blend_simd(
     ann: ArrayView3<'_, u8>,
     v_prof: &[f32; POLAR_BINS],
     s_prof: &[f32; POLAR_BINS],
+    prior_heading: Option<f64>,
 ) -> Option<(f64, f64)> {
     // 1. Razor-sharp SDR 25% white-veil LUT fast path (tight span <= 10 deg, fill >= 0.10,
     //    SNR >= 6.0) so asymmetric snow/cliff edges never hijack `white_veil_joint` mid-spin.
-    if let Some(res) =
+    //    If a fresh prior contradicts a distant LUT jump (> 60 deg), prefer a joint-veil match
+    //    within 32 deg of the prior first.
+    if let Some((deg, conf)) =
         extract_cone_bgr_blend_with_lut(ann, v_prof, lut_pred_u8(), 8, 10.0, 0.10, 6.0)
     {
-        return Some(res);
+        if let Some(prior) = prior_heading
+            && shortest_angle_delta(prior, deg).abs() > 60.0
+            && let Some((w_deg, w_conf)) =
+                extract_cone_white_veil_joint(ann, v_prof, s_prof, Some(prior))
+            && shortest_angle_delta(prior, w_deg).abs() <= 32.0
+        {
+            return Some((w_deg, w_conf));
+        }
+        return Some((deg, conf));
     }
     // 2. Joint 90-deg-paired achromatic white-veil invariant: handles radial-gradient cones,
     //    bright snow biomes, dark underground caves, and HDR-shifted alpha cones smoothly.
-    if let Some(res) = extract_cone_white_veil_joint(ann, v_prof, s_prof) {
+    if let Some(res) = extract_cone_white_veil_joint(ann, v_prof, s_prof, prior_heading) {
         return Some(res);
     }
     // 3. Relaxed SDR 25% LUT fallback (only when joint white-veil did not lock).
@@ -889,6 +1014,13 @@ fn extract_cone_hsv_adaptive_polar(
 }
 
 pub fn extract_camera_view_cone(minimap_img: ArrayView3<'_, u8>) -> ConeDetection {
+    extract_camera_view_cone_with_prior(minimap_img, None)
+}
+
+pub fn extract_camera_view_cone_with_prior(
+    minimap_img: ArrayView3<'_, u8>,
+    prior_heading: Option<f64>,
+) -> ConeDetection {
     let (h, w, c) = minimap_img.dim();
     if (c != 3 && c != 4) || h.min(w) < 24 {
         return ConeDetection::default();
@@ -949,7 +1081,9 @@ pub fn extract_camera_view_cone(minimap_img: ArrayView3<'_, u8>) -> ConeDetectio
         s_prof[y] = (sum_s * inv_h) as f32;
     }
 
-    if let Some((deg, conf)) = extract_cone_bgr_blend_simd(ann.view(), &v_prof, &s_prof) {
+    if let Some((deg, conf)) =
+        extract_cone_bgr_blend_simd(ann.view(), &v_prof, &s_prof, prior_heading)
+    {
         return ConeDetection {
             heading_deg: Some(deg),
             confidence: conf,
@@ -980,10 +1114,17 @@ fn frame_view_to_bgr_or_bgra(frame: FrameView<'_>) -> Option<Array3<u8>> {
 }
 
 pub fn extract_camera_view_cone_frame(frame: FrameView<'_>) -> ConeDetection {
+    extract_camera_view_cone_frame_with_prior(frame, None)
+}
+
+pub fn extract_camera_view_cone_frame_with_prior(
+    frame: FrameView<'_>,
+    prior_heading: Option<f64>,
+) -> ConeDetection {
     let Some(arr) = frame_view_to_bgr_or_bgra(frame) else {
         return ConeDetection::default();
     };
-    extract_camera_view_cone(arr.view())
+    extract_camera_view_cone_with_prior(arr.view(), prior_heading)
 }
 
 const ARROW_POLAR_BINS: usize = 128;
@@ -1243,10 +1384,102 @@ fn circular_arrow_bin_dist(a: usize, b: usize) -> usize {
     d1.min(d2)
 }
 
+fn hist_quantile_u8(hist: &[u32; 256], n: usize, q: f64) -> u8 {
+    let target = (q.clamp(0.0, 1.0) * n.saturating_sub(1) as f64).round() as usize;
+    let mut cum = 0usize;
+    for (val, &cnt) in hist.iter().enumerate() {
+        cum += cnt as usize;
+        if cum > target {
+            return val as u8;
+        }
+    }
+    255
+}
+
+/// Breaks Genshin's near-equilateral ±120° arrow symmetry by extracting the bright cyan-white
+/// tail jewel sitting at `180°` opposite the nose on real captured arrows. Cleanly returns `None`
+/// on flat or symmetric synthetic arrows (`G_p95 - G_p50 < 12` or `jdist < 0.18 * r_use`).
+fn extract_tail_jewel_prior(
+    up2: ArrayView3<'_, u8>,
+    clean2: ArrayView2<'_, u8>,
+    mcx: f64,
+    mcy: f64,
+    r_use: f64,
+) -> Option<(f64, f64)> {
+    let (uh, uw) = clean2.dim();
+    let mut hist = [0u32; 256];
+    let mut n = 0usize;
+    for y in 0..uh {
+        for x in 0..uw {
+            if clean2[[y, x]] != 0 {
+                hist[up2[[y, x, 1]] as usize] += 1;
+                n += 1;
+            }
+        }
+    }
+    if n < 64 {
+        return None;
+    }
+    let g_p50 = hist_quantile_u8(&hist, n, 0.50);
+    let g_p90 = hist_quantile_u8(&hist, n, 0.90);
+    let g_p95 = hist_quantile_u8(&hist, n, 0.95);
+    let contrast = g_p95 as f64 - g_p50 as f64;
+    if contrast < 12.0 {
+        return None;
+    }
+
+    let g_thresh = g_p50.saturating_add(12).max(g_p90);
+    let r_min = 0.14 * r_use;
+    let mut sum_dx = 0.0f64;
+    let mut sum_dy = 0.0f64;
+    let mut sum_ux = 0.0f64;
+    let mut sum_uy = 0.0f64;
+    let mut jcnt = 0usize;
+    for y in 0..uh {
+        for x in 0..uw {
+            if clean2[[y, x]] != 0 && up2[[y, x, 1]] >= g_thresh {
+                let dx = x as f64 - mcx;
+                let dy = y as f64 - mcy;
+                let dist = dx.hypot(dy);
+                if dist >= r_min {
+                    sum_dx += dx;
+                    sum_dy += dy;
+                    sum_ux += dx / dist;
+                    sum_uy += dy / dist;
+                    jcnt += 1;
+                }
+            }
+        }
+    }
+    if jcnt < 12.max(n / 25) {
+        return None;
+    }
+    let jdx_mean = sum_dx / jcnt as f64;
+    let jdy_mean = sum_dy / jcnt as f64;
+    let jdist = jdx_mean.hypot(jdy_mean);
+    if jdist < 0.18 * r_use {
+        return None;
+    }
+    let r_bar = (sum_ux / jcnt as f64).hypot(sum_uy / jcnt as f64);
+    if r_bar < 0.60 {
+        return None;
+    }
+
+    let nose_deg = wrap_angle_360((-jdx_mean).atan2(jdy_mean).to_degrees());
+    let strength = (0.35
+        + 0.65
+            * ((contrast - 10.0) / 15.0).clamp(0.0, 1.0)
+            * ((r_bar - 0.55) / 0.35).clamp(0.0, 1.0)
+            * ((jdist / r_use - 0.16) / 0.16).clamp(0.0, 1.0))
+    .clamp(0.35, 1.0);
+    Some((nose_deg, strength))
+}
+
 fn score_arrow_polar_template(
     obs: &ArrowPolarTemplate,
     tmpl: &ArrowPolarTemplate,
     conf_scale: f64,
+    jewel_prior: Option<(f64, f64)>,
 ) -> Option<(f64, f64, f64)> {
     let mut corr = [0.0f32; ARROW_POLAR_BINS];
     for (shift, slot) in corr.iter_mut().enumerate() {
@@ -1260,29 +1493,51 @@ fn score_arrow_polar_template(
         *slot = acc;
     }
 
-    let mut best_idx = 0usize;
-    let mut pk = f32::NEG_INFINITY;
-    for (i, &v) in corr.iter().enumerate() {
-        if v > pk {
-            pk = v;
-            best_idx = i;
+    let mut scored = [0.0f64; ARROW_POLAR_BINS];
+    for (i, (&c, slot)) in corr.iter().zip(scored.iter_mut()).enumerate() {
+        let bonus = if let Some((j_deg, j_str)) = jewel_prior {
+            let bin_deg = (i as f64 / ARROW_POLAR_BINS as f64) * 360.0 + 90.0;
+            0.30 * j_str * shortest_angle_delta(j_deg, bin_deg).to_radians().cos()
+        } else {
+            0.0
+        };
+        *slot = c as f64 + bonus;
+    }
+
+    let mut best_scored_idx = 0usize;
+    let mut best_scored_val = f64::NEG_INFINITY;
+    for (i, &v) in scored.iter().enumerate() {
+        if v > best_scored_val {
+            best_scored_val = v;
+            best_scored_idx = i;
         }
     }
-    let pk_f = pk as f64;
-    if pk_f < 0.45 {
+
+    // Refine to raw correlation local maximum within +/-3 bins so jewel prior selects the
+    // correct +/-120 lobe without pulling the sub-degree ridge away from exact shape fit.
+    let mut best_idx = best_scored_idx;
+    let mut best_raw = corr[best_scored_idx];
+    for d in -3isize..=3 {
+        let idx = (best_scored_idx as isize + d).rem_euclid(ARROW_POLAR_BINS as isize) as usize;
+        if corr[idx] > best_raw {
+            best_raw = corr[idx];
+            best_idx = idx;
+        }
+    }
+
+    let pk_f = corr[best_idx] as f64;
+    let min_raw_corr = if jewel_prior.is_some() { 0.42 } else { 0.45 };
+    if pk_f < min_raw_corr {
         return None;
     }
 
-    let mut second_pk = f64::NEG_INFINITY;
-    for (i, &v) in corr.iter().enumerate() {
-        if circular_arrow_bin_dist(i, best_idx) >= 16 {
-            let vf = v as f64;
-            if vf > second_pk {
-                second_pk = vf;
-            }
+    let mut second_scored = f64::NEG_INFINITY;
+    for (i, &v) in scored.iter().enumerate() {
+        if circular_arrow_bin_dist(i, best_idx) >= 16 && v > second_scored {
+            second_scored = v;
         }
     }
-    let margin = pk_f - second_pk.max(0.0);
+    let margin = scored[best_idx] - second_scored.max(0.0);
     if margin < 0.008 {
         return None;
     }
@@ -1299,15 +1554,19 @@ fn score_arrow_polar_template(
     let sub_bin = (best_idx as f64 + off).rem_euclid(ARROW_POLAR_BINS as f64);
     let deg = wrap_angle_360((sub_bin / ARROW_POLAR_BINS as f64) * 360.0 + 90.0);
 
-    // Weight both absolute correlation and margin over +-120 deg wing confusion peaks.
-    let quality = pk_f + 1.5 * margin.min(0.25);
+    // Weight both jewel-disambiguated correlation and margin over +-120 deg wing confusion peaks.
+    let quality = scored[best_idx] + 1.5 * margin.min(0.25);
     let pk_sc = ((pk_f - 0.50) / 0.45).clamp(0.0, 1.0);
     let margin_sc = (margin / 0.04).clamp(0.0, 1.0);
     let conf = ((0.35 + 0.45 * pk_sc + 0.18 * margin_sc) * conf_scale).clamp(0.35, 0.98);
     Some((quality, deg, conf))
 }
 
-fn solve_arrow_from_mask(mask2: ArrayView2<'_, u8>, conf_scale: f64) -> Option<(f64, f64)> {
+fn solve_arrow_from_mask(
+    up2: ArrayView3<'_, u8>,
+    mask2: ArrayView2<'_, u8>,
+    conf_scale: f64,
+) -> Option<(f64, f64)> {
     let nz_raw = if let Some(s) = mask2.as_slice() {
         s.iter().filter(|&&v| v != 0).count()
     } else {
@@ -1326,6 +1585,7 @@ fn solve_arrow_from_mask(mask2: ArrayView2<'_, u8>, conf_scale: f64) -> Option<(
         return None;
     }
 
+    let jewel_prior = extract_tail_jewel_prior(up2, clean2.view(), mcx, mcy, r_use);
     let tmpls = arrow_polar_templates();
     let mut best: Option<(f64, f64, f64)> = None;
 
@@ -1341,7 +1601,7 @@ fn solve_arrow_from_mask(mask2: ArrayView2<'_, u8>, conf_scale: f64) -> Option<(
     ) && let Some(obs_c) = normalize_arrow_polar(pol_c.view(), 0)
     {
         for tmpl in [&tmpls.genshin_centroid, &tmpls.dart_centroid] {
-            if let Some(cand) = score_arrow_polar_template(&obs_c, tmpl, conf_scale)
+            if let Some(cand) = score_arrow_polar_template(&obs_c, tmpl, conf_scale, jewel_prior)
                 && best.is_none_or(|b| cand.0 > b.0)
             {
                 best = Some(cand);
@@ -1363,7 +1623,7 @@ fn solve_arrow_from_mask(mask2: ArrayView2<'_, u8>, conf_scale: f64) -> Option<(
     ) && let Some(obs_p) = normalize_arrow_polar(pol_p.view(), 0)
     {
         for tmpl in [&tmpls.genshin_pivot, &tmpls.dart_pivot] {
-            if let Some(cand) = score_arrow_polar_template(&obs_p, tmpl, conf_scale)
+            if let Some(cand) = score_arrow_polar_template(&obs_p, tmpl, conf_scale, jewel_prior)
                 && best.is_none_or(|b| cand.0 > b.0)
             {
                 best = Some(cand);
@@ -1371,7 +1631,15 @@ fn solve_arrow_from_mask(mask2: ArrayView2<'_, u8>, conf_scale: f64) -> Option<(
         }
     }
 
-    best.map(|(_, deg, conf)| (deg, conf))
+    if let Some((_, deg, conf)) = best {
+        return Some((deg, conf));
+    }
+    if let Some((j_deg, j_str)) = jewel_prior
+        && j_str >= 0.70
+    {
+        return Some((j_deg, (0.62 * j_str * conf_scale).clamp(0.45, 0.75)));
+    }
+    None
 }
 
 pub fn extract_player_arrow_360(minimap_bgr: ArrayView3<'_, u8>) -> ArrowDetection {
@@ -1398,25 +1666,27 @@ pub fn extract_player_arrow_360(minimap_bgr: ArrayView3<'_, u8>) -> ArrowDetecti
     let up2_s = up2.as_slice().expect("contiguous up2");
     let total_px = uh * uw;
 
-    // Solid electric-cyan mask covering BOTH bright arrow rim (B~255, G~219, R~0) and deeper cyan
-    // arrow interior (B~255, G~201, R~0) as well as FSR2-dimmed arrows ([222, 198, 30]).
-    // Using only G > 212 hollows out the interior on real Genshin frames, breaking orientation.
-    let mut mask_broad = Array2::<u8>::zeros((uh, uw));
-    let broad_s = mask_broad.as_slice_mut().expect("contiguous mask_broad");
-    let mut broad_nz = 0usize;
-    for (dst, px) in broad_s.iter_mut().zip(up2_s.as_chunks::<3>().0) {
+    // Tier 1: clean electric-cyan player-arrow mask (B >= 205, G >= 175, R <= 45).
+    // Excludes teleport waypoints (G ~ 134..170) and water/bloom halos so adjacent map icons
+    // cannot bridge into the arrow silhouette while preserving FSR2-dimmed [222, 198, 30] arrows.
+    let mut mask_clean = Array2::<u8>::zeros((uh, uw));
+    let clean_s = mask_clean.as_slice_mut().expect("contiguous mask_clean");
+    let mut clean_nz = 0usize;
+    for (dst, px) in clean_s.iter_mut().zip(up2_s.as_chunks::<3>().0) {
         let b = px[0] as i16;
         let g = px[1] as i16;
         let r = px[2] as i16;
-        if b >= 175 && g >= 125 && r <= 65 && (b - r) >= 130 && (g - r) >= 80 {
+        if b >= 205 && g >= 175 && r <= 45 && (b - r) >= 165 && (g - r) >= 135 {
             *dst = 255;
-            broad_nz += 1;
+            clean_nz += 1;
         }
     }
 
-    // If the broader cyan mask floods >35% of the crop (e.g. cyan-on-cyan background where
-    // only R <= 25 isolates the arrow), fall back to the strict rim threshold.
-    let primary_res = if broad_nz * 100 > total_px * 35 {
+    // If clean cyan floods >35% of the crop (e.g. cyan-on-cyan background where only R <= 25
+    // isolates the arrow), fall back to the strict rim threshold.
+    let mut clean_flooded = false;
+    let mut primary_res = if clean_nz * 100 > total_px * 35 {
+        clean_flooded = true;
         let mut mask_strict = Array2::<u8>::zeros((uh, uw));
         let strict_s = mask_strict.as_slice_mut().expect("contiguous mask_strict");
         for (dst, px) in strict_s.iter_mut().zip(up2_s.as_chunks::<3>().0) {
@@ -1424,12 +1694,31 @@ pub fn extract_player_arrow_360(minimap_bgr: ArrayView3<'_, u8>) -> ArrowDetecti
                 *dst = 255;
             }
         }
-        solve_arrow_from_mask(mask_strict.view(), 1.0)
-    } else if broad_nz >= 24 {
-        solve_arrow_from_mask(mask_broad.view(), 1.0)
+        solve_arrow_from_mask(up2.view(), mask_strict.view(), 1.0)
+    } else if clean_nz >= 48 {
+        solve_arrow_from_mask(up2.view(), mask_clean.view(), 1.0)
     } else {
         None
     };
+
+    // Tier 2: broad electric-cyan fallback (only when Tier 1 did not succeed or flood).
+    if primary_res.is_none() && !clean_flooded {
+        let mut mask_broad = Array2::<u8>::zeros((uh, uw));
+        let broad_s = mask_broad.as_slice_mut().expect("contiguous mask_broad");
+        let mut broad_nz = 0usize;
+        for (dst, px) in broad_s.iter_mut().zip(up2_s.as_chunks::<3>().0) {
+            let b = px[0] as i16;
+            let g = px[1] as i16;
+            let r = px[2] as i16;
+            if b >= 175 && g >= 125 && r <= 65 && (b - r) >= 130 && (g - r) >= 80 {
+                *dst = 255;
+                broad_nz += 1;
+            }
+        }
+        if broad_nz >= 24 && broad_nz * 100 <= total_px * 35 {
+            primary_res = solve_arrow_from_mask(up2.view(), mask_broad.view(), 0.96);
+        }
+    }
 
     if let Some((deg, conf)) = primary_res
         && conf >= 0.60
@@ -1452,7 +1741,7 @@ pub fn extract_player_arrow_360(minimap_bgr: ArrayView3<'_, u8>) -> ArrowDetecti
             confidence: c,
         });
     };
-    let res_hsv = solve_arrow_from_mask(mask_hsv.view(), 0.94);
+    let res_hsv = solve_arrow_from_mask(up2.view(), mask_hsv.view(), 0.94);
     if let Some((hd, hc)) = res_hsv
         && primary_res.is_none_or(|(_, bc)| hc > bc)
     {
@@ -1638,6 +1927,15 @@ impl CameraHeadingFuser {
         self.source
     }
 
+    /// Returns true when the current lock comes from a trusted cone method updated recently.
+    pub fn is_trusted_fresh(&self, now: f64) -> bool {
+        matches!(self.source, FuserSource::BgraAlpha | FuserSource::BgrBlend)
+            && self.last_trusted_ts.is_some_and(|t| {
+                let dt = now - t;
+                (0.0..=0.35).contains(&dt)
+            })
+    }
+
     /// Refresh freshness timestamps when the minimap ROI is pixel-static so a
     /// stationary player's camera cone heading never ages into a false `Body` snap.
     pub fn touch(&mut self, now: f64) {
@@ -1727,7 +2025,7 @@ impl CameraHeadingFuser {
                             && self.last_spin_delta.abs() >= 4.0
                             && self.last_spin_ts.is_some_and(|t| {
                                 let dt = now - t;
-                                (0.0..=0.14).contains(&dt)
+                                (0.0..=0.22).contains(&dt)
                             });
                         let sudden_reverse_glitch = active_spin
                             && signed_jump.signum() != self.last_spin_delta.signum()
@@ -2164,7 +2462,7 @@ mod tests {
     #[test]
     fn synthetic_cones_and_arrows_parity() {
         // 8 compass directions for BGRA normal & inverted alpha, plus BGR 0.25 blend
-        for deg in [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0] {
+        for deg in [0.0f64, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0] {
             let bgra = make_synthetic_cone_bgra(212, deg, false);
             let det = extract_camera_view_cone(bgra.view());
             assert_eq!(det.method, ConeMethod::BgraAlpha);
@@ -2557,7 +2855,7 @@ mod tests {
 
     #[test]
     fn real_two_tone_genshin_arrow_with_pins_and_all_occluded_angles() {
-        for deg in [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0] {
+        for deg in [0.0f64, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0] {
             let clean = make_real_genshin_two_tone_arrow_bgr(290, deg, false);
             let det = extract_player_arrow_360(clean.view());
             let est = det.heading_deg.unwrap_or_else(|| panic!("two-tone deg={deg} returned None"));
@@ -2669,5 +2967,201 @@ mod tests {
         assert_eq!(g1, Some(200.0));
         let g2 = fuser.update(Some(229.0), 0.60, ConeMethod::BgrBlend, Some(10.0), 0.9, 3.15);
         assert_eq!(g2, Some(229.0));
+    }
+
+    #[test]
+    fn real_geometry_arrow_with_tail_jewel_and_waypoint_occlusion_no_120_flips() {
+        // Real Genshin 291x291 minimap arrow: symmetric triangle + protruding tab, uniform cyan
+        // body [254, 227, 1], bright tail jewel [255, 250, 1] strictly opposite nose (+0.28 r),
+        // and an adjacent Teleport Waypoint cyan diamond [217, 143, 35] touching one wing
+        // (plus a light notch on the nose tip). Without clean G>=175 isolation + tail-jewel prior,
+        // the broadened mask attaches the waypoint lump and flips +/-120 deg.
+        let sz = 291usize;
+        let c = sz as f64 * 0.5;
+        let r = 0.0608 * sz as f64;
+        for deg in [0.0f64, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0] {
+            let mut img = Array3::<u8>::from_elem((sz, sz, 3), 85u8);
+            let rad = deg.to_radians();
+            let fx = rad.sin();
+            let fy = -rad.cos();
+            let rx = rad.cos();
+            let ry = rad.sin();
+            let pt = |lx: f64, ly: f64| Point2i {
+                x: (c + (lx * rx - ly * fx) * r).round() as i32,
+                y: (c + (lx * ry - ly * fy) * r).round() as i32,
+            };
+
+            // 1. Adjacent waypoint cyan diamond ([217, 143, 35] with white center) touching the
+            //    left wing outer edge (~lx=-0.88, ly=+0.10) — drawn FIRST, behind arrow.
+            let wp_x = (c + (-0.88 * rx - 0.10 * fx) * r).round() as i32;
+            let wp_y = (c + (-0.88 * ry - 0.10 * fy) * r).round() as i32;
+            for dy in -6i32..=6 {
+                for dx in -6i32..=6 {
+                    if dx.abs() + dy.abs() <= 6 {
+                        let px = (wp_x + dx) as usize;
+                        let py = (wp_y + dy) as usize;
+                        if px < sz && py < sz {
+                            img[[py, px, 0]] = 217;
+                            img[[py, px, 1]] = 143;
+                            img[[py, px, 2]] = 35;
+                        }
+                    }
+                }
+            }
+
+            // 2. Player arrow polygon + rear tail jewel
+            let mut body_mask = Array2::<u8>::zeros((sz, sz));
+            draw_filled_convex_poly_u8(
+                &mut body_mask,
+                &[pt(0.0, -1.00), pt(-0.84, 0.51), pt(0.0, 0.51)],
+                255,
+            );
+            draw_filled_convex_poly_u8(
+                &mut body_mask,
+                &[pt(0.0, -1.00), pt(0.0, 0.51), pt(0.84, 0.51)],
+                255,
+            );
+            draw_filled_convex_poly_u8(
+                &mut body_mask,
+                &[pt(-0.31, 0.49), pt(0.0, 0.70), pt(0.31, 0.49)],
+                255,
+            );
+
+            let mut jewel_mask = Array2::<u8>::zeros((sz, sz));
+            let jpt = pt(0.0, 0.28);
+            draw_filled_circle_u8(&mut jewel_mask, jpt.x, jpt.y, (0.28 * r).round().max(3.0) as i32, 255);
+
+            for y in 0..sz {
+                for x in 0..sz {
+                    if body_mask[[y, x]] != 0 {
+                        if jewel_mask[[y, x]] != 0 {
+                            img[[y, x, 0]] = 255;
+                            img[[y, x, 1]] = 250;
+                            img[[y, x, 2]] = 1;
+                        } else {
+                            img[[y, x, 0]] = 254;
+                            img[[y, x, 1]] = 227;
+                            img[[y, x, 2]] = 1;
+                        }
+                    }
+                }
+            }
+
+            // Small pin highlight trimming only the outer nose tip slightly
+            let tip = pt(-0.08, -0.92);
+            let mut tip_bite = Array2::<u8>::zeros((sz, sz));
+            draw_filled_circle_u8(&mut tip_bite, tip.x, tip.y, (0.22 * r).round().max(2.0) as i32, 255);
+            for y in 0..sz {
+                for x in 0..sz {
+                    if tip_bite[[y, x]] != 0 {
+                        img[[y, x, 0]] = 248;
+                        img[[y, x, 1]] = 248;
+                        img[[y, x, 2]] = 248;
+                    }
+                }
+            }
+
+            let det = extract_player_arrow_360(img.view());
+            let got = det
+                .heading_deg
+                .unwrap_or_else(|| panic!("deg={deg} returned None"));
+            let err = shortest_angle_delta(deg, got).abs();
+            assert!(
+                err <= 8.0,
+                "waypoint-adjacent tail-jewel arrow deg={deg} flipped/drifted: got={got:.2} (err={err:.2}, conf={:.2})",
+                det.confidence
+            );
+        }
+    }
+
+    #[test]
+    fn camera_cone_dark_terrain_and_static_distractor_smooth_sweep() {
+        let sz = 291usize;
+        let c = sz as f64 * 0.5;
+
+        // Case A: True cone overlaid on darker low-saturation terrain while flanking terrain
+        // 55..110 deg away is brighter (global in_v < out_v), yet local cone edges still brighten.
+        let target_a = 120.0f64;
+        let mut img_a = Array3::<u8>::zeros((sz, sz, 3));
+        for y in 0..sz {
+            for x in 0..sz {
+                let dx = x as f64 - c;
+                let dy = y as f64 - c;
+                let r = dx.hypot(dy);
+                let r_norm = (r / c).clamp(0.0, 1.0);
+                let ang = wrap_angle_360(dx.atan2(-dy).to_degrees());
+                let d_targ = shortest_angle_delta(target_a, ang).abs();
+                let mut base = if d_targ <= 56.0 {
+                    // Dark underlying corridor + immediate edge border
+                    [42.0f64, 49.0, 44.0]
+                } else {
+                    // Brighter flanking plateau (out_v > in_v globally, low saturation)
+                    [78.0f64, 86.0, 80.0]
+                };
+                if r >= 20.0 && r <= c * 0.92 && d_targ <= 45.0 {
+                    let a = (0.20 - 0.12 * r_norm).clamp(0.06, 0.20);
+                    for v in &mut base {
+                        *v = *v * (1.0 - a) + 255.0 * a;
+                    }
+                }
+                for (ch, &v) in base.iter().enumerate() {
+                    img_a[[y, x, ch]] = v.round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        let det_a = extract_camera_view_cone_with_prior(img_a.view(), Some(108.0));
+        assert_eq!(det_a.method, ConeMethod::BgrBlend, "dark terrain case: {det_a:?}");
+        let err_a = shortest_angle_delta(target_a, det_a.heading_deg.unwrap()).abs();
+        assert!(err_a <= 6.0, "dark terrain cone err={err_a:.2} (det={det_a:?})");
+
+        // Case B: Moderate cone (alpha ~ 0.14) near prior 275 deg competing with a stronger
+        // static bright 90-deg terrain block 125 deg away (around 33 deg).
+        let target_b = 268.0f64;
+        let distractor_b = 33.0f64;
+        let mut img_b = Array3::<u8>::zeros((sz, sz, 3));
+        for y in 0..sz {
+            for x in 0..sz {
+                let dx = x as f64 - c;
+                let dy = y as f64 - c;
+                let r = dx.hypot(dy);
+                let r_norm = (r / c).clamp(0.0, 1.0);
+                let ang = wrap_angle_360(dx.atan2(-dy).to_degrees());
+                let mut base = [
+                    48.0 + 12.0 * (x as f64 / 15.0).sin(),
+                    72.0 + 12.0 * (y as f64 / 17.0).cos(),
+                    54.0 + 10.0 * ((x + y) as f64 / 19.0).sin(),
+                ];
+                if r >= 20.0
+                    && r <= c * 0.92
+                    && shortest_angle_delta(distractor_b, ang).abs() <= 45.0
+                {
+                    // Static bright terrain block mimicking a 24% white veil
+                    let a = 0.24 - 0.10 * r_norm;
+                    for v in &mut base {
+                        *v = *v * (1.0 - a) + 255.0 * a;
+                    }
+                }
+                if r >= 20.0
+                    && r <= c * 0.92
+                    && shortest_angle_delta(target_b, ang).abs() <= 45.0
+                {
+                    let a = (0.15 - 0.07 * r_norm).clamp(0.06, 0.15);
+                    for v in &mut base {
+                        *v = *v * (1.0 - a) + 255.0 * a;
+                    }
+                }
+                for (ch, &v) in base.iter().enumerate() {
+                    img_b[[y, x, ch]] = v.round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        let det_b = extract_camera_view_cone_with_prior(img_b.view(), Some(275.0));
+        assert_eq!(det_b.method, ConeMethod::BgrBlend, "distractor case: {det_b:?}");
+        let err_b = shortest_angle_delta(target_b, det_b.heading_deg.unwrap()).abs();
+        assert!(
+            err_b <= 8.0,
+            "cone should track 268 deg near prior 275 instead of jumping to 33 deg distractor: got {:?} (err={err_b:.2})",
+            det_b
+        );
     }
 }

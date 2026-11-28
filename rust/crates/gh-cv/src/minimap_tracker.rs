@@ -4,8 +4,9 @@
 use crate::global_relocator::{TeyvatGlobalRelocator, VoteBins};
 use crate::heading360::{
     CONE_STATIC_SECTOR_TOP3_THRESH, CameraHeadingFuser, CircularAngleSmoother, FuserSource,
-    InnerConeSectorGrid, extract_camera_view_cone, extract_player_arrow_360, has_non_opaque_alpha,
-    inner_cone_sector_profile, inner_cone_sector_top3_diff, shortest_angle_delta, wrap_angle_360,
+    InnerConeSectorGrid, extract_camera_view_cone_with_prior, extract_player_arrow_360,
+    has_non_opaque_alpha, inner_cone_sector_profile, inner_cone_sector_top3_diff,
+    shortest_angle_delta, wrap_angle_360,
 };
 use crate::image_io::DecodedImage;
 use crate::ops::color::{bgr_px_to_gray, bgr_to_gray, bgr_to_hsv, frame_view_to_array3};
@@ -3145,7 +3146,12 @@ impl HybridMinimapTracker {
         let mut cam_conf = 0.0;
         let mut cam_method = crate::heading360::ConeMethod::None;
         if cone_may_have_changed && let Some(mm) = minimap_bgr_or_bgra {
-            let det = extract_camera_view_cone(mm);
+            let cone_prior = if self.camera_fuser.is_trusted_fresh(ts) {
+                self.camera_fuser.estimate()
+            } else {
+                None
+            };
+            let det = extract_camera_view_cone_with_prior(mm, cone_prior);
             if let Some(deg) = det.heading_deg
                 && det.confidence > 0.0
             {

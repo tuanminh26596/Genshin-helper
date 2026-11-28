@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "name": "082307_f852_mm_arrow_waypoint",
+  "description": "Real minimap crop where a nearby teleport waypoint flips the body arrow -120 deg mid-turn.",
+  "notes": "Exported from sess_20261127_082307 frame i=852 (0-based n=851, 2560x1440 crop 291x291+79+20). Mid-turn body heading between f851 (276.7) and f853 is ~292.1 deg; baseline flipped to 37.2 deg.",
+  "image": "scratch/frame_fixtures/sess_20261127_082307_f852_mm.png",
+  "width": 291,
+  "height": 291,
+  "is_gamepad": false,
+  "known_bug": null,
+  "minimap_heading": {
+    "expected_body_deg": 292.1,
+    "body_tolerance_deg": 15.0,
+    "perturb_seeds": [101, 202]
+  }
+}
