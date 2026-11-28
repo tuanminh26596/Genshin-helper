@@ -1175,7 +1175,7 @@ function forwardCommandToMapTab(cmdType, payload = {}, broadcastAll = false, opt
 }
 
 function getSanitizedExtensionInfo(extra = {}) {
-  let extVersion = '5.7.0';
+  let extVersion = '5.8.0';
   try {
     const manifest = chrome.runtime && typeof chrome.runtime.getManifest === 'function'
       ? chrome.runtime.getManifest()

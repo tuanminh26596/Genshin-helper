@@ -1,12 +1,12 @@
 <div align="center">
   <img src="extension/icons/icon128.png" alt="Biểu tượng Genshin-Helper" width="92" height="92" />
-  <h1>Genshin-Helper v5.7.0</h1>
+  <h1>Genshin-Helper v5.8.0</h1>
   <p><strong>Trợ lý Định vị Thị giác Máy tính Thụ động 100%, Bản đồ Radar 60 fps &amp; Mini-HUD Điều hướng 360° cho HoYoLAB Interactive Map</strong></p>
   <p>
     <a href="README.md">English</a> | <strong>Tiếng Việt</strong>
   </p>
   <p>
-    <a href="https://github.com/tuanminh26596/Genshin-helper/releases"><img src="https://img.shields.io/badge/release-v5.7.0-38bdf8?style=flat-square" alt="Phiên bản v5.7.0"></a>
+    <a href="https://github.com/tuanminh26596/Genshin-helper/releases"><img src="https://img.shields.io/badge/release-v5.8.0-38bdf8?style=flat-square" alt="Phiên bản v5.8.0"></a>
     <a href="https://github.com/tuanminh26596/Genshin-helper/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/tuanminh26596/Genshin-helper/ci.yml?branch=main&label=CI&style=flat-square" alt="CI"></a>
     <img src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0ea5e9?style=flat-square" alt="Windows 10/11 x64">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="Giấy phép MIT"></a>
@@ -14,12 +14,12 @@
     <a href="https://ko-fi.com/minmories"><img src="https://img.shields.io/badge/Ko--fi-minmories-FF5E5B?style=flat-square&logo=kofi&logoColor=white" alt="Ko-fi"></a>
   </p>
   <p>
-    <img src="docs/media/demo-v57-vi.gif" alt="Demo Genshin-Helper v5.7.0: Đồng bộ Web Map 60 Hz, Tuyến đường trên Map M, Live Radar + Thẻ Hướng Dẫn, LAN Companion điện thoại và bằng chứng 100% CV" width="800" />
+    <img src="docs/media/demo-v57-vi.gif" alt="Demo Genshin-Helper v5.8.0: Đồng bộ Web Map 60 Hz, Tuyến đường trên Map M, Live Radar + Thẻ Hướng Dẫn, LAN Companion điện thoại và bằng chứng 100% CV" width="800" />
     <br/>
     <sub><em>Đồng bộ Web Map 60 Hz · Phủ tuyến lên Map (M) · Live Radar &amp; Thẻ Hướng Dẫn · LAN Companion Điện thoại · Chứng minh 100% CV (~2% CPU)</em></sub>
   </p>
   <p>
-    <a href="https://github.com/tuanminh26596/Genshin-helper/releases/latest"><strong>⬇ Tải Bộ cài v5.7.0 (~7.8 MB)</strong></a>
+    <a href="https://github.com/tuanminh26596/Genshin-helper/releases/latest"><strong>⬇ Tải Bộ cài v5.8.0 (~8.5 MB)</strong></a>
     &nbsp;·&nbsp;
     <a href="#cài-đặt-nhanh">Cài đặt nhanh</a>
     &nbsp;·&nbsp;
@@ -31,7 +31,7 @@
 
 ---
 
-## Tính năng nổi bật (`v5.7.0`)
+## Tính năng nổi bật (`v5.8.0`)
 
 **Genshin-Helper** là công cụ đồng bộ bản đồ chạy cục bộ hoàn toàn bằng **Thị giác Máy tính (Computer Vision) thụ động 100%** cho **Genshin Impact (Windows 10/11 64-bit)** — viết thuần Rust (`0` DLL ngoài, `~2%` CPU, `0%` khi Standby), không đọc RAM, không inject DLL và không gửi phím giả vào game.
 
@@ -65,7 +65,7 @@
 
 ## Cài đặt nhanh
 
-1. Tải **`GenshinHelper-Setup-v5.7.0.exe`** (`~7.8 MB`, `0` DLL ngoài) tại [**GitHub Releases**](https://github.com/tuanminh26596/Genshin-helper/releases/latest) và chạy với quyền **Administrator** (bắt buộc do Windows UIPI để phím tắt/HUD hoạt động đè lên game).
+1. Tải **`GenshinHelper-Setup-v5.8.0.exe`** (`~8.5 MB`, `0` DLL ngoài) tại [**GitHub Releases**](https://github.com/tuanminh26596/Genshin-helper/releases/latest) và chạy với quyền **Administrator** (bắt buộc do Windows UIPI để phím tắt/HUD hoạt động đè lên game).
 2. Khi cài xong, làm theo trang **Hướng dẫn Extension** (`install_extension.html`) tự mở: vào `chrome://extensions` (hoặc Edge / Brave) → bật **Developer mode** → **Load unpacked** → dán đường dẫn thư mục `extension` và ghim biểu tượng lên thanh công cụ.
 3. Ở lần chạy đầu, `GenshinHelper.exe` tự tải dữ liệu bản đồ công khai HoYoLAB (~15 MB) về `%LOCALAPPDATA%\GenshinHelper\data` (mất ~10–20 giây một lần duy nhất).
 4. Mở [**HoYoLAB Interactive Map**](https://act.hoyolab.com/ys/app/interactive-map/index.html#/map/2), đặt Genshin Impact ở **Borderless Windowed**, bấm **`M`** một lần để khóa vị trí và bắt đầu thám hiểm!
@@ -88,7 +88,7 @@ cargo run --manifest-path rust/Cargo.toml --release -p gh-app -- --sync-data
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/register_dev_native_host.ps1
 ```
 
-Chạy thẳng `GenshinHelper.exe` (tự xin quyền Admin; truyền `--no-elevate` hoặc `GH_NO_ELEVATE=1` nếu không muốn; dùng `installer/build_release.ps1` cùng Inno Setup 6 để đóng gói `dist/installer/GenshinHelper-Setup-v5.7.0.exe`).
+Chạy thẳng `GenshinHelper.exe` (tự xin quyền Admin; truyền `--no-elevate` hoặc `GH_NO_ELEVATE=1` nếu không muốn; dùng `installer/build_release.ps1` cùng Inno Setup 6 để đóng gói `dist/installer/GenshinHelper-Setup-v5.8.0.exe`).
 
 - **Cờ CLI:** `--sync-data`, `--no-tray`, `--standby`, `--minimized`, `--record-minimap <GIÂY>`, `--port <PORT>`, `--lan-port <LAN_PORT>`, `--config <PATH>`, `--no-mutex`, `--no-elevate`.
 - **`hoyolab_sync` (`config.json`):** Tự kiểm tra `map_version` khi khởi động (`"auto_check_on_startup": true`, `"auto_update_mode": "auto_download"` | `"notify_only"` | `"off"`).
@@ -97,7 +97,7 @@ Chạy thẳng `GenshinHelper.exe` (tự xin quyền Admin; truyền `--no-eleva
 
 ---
 
-## Bảng phím tắt mặc định (`v5.7.0`)
+## Bảng phím tắt mặc định (`v5.8.0`)
 
 Tổ hợp `Alt` tay trái không dùng `Shift/Ctrl` — tùy chỉnh trực tiếp trong **Extension Popup → Phím tắt** (tự kiểm tra trùng phím):
 

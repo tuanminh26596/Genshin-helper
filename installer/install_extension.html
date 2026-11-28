@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Genshin Helper — Browser Extension Setup (v5.7.0)</title>
+  <title>Genshin Helper — Browser Extension Setup (v5.8.0)</title>
   <style>
     :root {
       --bg: #0b0f19;
@@ -413,7 +413,7 @@
       <div class="hero-left">
         <img class="hero-logo" src="extension/icons/icon128.png" alt="Genshin Helper" onerror="if(!this.dataset.fb){this.dataset.fb='1';this.src='../extension/icons/icon128.png';}else{this.style.display='none';}">
         <div>
-          <h1 id="hero-title">Genshin Helper — Browser Extension Setup (v5.7.0)</h1>
+          <h1 id="hero-title">Genshin Helper — Browser Extension Setup (v5.8.0)</h1>
           <p id="hero-sub">One-time Off-Store setup • Supports Chrome, Microsoft Edge &amp; Brave</p>
         </div>
       </div>
@@ -431,7 +431,7 @@
     </header>
 
     <div class="mode-bar" role="tablist" aria-label="Setup mode">
-      <button id="mode-btn-update" class="mode-pill is-update" type="button" role="tab" aria-selected="false">Update Extension (v5.7.0)</button>
+      <button id="mode-btn-update" class="mode-pill is-update" type="button" role="tab" aria-selected="false">Update Extension (v5.8.0)</button>
       <button id="mode-btn-fresh" class="mode-pill is-active" type="button" role="tab" aria-selected="true">First-Time Install</button>
     </div>
 
@@ -454,7 +454,7 @@
 
     <section id="update-card" class="card update-card" hidden>
       <span id="update-badge" class="update-badge">UPDATE COMPLETE</span>
-      <h2 id="update-heading">Updated to v5.7.0 — 1 Quick Step to Reload Extension (~5s)</h2>
+      <h2 id="update-heading">Updated to v5.8.0 — 1 Quick Step to Reload Extension (~5s)</h2>
       <p id="update-lead" class="update-lead"></p>
       <div class="steps-two">
         <div class="step step-update">
@@ -531,7 +531,7 @@
     (function () {
       var STR = {
         en: {
-          title: 'Genshin Helper — Browser Extension Setup (v5.7.0)',
+          title: 'Genshin Helper — Browser Extension Setup (v5.8.0)',
           sub: 'One-time Off-Store setup • Supports Chrome, Microsoft Edge & Brave',
           chipTitle: 'Click to re-check Desktop Server',
           checking: 'Checking Desktop App...',
@@ -552,17 +552,17 @@
           n2: 'Do not move or delete the loaded extension folder — its fixed ID keeps Native Messaging linked so the Power toggle works anytime.',
           n3: 'Recommended game display: Set Genshin Impact to Borderless Windowed so the 360° Mini-HUD and single-monitor toasts appear over the game.',
           n4: 'Default Shift-free left-hand hotkeys: Alt + F (mark target), Alt + T (undo), Alt + H (guide card), Alt + E (next target), Alt + F6 (cancel lock), Alt + ` (Radar), Alt + F7 (edit layout), Alt + F11 (sync & mark), Alt + F12 (bug report).',
-          modeUpdate: 'Update Extension (v5.7.0)',
+          modeUpdate: 'Update Extension (v5.8.0)',
           modeFresh: 'First-Time Install',
           quickUrlHead: 'Quick browser shortcuts — open your browser Extensions page to reload Genshin Helper:',
           updateBadge: 'UPDATE COMPLETE',
-          updateHead: 'Updated to v5.7.0 — Reload Extension in 5 Seconds',
-          updateHeadFrom: 'Updated v{prev} → v5.7.0 — Reload Extension in 5 Seconds',
+          updateHead: 'Updated to v5.8.0 — Reload Extension in 5 Seconds',
+          updateHeadFrom: 'Updated v{prev} → v5.8.0 — Reload Extension in 5 Seconds',
           updateLead: 'The new Extension files have already been updated in your existing install folder. You do NOT need to remove or Load unpacked again — all hotkeys and settings are preserved. (Upgrades from v5.6.0+ auto-reload automatically; for older versions or same-version reinstalls, click Reload once below.)',
           u1t: '1. Open Extensions Page',
           u1b: 'Click one of the copy buttons above (chrome://extensions, edge://extensions, or brave://extensions), paste into the address bar, and press Enter.',
           u2t: '2. Click Reload (↻) or Restart Browser',
-          u2b: 'Find the Genshin Helper card and click the circular Reload (↻) icon — or simply close and reopen your browser. The Extension will immediately switch to v5.7.0.',
+          u2b: 'Find the Genshin Helper card and click the circular Reload (↻) icon — or simply close and reopen your browser. The Extension will immediately switch to v5.8.0.',
           updateFootPrefix: 'Never installed the Extension on this browser before? ',
           updateFootBtn: 'Switch to First-Time Install steps',
           supportHead: '☕ Enjoying Genshin-Helper? Buy the author a coffee!',
@@ -574,7 +574,7 @@
           copiedUrl: 'Copied URL — paste into the address bar and press Enter!'
         },
         vi: {
-          title: 'Genshin Helper — Cài đặt Browser Extension (v5.7.0)',
+          title: 'Genshin Helper — Cài đặt Browser Extension (v5.8.0)',
           sub: 'Cài 1 lần duy nhất (Off-Store) • Hỗ trợ Chrome, Microsoft Edge & Brave',
           chipTitle: 'Nhấn để kiểm tra lại Desktop Server',
           checking: 'Đang kiểm tra Desktop App...',
@@ -595,17 +595,17 @@
           n2: 'Không xóa hay di chuyển thư mục extension — Extension giữ ID cố định để kết nối Native Messaging với nút Bật/Tắt Server trong Popup.',
           n3: 'Khuyên dùng Borderless Windowed trong Genshin Impact để Mini-HUD la bàn 360° và thông báo nổi hiển thị đè lên game.',
           n4: 'Phím tắt tay trái (không dùng Shift): Alt + F (ghim mục tiêu), Alt + T (hoàn tác), Alt + H (thẻ hướng dẫn), Alt + E (mục tiêu kế), Alt + F6 (hủy khóa), Alt + ` (Radar), Alt + F7 (sửa bố cục), Alt + F11 (sync & ghim), Alt + F12 (chụp báo lỗi).',
-          modeUpdate: 'Cập nhật Extension (v5.7.0)',
+          modeUpdate: 'Cập nhật Extension (v5.8.0)',
           modeFresh: 'Cài mới lần đầu',
           quickUrlHead: 'Lối tắt nhanh — mở trang Quản lý Tiện ích (Extensions) của trình duyệt để tải lại Genshin Helper:',
           updateBadge: 'CẬP NHẬT HOÀN TẤT',
-          updateHead: 'Đã cập nhật lên v5.7.0 — Chỉ cần bấm Tải lại (↻) trong 5 giây',
-          updateHeadFrom: 'Đã cập nhật v{prev} → v5.7.0 — Chỉ cần bấm Tải lại (↻) trong 5 giây',
+          updateHead: 'Đã cập nhật lên v5.8.0 — Chỉ cần bấm Tải lại (↻) trong 5 giây',
+          updateHeadFrom: 'Đã cập nhật v{prev} → v5.8.0 — Chỉ cần bấm Tải lại (↻) trong 5 giây',
           updateLead: 'Bộ cài đã tự động cập nhật sẵn toàn bộ file Extension mới đè vào thư mục cũ. Bạn KHÔNG cần gỡ bỏ hay Load unpacked lại — mọi phím tắt, vị trí HUD và dữ liệu bản đồ đều giữ nguyên 100%. (Bản nâng cấp từ v5.6.0+ tự tải lại Extension; riêng bản cũ hơn hoặc cài đè cùng bản, hãy bấm Tải lại 1 lần bên dưới.)',
           u1t: '1. Mở trang Extensions',
           u1b: 'Nhấn nút Copy phía trên (chrome://extensions, edge://extensions hoặc brave://extensions), dán vào thanh địa chỉ trình duyệt rồi nhấn Enter.',
           u2t: '2. Bấm Tải lại (↻) hoặc tắt mở lại trình duyệt',
-          u2b: 'Tìm thẻ Genshin Helper và bấm biểu tượng mũi tên xoay ↻ (Reload) ở góc dưới thẻ — hoặc đơn giản tắt mở lại trình duyệt. Extension sẽ lên ngay v5.7.0.',
+          u2b: 'Tìm thẻ Genshin Helper và bấm biểu tượng mũi tên xoay ↻ (Reload) ở góc dưới thẻ — hoặc đơn giản tắt mở lại trình duyệt. Extension sẽ lên ngay v5.8.0.',
           updateFootPrefix: 'Chưa từng cài Extension trên trình duyệt này trước đây? ',
           updateFootBtn: 'Chuyển sang hướng dẫn Cài mới lần đầu',
           supportHead: '☕ Công cụ giúp ích cho bạn? Mời tác giả một ly cà phê!',
@@ -667,7 +667,7 @@
         document.getElementById('mode-btn-fresh').textContent = L.modeFresh;
         document.getElementById('quick-url-heading').textContent = L.quickUrlHead;
         document.getElementById('update-badge').textContent = L.updateBadge;
-        document.getElementById('update-heading').textContent = (prevVersion && prevVersion !== '5.7.0')
+        document.getElementById('update-heading').textContent = (prevVersion && prevVersion !== '5.8.0')
           ? L.updateHeadFrom.replace('{prev}', prevVersion)
           : L.updateHead;
         document.getElementById('update-lead').textContent = L.updateLead;
@@ -776,7 +776,7 @@
           .then(function (data) {
             dot.className = 'dot ok';
             var mode = data.engine_active === false ? 'Standby' : 'Active';
-            lbl.textContent = STR[lang].running + ' (' + mode + ' • v' + (data.version || '5.7.0') + ')';
+            lbl.textContent = STR[lang].running + ' (' + mode + ' • v' + (data.version || '5.8.0') + ')';
           })
           .catch(function () {
             dot.className = 'dot err';

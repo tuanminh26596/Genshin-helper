@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Genshin Helper — HoYoLAB Auto-Sync",
-  "version": "5.7.0",
+  "version": "5.8.0",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr42c2LmLkpzGwbC5wX5UYCgWqGZkYq67Fq5UWtiSQGaytjD3Kp1gh2w5Gs4opJAymDEtmzg9bedjgGdwekoNoGCWuNx21yXgLYiM2rFncEDMG2/yWNkzwSbkomEsyk3PNWZEN820sM30DpK7s6lWtLbz6x1nfd7a58srM4dIIdo3UAdlsSxvmvdYnPvOFAYgW3tMQrW9jlknQDEMawmzKYx4rMjBfPE1Ghg4d/qBzjG8NYS1me/RJ0Aj3nAzuqxDhEDHqbBZC8+VF8rhtt3nUMducH2QKRAXUq8qheUC8X+bSyfDAQUCNezomLdn8JSEn4Uy29TZjBQGzxECiiGLZQIDAQAB",
   "description": "Đồng bộ vị trí người chơi Genshin Impact thời gian thực lên HoYoLAB Interactive Map (Zero-Throttle MV3).",
   "permissions": [

@@ -17,7 +17,7 @@
 
   const CT = window.GHCoordTransform;
   const GH_TAB_ID = `gh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-  const SCRIPT_VERSION = '5.7.0';
+  const SCRIPT_VERSION = '5.8.0';
   const SCRIPT_BUILD = 'multi-provider-v5';
 
   // =========================================================================

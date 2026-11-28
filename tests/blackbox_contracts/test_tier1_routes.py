@@ -134,8 +134,8 @@ class TestTier1SyncRoutes(unittest.TestCase):
         assert_cors_pna_headers(self, resp)
         data = resp.json()
         self.assertEqual(data["status"], "connected")
-        self.assertEqual(data["version"], "5.7.0")
-        self.assertEqual(data["script_version"], "v5.7.0")
+        self.assertEqual(data["version"], "5.8.0")
+        self.assertEqual(data["script_version"], "v5.8.0")
         for key in SYNC_STATUS_CORE_KEYS:
             self.assertIn(key, data, f"Missing /status key: {key}")
         for key in NAV_EXTENDED_STATUS_KEYS:
@@ -152,7 +152,7 @@ class TestTier1SyncRoutes(unittest.TestCase):
         assert_cors_pna_headers(self, resp)
         data = resp.json()
         self.assertEqual(data["type"], "HEARTBEAT")
-        self.assertEqual(data["script_version"], "v5.7.0")
+        self.assertEqual(data["script_version"], "v5.8.0")
         self.assertIsInstance(data["_seq"], int)
         self.assertGreaterEqual(data["_seq"], 0)
 
@@ -298,7 +298,7 @@ class TestTier1SyncRoutes(unittest.TestCase):
             "zoom": 1.25,
             "markersCount": 19,
             "activeAreaId": 2,
-            "scriptVersion": "v5.7.0",
+            "scriptVersion": "v5.8.0",
         }
         r_post = self.client.post_json("/report_state", state_in)
         self.assertEqual(r_post.status, 200)
@@ -608,7 +608,7 @@ class TestTier1NativeHostAndShutdown(unittest.TestCase):
                 host.send_json({"cmd": "ping"})
                 resp = host.recv_json()
                 self.assertTrue(resp["ok"])
-                self.assertEqual(resp["host_version"], "5.7.0")
+                self.assertEqual(resp["host_version"], "5.8.0")
                 self.assertFalse(resp["server_running"])
                 self.assertFalse(resp["engine_active"])
                 rc, rem_out, _ = host.close_and_wait()
@@ -630,7 +630,7 @@ class TestTier1NativeHostAndShutdown(unittest.TestCase):
                 self.assertTrue(r_ping["ok"])
                 self.assertTrue(r_ping["server_running"])
                 self.assertFalse(r_ping["engine_active"])
-                self.assertEqual(r_ping["version"], "5.7.0")
+                self.assertEqual(r_ping["version"], "5.8.0")
 
                 host.send_json({"cmd": "start_server"})
                 r_wake = host.recv_json()

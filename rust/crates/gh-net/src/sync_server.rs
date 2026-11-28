@@ -4691,8 +4691,8 @@ mod tests {
         let st_json: Value = r_st.json().await.expect("status json");
         assert_eq!(st_json.as_object().expect("obj").len(), 56);
         assert_eq!(st_json["hotkey_nav_guide_next"], "alt+n");
-        assert_eq!(st_json["version"], "5.7.0");
-        assert_eq!(st_json["script_version"], "v5.7.0");
+        assert_eq!(st_json["version"], "5.8.0");
+        assert_eq!(st_json["script_version"], "v5.8.0");
         assert_eq!(st_json["radar_enabled"], false);
         assert_eq!(st_json["hotkey_radar_toggle"], "alt+`");
         assert_eq!(st_json["hotkey_nav_unlock"], "alt+f6");

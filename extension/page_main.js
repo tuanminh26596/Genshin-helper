@@ -7,8 +7,8 @@
         return;
     }
 
-    const SCRIPT_VERSION = 'v5.7.0';
-    const SCRIPT_BUILD = '5.7.0-r9';
+    const SCRIPT_VERSION = 'v5.8.0';
+    const SCRIPT_BUILD = '5.8.0-r1';
 
     function bootGenshinHelper() {
     if (window.__gh_booted_build === SCRIPT_BUILD) return;
@@ -630,7 +630,7 @@
     }
 
     function setLog(msg, color) {
-        console.log('[Genshin Helper v5.7.0]', msg);
+        console.log('[Genshin Helper v5.8.0]', msg);
         if (document.hidden) {
             return;
         }
@@ -2728,7 +2728,7 @@
             const errEl = overlay.querySelector('#gh-note-error');
 
             const formatModalDiscordTemplate = () => {
-                const appVer = summary.app_version || '5.7.0';
+                const appVer = summary.app_version || '5.8.0';
                 const osStr = summary.os_label || 'Windows';
                 const resStr = summary.resolution_label || 'N/A';
                 const dpiStr = summary.dpi_scale_pct ? `${summary.dpi_scale_pct}%` : 'N/A';

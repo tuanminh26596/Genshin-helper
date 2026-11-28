@@ -806,7 +806,7 @@ mod tests {
                 let first_line = req.lines().next().unwrap_or("");
                 let resp_body = if first_line.starts_with("GET /status") {
                     let active = ea.load(Ordering::SeqCst);
-                    format!(r#"{{"version":"5.7.0","engine_active":{active}}}"#)
+                    format!(r#"{{"version":"5.8.0","engine_active":{active}}}"#)
                 } else if first_line.starts_with("POST /set_engine_state") {
                     let active = req.contains("true");
                     ea.store(active, Ordering::SeqCst);
@@ -850,7 +850,7 @@ mod tests {
         assert!(r_ping.ok);
         assert!(r_ping.server_running);
         assert_eq!(r_ping.engine_active, Some(false));
-        assert_eq!(r_ping.version.as_deref(), Some("5.7.0"));
+        assert_eq!(r_ping.version.as_deref(), Some("5.8.0"));
 
         let r_wake = handle_message_bytes(br#"{"cmd":"start_server"}"#, &env);
         assert!(r_wake.ok);

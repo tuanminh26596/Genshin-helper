@@ -24,9 +24,9 @@ pub mod ui_layout;
 
 use thiserror::Error;
 
-pub const APP_VERSION: &str = "5.7.0";
-pub const SCRIPT_VERSION: &str = "v5.7.0";
-pub const HOST_VERSION: &str = "5.7.0";
+pub const APP_VERSION: &str = "5.8.0";
+pub const SCRIPT_VERSION: &str = "v5.8.0";
+pub const HOST_VERSION: &str = "5.8.0";
 
 pub const PINNED_EXTENSION_ID: &str = "nfkijdoblmphmdljfogooajhbldkeojh";
 pub const NATIVE_HOST_NAME: &str = "com.genshinhelper.host";

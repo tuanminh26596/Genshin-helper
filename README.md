@@ -1,12 +1,12 @@
 <div align="center">
   <img src="extension/icons/icon128.png" alt="Genshin-Helper Icon" width="92" height="92" />
-  <h1>Genshin-Helper v5.7.0</h1>
+  <h1>Genshin-Helper v5.8.0</h1>
   <p><strong>100% Passive Computer Vision Map Sync, 60 fps Live Radar &amp; 360° Navigation Overlay for HoYoLAB Interactive Map</strong></p>
   <p>
     <strong>English</strong> | <a href="README.vi.md">Tiếng Việt</a>
   </p>
   <p>
-    <a href="https://github.com/tuanminh26596/Genshin-helper/releases"><img src="https://img.shields.io/badge/release-v5.7.0-38bdf8?style=flat-square" alt="Release v5.7.0"></a>
+    <a href="https://github.com/tuanminh26596/Genshin-helper/releases"><img src="https://img.shields.io/badge/release-v5.8.0-38bdf8?style=flat-square" alt="Release v5.8.0"></a>
     <a href="https://github.com/tuanminh26596/Genshin-helper/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/tuanminh26596/Genshin-helper/ci.yml?branch=main&label=CI&style=flat-square" alt="CI"></a>
     <img src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0ea5e9?style=flat-square" alt="Windows 10/11 x64">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="MIT License"></a>
@@ -14,12 +14,12 @@
     <a href="https://ko-fi.com/minmories"><img src="https://img.shields.io/badge/Ko--fi-minmories-FF5E5B?style=flat-square&logo=kofi&logoColor=white" alt="Ko-fi"></a>
   </p>
   <p>
-    <img src="docs/media/demo-v57-en.gif" alt="Genshin-Helper v5.7.0 demo: 60 Hz Web Map Sync, M-Map Route Overlay, Live Radar + Guide Card, Mobile LAN Companion, and 100% Passive CV proof" width="800" />
+    <img src="docs/media/demo-v57-en.gif" alt="Genshin-Helper v5.8.0 demo: 60 Hz Web Map Sync, M-Map Route Overlay, Live Radar + Guide Card, Mobile LAN Companion, and 100% Passive CV proof" width="800" />
     <br/>
     <sub><em>60 Hz Web Map Sync · M-Map Route Overlay · Live Radar &amp; Guide Card · Mobile LAN Companion · ~2% CPU 100% Passive CV</em></sub>
   </p>
   <p>
-    <a href="https://github.com/tuanminh26596/Genshin-helper/releases/latest"><strong>⬇ Download Setup v5.7.0 (~7.8 MB)</strong></a>
+    <a href="https://github.com/tuanminh26596/Genshin-helper/releases/latest"><strong>⬇ Download Setup v5.8.0 (~8.5 MB)</strong></a>
     &nbsp;·&nbsp;
     <a href="#quick-start">Quick Start</a>
     &nbsp;·&nbsp;
@@ -31,7 +31,7 @@
 
 ---
 
-## Key Features (`v5.7.0`)
+## Key Features (`v5.8.0`)
 
 **Genshin-Helper** is a local-only, **100% passive Computer Vision** companion for **Genshin Impact (Windows 10/11 x64)** — pure Rust (`0` external DLLs, `~2%` CPU, `0%` in Standby) that syncs your real-time position & 360° camera onto the official **HoYoLAB Interactive Map** without reading memory, injecting DLLs, or sending fake inputs.
 
@@ -65,7 +65,7 @@
 
 ## Quick Start
 
-1. Download **`GenshinHelper-Setup-v5.7.0.exe`** (`~7.8 MB`, `0` external DLLs) from [**GitHub Releases**](https://github.com/tuanminh26596/Genshin-helper/releases/latest) and run as **Administrator** (required by Windows UIPI so hotkeys/HUD work over Genshin).
+1. Download **`GenshinHelper-Setup-v5.8.0.exe`** (`~8.5 MB`, `0` external DLLs) from [**GitHub Releases**](https://github.com/tuanminh26596/Genshin-helper/releases/latest) and run as **Administrator** (required by Windows UIPI so hotkeys/HUD work over Genshin).
 2. When Setup finishes, follow the auto-opened **Extension Setup Guide** (`install_extension.html`): open `chrome://extensions` (or Edge / Brave) → enable **Developer mode** → **Load unpacked** → paste the shown `extension` folder path & pin the icon.
 3. On first launch, `GenshinHelper.exe` auto-downloads public HoYoLAB map metadata (~15 MB) into `%LOCALAPPDATA%\GenshinHelper\data` (~10–20s once).
 4. Open [**HoYoLAB Interactive Map**](https://act.hoyolab.com/ys/app/interactive-map/index.html#/map/2), set Genshin Impact to **Borderless Windowed**, press **`M`** once to lock position, and explore!
@@ -88,7 +88,7 @@ cargo run --manifest-path rust/Cargo.toml --release -p gh-app -- --sync-data
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/register_dev_native_host.ps1
 ```
 
-Launch `GenshinHelper.exe` directly (auto-prompts UAC; pass `--no-elevate` or `GH_NO_ELEVATE=1` to skip; run `installer/build_release.ps1` with Inno Setup 6 to build `dist/installer/GenshinHelper-Setup-v5.7.0.exe`).
+Launch `GenshinHelper.exe` directly (auto-prompts UAC; pass `--no-elevate` or `GH_NO_ELEVATE=1` to skip; run `installer/build_release.ps1` with Inno Setup 6 to build `dist/installer/GenshinHelper-Setup-v5.8.0.exe`).
 
 - **CLI Flags:** `--sync-data`, `--no-tray`, `--standby`, `--minimized`, `--record-minimap <SECONDS>`, `--port <PORT>`, `--lan-port <LAN_PORT>`, `--config <PATH>`, `--no-mutex`, `--no-elevate`.
 - **`hoyolab_sync` (`config.json`):** Auto-checks HoYoLAB `map_version` on startup (`"auto_check_on_startup": true`, `"auto_update_mode": "auto_download"` | `"notify_only"` | `"off"`).
@@ -97,7 +97,7 @@ Launch `GenshinHelper.exe` directly (auto-prompts UAC; pass `--no-elevate` or `G
 
 ---
 
-## Default Hotkeys (`v5.7.0`)
+## Default Hotkeys (`v5.8.0`)
 
 Shift/Ctrl-free left-hand `Alt` combos — fully customizable in **Extension Popup → Hotkeys** (with automatic conflict detection):
 

@@ -1,4 +1,4 @@
-# Genshin Helper — Browser Extension Control Center (MV3, v5.7.0)
+# Genshin Helper — Browser Extension Control Center (MV3, v5.8.0)
 
 *Bilingual Guide: **English** below · **Tiếng Việt** further down.*
 

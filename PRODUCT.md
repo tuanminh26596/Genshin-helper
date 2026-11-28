@@ -34,7 +34,7 @@ Strictly 100% passive Computer Vision architecture: zero game memory reads/write
 
 ## Brand Commitments
 
-- Name: **Genshin Helper** (`v5.7.0`), 100% free and open-source (MIT) with zero ads; support (`Ko-fi` and `MoMo / VietQR`) is strictly voluntary and framed respectfully.
+- Name: **Genshin Helper** (`v5.8.0`), 100% free and open-source (MIT) with zero ads; support (`Ko-fi` and `MoMo / VietQR`) is strictly voluntary and framed respectfully.
 - Existing official assets to preserve: original compass icon (`extension/icons/icon48.png`) and MoMo VietQR image (`extension/icons/momo_qr.jpg`).
 - Dark-surface operating context confirmed for gaming use alongside Genshin Impact and HoYoLAB Interactive Map.
 

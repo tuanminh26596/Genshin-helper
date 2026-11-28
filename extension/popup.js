@@ -639,7 +639,7 @@ document.addEventListener('DOMContentLoaded', () => {
       mapTabStatus.textContent = baseTabText;
     }
 
-    const verRaw = (currentLastStatus && currentLastStatus.version) ? String(currentLastStatus.version) : '5.7.0';
+    const verRaw = (currentLastStatus && currentLastStatus.version) ? String(currentLastStatus.version) : '5.8.0';
     const curVerText = verRaw.startsWith('v') ? verRaw : `v${verRaw}`;
     const updSummary = (currentUpdateState && typeof currentUpdateState === 'object')
       ? currentUpdateState
@@ -2203,10 +2203,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function formatDiscordReportTemplate(bundle) {
     const zipName = (bundle && (bundle.zip_name || (bundle.folder_name ? `${bundle.folder_name}.zip` : ''))) || 'diag_bundle.zip';
     const summary = (bundle && bundle.summary && typeof bundle.summary === 'object') ? bundle.summary : {};
-    const appVer = summary.app_version || '5.7.0';
-    let extVer = '5.7.0';
+    const appVer = summary.app_version || '5.8.0';
+    let extVer = '5.8.0';
     try {
-      extVer = (chrome.runtime && chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '5.7.0';
+      extVer = (chrome.runtime && chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '5.8.0';
     } catch (e) {}
     const catLabel = getSelectedDiagCategoryLabel() || t('popup.diag.cat_other');
     const noteText = (bundle && bundle.user_note) || (diagNoteInput ? diagNoteInput.value.trim() : '') || '-';
@@ -2316,7 +2316,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const curVer = String(
       st.current_version ||
       (currentLastStatus && currentLastStatus.version) ||
-      '5.7.0'
+      '5.8.0'
     ).replace(/^v/i, '');
     const latestVer = String(st.latest_version || summary.latest_version || '').replace(/^v/i, '');
     const phase = String(st.phase || summary.phase || 'idle');
