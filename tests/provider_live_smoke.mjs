@@ -2,7 +2,7 @@
 //
 // Loads extension/ unpacked into a throwaway headless Chromium profile (guest session, never
 // touching the signed-in HoYoLAB test profile) and mocks the desktop app (http://127.0.0.1:8765/*)
-// inside the extension service worker via CDP Fetch interception.
+// via browser-level CDP Target.setAutoAttach + Fetch interception across MV3 SW restarts.
 //
 // Checks:
 //   A) Live boot, /calibrate_provider traffic, and SYNC_POSITION_ONLY on AppSample & Kongying v3.
@@ -20,6 +20,7 @@
 //   GH_CHROME=<chrome.exe>              Chromium executable override (else Playwright Chromium)
 //   GH_SMOKE_WATCHDOG_MS=<ms>           Hard watchdog timeout (default 300000)
 //   GH_PROVIDER_RUNTIME_PATH=<path.js>  Override extension/provider_runtime.js (for seeded-fault checks)
+//   GH_FORCE_SW_RESTART=1               Force-stop extension SW early in run to verify restart recovery
 // Exit code: 0 if no unexpected failures, 1 on unexpected failure/error, 2 if Chromium not found.
 import { spawn, spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -117,7 +118,8 @@ class Cdp {
       this.ws.onerror = () => { clearTimeout(timer); j(new Error('CDP socket error')); };
     });
   }
-  send(method, params = {}, timeoutMs = CDP_CALL_TIMEOUT_MS) {
+  // sessionId targets a session attached with Target.setAutoAttach({ flatten: true }).
+  send(method, params = {}, timeoutMs = CDP_CALL_TIMEOUT_MS, sessionId = undefined) {
     return new Promise((resolveSend, rejectSend) => {
       const id = ++this.id;
       const timer = setTimeout(() => {
@@ -126,7 +128,7 @@ class Cdp {
       }, timeoutMs);
       this.pending.set(id, { resolve: resolveSend, reject: rejectSend, timer, method });
       try {
-        this.ws.send(JSON.stringify({ id, method, params }));
+        this.ws.send(JSON.stringify(sessionId ? { id, method, params, sessionId } : { id, method, params }));
       } catch (e) {
         this.pending.delete(id);
         clearTimeout(timer);
@@ -145,9 +147,11 @@ class Cdp {
     return r.result && r.result.result ? r.result.result.value : undefined;
   }
   close() {
-    if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
-      this.ws.close();
-    }
+    try {
+      if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+        this.ws.close();
+      }
+    } catch {}
   }
 }
 
@@ -492,27 +496,80 @@ async function main() {
   }
 
   try {
-    let port = null;
-    for (let i = 0; i < 150 && !port; i++) {
-      await sleep(150);
+    const waitUntil = async (fn, timeoutMs = 45000, intervalMs = 400) => {
+      const deadline = Date.now() + timeoutMs;
+      let last = null;
+      while (Date.now() < deadline) {
+        try { last = await fn(); } catch (e) { last = null; }
+        if (last) return last;
+        await sleep(Math.min(intervalMs, Math.max(10, deadline - Date.now())));
+      }
+      return last;
+    };
+
+    const port = await waitUntil(() => {
       const f = join(profile, 'DevToolsActivePort');
-      if (existsSync(f)) port = readFileSync(f, 'utf8').split('\n')[0].trim();
-    }
+      if (!existsSync(f)) return null;
+      const first = readFileSync(f, 'utf8').split('\n')[0].trim();
+      return first || null;
+    }, 22500, 100);
     if (!port) throw new Error('Chromium did not expose a DevTools port');
     const http = (p, method = 'GET') => fetch(`http://127.0.0.1:${port}${p}`, { method, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) }).then((r) => r.json());
 
-    let swTarget = null;
-    for (let i = 0; i < 60 && !swTarget; i++) {
-      swTarget = (await http('/json/list')).find((t) => t.type === 'service_worker' && t.url.includes(EXT_ID));
-      if (!swTarget) await sleep(200);
-    }
-    if (!swTarget) throw new Error('extension service worker not found');
-    const sw = new Cdp(swTarget.webSocketDebuggerUrl);
-    sessions.push(sw);
-    await sw.ready;
-    await sw.send('Runtime.enable');
+    // Mock desktop server state & event queue via browser-level Target.setAutoAttach so MV3
+    // service-worker stops/restarts re-arm Fetch interception before the worker runs.
+    const browserTarget = await http('/json/version');
+    const browser = new Cdp(browserTarget.webSocketDebuggerUrl);
+    sessions.push(browser);
+    await browser.ready;
 
-    // Mock desktop server state & event queue inside the SW Fetch handler
+    const swSessions = new Set();
+    let swStarts = 0;
+    let swReadyCount = 0;
+    let swCrashedCount = 0;
+    let swTargetId = null;
+    const swVersions = new Map();
+    const swStateWaiters = new Set();
+    const diagT0 = Date.now();
+    const swLifecycleLog = [];
+    const logSwEvent = (ev) => {
+      if (swLifecycleLog.length >= 40) swLifecycleLog.shift();
+      swLifecycleLog.push(`${Date.now() - diagT0}ms:${ev}`);
+    };
+    let lastPollReqAt = 0;
+    let lastPollFulfillAt = 0;
+    let lastActionFbAt = 0;
+    let swAckTimeoutLogged = false;
+    const notifySwStateWaiters = () => {
+      for (const checkWaiter of [...swStateWaiters]) {
+        checkWaiter();
+      }
+    };
+    const waitForSwState = (pred, timeoutMs = 15000) => {
+      try {
+        if (pred()) return Promise.resolve(true);
+      } catch {}
+      return new Promise((resolveWait) => {
+        let timer = null;
+        const done = (ok) => {
+          swStateWaiters.delete(onEvent);
+          if (timer) clearTimeout(timer);
+          resolveWait(ok);
+        };
+        const onEvent = () => {
+          let matched = false;
+          try { matched = Boolean(pred()); } catch { matched = false; }
+          if (matched) done(true);
+        };
+        timer = setTimeout(() => {
+          let matched = false;
+          try { matched = Boolean(pred()); } catch { matched = false; }
+          done(matched);
+        }, timeoutMs);
+        swStateWaiters.add(onEvent);
+      });
+    };
+
     const recorded = {
       calibrate_provider: [],
       action_feedback: [],
@@ -524,6 +581,13 @@ async function main() {
     const ackWaiters = [];
     const eventLog = [];
     let waitingPoll = null;
+
+    const clearWaitingPollForSession = (sessionId) => {
+      if (waitingPoll && waitingPoll.sessionId === sessionId) {
+        clearTimeout(waitingPoll.timer);
+        waitingPoll = null;
+      }
+    };
 
     const notifyAckWaiters = () => {
       for (let i = ackWaiters.length - 1; i >= 0; i--) {
@@ -541,6 +605,11 @@ async function main() {
         const timer = setTimeout(() => {
           const idx = ackWaiters.indexOf(entry);
           if (idx >= 0) ackWaiters.splice(idx, 1);
+          if (!swAckTimeoutLogged) {
+            swAckTimeoutLogged = true;
+            const now = Date.now();
+            console.log(`  [DIAG][sw_ack_timeout] targetSeq=${targetSeq} swAckSeq=${swAckSeq} latestSeq=${latestSeq} swStarts=${swStarts} swReady=${swReadyCount} swCrashed=${swCrashedCount} swSessions=${swSessions.size} waitingPoll=${Boolean(waitingPoll)} lastPollReqAgoMs=${lastPollReqAt ? now - lastPollReqAt : -1} lastPollFulfillAgoMs=${lastPollFulfillAt ? now - lastPollFulfillAt : -1} swLog=${JSON.stringify(swLifecycleLog.slice(-12))}`);
+          }
           resolveAck(false);
         }, timeoutMs);
         const entry = { targetSeq, resolve: resolveAck, timer };
@@ -548,8 +617,9 @@ async function main() {
       });
     };
 
-    const fulfillJson = (requestId, payload) => {
-      sw.send('Fetch.fulfillRequest', {
+    const fulfillJson = (sessionId, requestId, payload) => {
+      if (!sessionId || !swSessions.has(sessionId)) return;
+      browser.send('Fetch.fulfillRequest', {
         requestId,
         responseCode: 200,
         responseHeaders: [
@@ -557,8 +627,13 @@ async function main() {
           { name: 'Access-Control-Allow-Origin', value: '*' }
         ],
         body: Buffer.from(JSON.stringify(payload), 'utf8').toString('base64')
+      }, CDP_CALL_TIMEOUT_MS, sessionId).then((res) => {
+        if (res && res.error && browser.ws.readyState === WebSocket.OPEN && swSessions.has(sessionId)) {
+          logSwEvent(`fulfill_err:${res.error.message || res.error.code}`);
+        }
       }).catch((err) => {
-        if (sw.ws.readyState === WebSocket.OPEN) {
+        if (browser.ws.readyState === WebSocket.OPEN && swSessions.has(sessionId)) {
+          logSwEvent(`fulfill_rej:${err && err.message ? err.message : err}`);
           console.warn('[WARN] Fetch.fulfillRequest failed:', err && err.message ? err.message : err);
         }
       });
@@ -572,7 +647,7 @@ async function main() {
         const w = waitingPoll;
         waitingPoll = null;
         clearTimeout(w.timer);
-        fulfillJson(w.requestId, full);
+        fulfillJson(w.sessionId, w.requestId, full);
       }
       return seq;
     };
@@ -586,97 +661,246 @@ async function main() {
 
     const flushEventQueue = () => {
       eventLog.length = 0;
+      swAckSeq = Math.max(swAckSeq, latestSeq);
+      notifyAckWaiters();
       if (waitingPoll) {
         const w = waitingPoll;
         waitingPoll = null;
         clearTimeout(w.timer);
-        fulfillJson(w.requestId, { type: 'HEARTBEAT', _seq: latestSeq });
+        fulfillJson(w.sessionId, w.requestId, { type: 'HEARTBEAT', _seq: latestSeq });
       }
     };
 
-    sw.handlers.push((m) => {
-      if (m.method !== 'Fetch.requestPaused') return;
-      const req = m.params.request;
-      const u = new URL(req.url);
-      const path = u.pathname;
-      let parsedBody = null;
-      if (req.postData) {
-        try { parsedBody = JSON.parse(req.postData); } catch (e) { parsedBody = req.postData; }
-      }
-
-      if (path === '/calibrate_provider') {
-        recorded.calibrate_provider.push(parsedBody);
-        fulfillJson(m.params.requestId, { ok: true, transform: null });
-        return;
-      }
-      if (path === '/action_feedback') {
-        recorded.action_feedback.push(parsedBody);
-        fulfillJson(m.params.requestId, { ok: true });
-        return;
-      }
-      if (path === '/nearby_pins') {
-        recorded.nearby_pins.push(parsedBody);
-        fulfillJson(m.params.requestId, { ok: true, is_owner: true });
-        return;
-      }
-      if (path === '/report_state') {
-        recorded.report_state.push(parsedBody);
-        fulfillJson(m.params.requestId, { ok: true, is_owner: true });
-        return;
-      }
-      if (path === '/status') {
-        fulfillJson(m.params.requestId, {
-          ok: true,
-          language: 'en',
-          engine_active: true,
-          auto_sync: true,
-          auto_sync_m: true,
-          minimap_tracking: true,
-          latest_seq: latestSeq
+    browser.handlers.push((m) => {
+      if (m.method === 'Target.attachedToTarget') {
+        const { sessionId, targetInfo, waitingForDebugger } = m.params;
+        const isExtWorker = targetInfo.type === 'service_worker' && String(targetInfo.url || '').includes(EXT_ID);
+        (async () => {
+          if (!isExtWorker) {
+            if (waitingForDebugger) {
+              await browser.send('Runtime.runIfWaitingForDebugger', {}, 3000, sessionId).catch(() => {});
+            }
+            await browser.send('Target.detachFromTarget', { sessionId }, 3000).catch(() => {});
+            return;
+          }
+          swSessions.add(sessionId);
+          swTargetId = targetInfo.targetId;
+          swStarts++;
+          logSwEvent(`attached:${swStarts}:wfd=${Boolean(waitingForDebugger)}`);
+          const fetchRes = await browser.send('Fetch.enable', { patterns: [{ urlPattern: `${APP_ORIGIN}/*` }] }, CDP_CALL_TIMEOUT_MS, sessionId);
+          if (fetchRes && fetchRes.error) {
+            throw new Error(`Fetch.enable error: ${fetchRes.error.message || JSON.stringify(fetchRes.error)}`);
+          }
+          if (waitingForDebugger) {
+            const runRes = await browser.send('Runtime.runIfWaitingForDebugger', {}, CDP_CALL_TIMEOUT_MS, sessionId);
+            if (runRes && runRes.error) {
+              throw new Error(`Runtime.runIfWaitingForDebugger error: ${runRes.error.message || JSON.stringify(runRes.error)}`);
+            }
+          }
+          swReadyCount++;
+          logSwEvent(`ready:${swReadyCount}`);
+          notifySwStateWaiters();
+        })().catch((e) => {
+          swSessions.delete(sessionId);
+          clearWaitingPollForSession(sessionId);
+          logSwEvent(`attach_err:${e && e.message ? e.message : e}`);
+          notifySwStateWaiters();
+          console.warn(`[WARN] auto-attach ${targetInfo.type} ${sanitizeUrlForLog(targetInfo.url)}: ${e && e.message ? e.message : e}`);
         });
-        return;
-      }
-      if (path === '/poll') {
-        const since = Number(u.searchParams.get('since'));
-        if (Number.isFinite(since) && since > swAckSeq) {
-          swAckSeq = since;
-          notifyAckWaiters();
+      } else if (m.method === 'Inspector.targetCrashed' && swSessions.has(m.sessionId)) {
+        swCrashedCount++;
+        logSwEvent(`crashed:${swCrashedCount}`);
+        clearWaitingPollForSession(m.sessionId);
+        notifySwStateWaiters();
+      } else if (m.method === 'Inspector.targetReloadedAfterCrash' && swSessions.has(m.sessionId)) {
+        (async () => {
+          swStarts++;
+          logSwEvent(`reloaded:${swStarts}`);
+          const fetchRes = await browser.send('Fetch.enable', { patterns: [{ urlPattern: `${APP_ORIGIN}/*` }] }, CDP_CALL_TIMEOUT_MS, m.sessionId);
+          if (fetchRes && fetchRes.error) {
+            throw new Error(`Fetch.enable after crash error: ${fetchRes.error.message || JSON.stringify(fetchRes.error)}`);
+          }
+          const runRes = await browser.send('Runtime.runIfWaitingForDebugger', {}, CDP_CALL_TIMEOUT_MS, m.sessionId);
+          if (runRes && runRes.error) {
+            throw new Error(`Runtime.runIfWaitingForDebugger after crash error: ${runRes.error.message || JSON.stringify(runRes.error)}`);
+          }
+          swReadyCount++;
+          logSwEvent(`ready:${swReadyCount}`);
+          notifySwStateWaiters();
+        })().catch((e) => {
+          clearWaitingPollForSession(m.sessionId);
+          logSwEvent(`reload_err:${e && e.message ? e.message : e}`);
+          notifySwStateWaiters();
+          console.warn(`[WARN] targetReloadedAfterCrash: ${e && e.message ? e.message : e}`);
+        });
+      } else if (m.method === 'Target.detachedFromTarget') {
+        const sid = m.params && m.params.sessionId;
+        if (swSessions.delete(sid)) {
+          logSwEvent(`detached:sessLeft=${swSessions.size}`);
         }
-        const nextEv = eventLog.find((e) => e._seq > (Number.isFinite(since) ? since : -1));
-        if (nextEv) {
-          fulfillJson(m.params.requestId, nextEv);
+        clearWaitingPollForSession(sid);
+        notifySwStateWaiters();
+      } else if (m.method === 'Fetch.requestPaused' && swSessions.has(m.sessionId)) {
+        const req = m.params.request;
+        const u = new URL(req.url);
+        const path = u.pathname;
+        let parsedBody = null;
+        if (req.postData) {
+          try { parsedBody = JSON.parse(req.postData); } catch (e) { parsedBody = req.postData; }
+        }
+
+        if (path === '/calibrate_provider') {
+          recorded.calibrate_provider.push(parsedBody);
+          fulfillJson(m.sessionId, m.params.requestId, { ok: true, transform: null });
           return;
         }
-        // Hold briefly so pushServerEvent delivers immediately without spinning CPU
-        if (waitingPoll) {
-          clearTimeout(waitingPoll.timer);
-          fulfillJson(waitingPoll.requestId, { type: 'HEARTBEAT', _seq: latestSeq });
+        if (path === '/action_feedback') {
+          lastActionFbAt = Date.now();
+          recorded.action_feedback.push(parsedBody);
+          fulfillJson(m.sessionId, m.params.requestId, { ok: true });
+          return;
         }
-        const timer = setTimeout(() => {
-          if (waitingPoll && waitingPoll.requestId === m.params.requestId) {
-            waitingPoll = null;
-            fulfillJson(m.params.requestId, { type: 'HEARTBEAT', _seq: latestSeq });
+        if (path === '/nearby_pins') {
+          recorded.nearby_pins.push(parsedBody);
+          fulfillJson(m.sessionId, m.params.requestId, { ok: true, is_owner: true });
+          return;
+        }
+        if (path === '/report_state') {
+          recorded.report_state.push(parsedBody);
+          fulfillJson(m.sessionId, m.params.requestId, { ok: true, is_owner: true });
+          return;
+        }
+        if (path === '/status') {
+          fulfillJson(m.sessionId, m.params.requestId, {
+            ok: true,
+            language: 'en',
+            engine_active: true,
+            auto_sync: true,
+            auto_sync_m: true,
+            minimap_tracking: true,
+            latest_seq: swAckSeq
+          });
+          return;
+        }
+        if (path === '/poll') {
+          lastPollReqAt = Date.now();
+          const since = Number(u.searchParams.get('since'));
+          if (Number.isFinite(since) && since > swAckSeq) {
+            swAckSeq = since;
+            while (eventLog.length > 0 && eventLog[0]._seq <= swAckSeq) {
+              eventLog.shift();
+            }
+            notifyAckWaiters();
           }
-        }, 250);
-        waitingPoll = { requestId: m.params.requestId, since: Number.isFinite(since) ? since : -1, timer };
-        return;
+          const effectiveSince = Number.isFinite(since) ? since : -1;
+          const nextEv = eventLog.find((e) => e._seq > effectiveSince);
+          if (nextEv) {
+            lastPollFulfillAt = Date.now();
+            fulfillJson(m.sessionId, m.params.requestId, nextEv);
+            return;
+          }
+          // Hold briefly so pushServerEvent delivers immediately without spinning CPU
+          if (waitingPoll) {
+            clearTimeout(waitingPoll.timer);
+            lastPollFulfillAt = Date.now();
+            fulfillJson(waitingPoll.sessionId, waitingPoll.requestId, { type: 'HEARTBEAT', _seq: latestSeq });
+          }
+          const sessionId = m.sessionId;
+          const requestId = m.params.requestId;
+          const timer = setTimeout(() => {
+            if (waitingPoll && waitingPoll.requestId === requestId && waitingPoll.sessionId === sessionId) {
+              waitingPoll = null;
+              lastPollFulfillAt = Date.now();
+              fulfillJson(sessionId, requestId, { type: 'HEARTBEAT', _seq: latestSeq });
+            }
+          }, 250);
+          waitingPoll = { requestId, sessionId, since: effectiveSince, timer };
+          return;
+        }
+        fulfillJson(m.sessionId, m.params.requestId, { ok: true, is_owner: true });
       }
-      fulfillJson(m.params.requestId, { ok: true, is_owner: true });
     });
-    await sw.send('Fetch.enable', { patterns: [{ urlPattern: `${APP_ORIGIN}/*` }] });
-    // Let MV3 onInstalled/onStartup reinjectOpenMapTabs({ forceAll: true }) settle while only
-    // about:blank is open so it cannot re-inject scripts into AppSample mid-test and reset GH_TAB_ID.
-    await sw.eval(`(async () => {
-      if (typeof chrome !== 'undefined' && chrome.alarms && typeof chrome.alarms.get === 'function') {
-        await new Promise((r) => chrome.alarms.get('gh-keepalive-poll', () => r()));
-      }
-      if (typeof reinjectOpenMapTabs === 'function') {
-        await reinjectOpenMapTabs({ forceAll: false });
-      }
-      await new Promise((r) => setTimeout(r, 300));
-    })()`).catch((err) => {
-      console.warn('[WARN] SW settle eval failed:', err && err.message ? err.message : err);
+
+    await browser.send('Target.setAutoAttach', {
+      autoAttach: true,
+      waitForDebuggerOnStart: true,
+      flatten: true,
+      filter: [{ type: 'service_worker', exclude: false }, { exclude: true }],
     });
+
+    // Extension-origin page provides chrome.runtime/chrome.storage/ServiceWorker inspection
+    // regardless of whether the MV3 service worker is currently running.
+    const extTarget = await http(`/json/new?chrome-extension://${EXT_ID}/manifest.json`, 'PUT');
+    const ext = new Cdp(extTarget.webSocketDebuggerUrl);
+    sessions.push(ext);
+    await ext.ready;
+    const extReady = await waitUntil(async () => {
+      const t = await ext.eval('typeof (window.chrome && chrome.storage && chrome.runtime)');
+      return t === 'object' ? t : null;
+    }, 10000, 100);
+    if (extReady !== 'object') throw new Error('chrome.runtime not available on the extension page');
+
+    ext.handlers.push((m) => {
+      if (m.method === 'ServiceWorker.workerVersionUpdated' && Array.isArray(m.params && m.params.versions)) {
+        for (const v of m.params.versions) {
+          if (v && v.versionId && String(v.scriptURL || '').includes(EXT_ID)) {
+            swVersions.set(v.versionId, v);
+          }
+        }
+        notifySwStateWaiters();
+      }
+    });
+    await ext.send('ServiceWorker.enable');
+
+    const getBgState = () => ext.eval(`new Promise((r) => {
+      try {
+        chrome.runtime.sendMessage({ kind: 'GET_STATE' }, (resp) => {
+          const err = chrome.runtime.lastError;
+          r(err ? { error: err.message } : (resp || { error: 'empty GET_STATE response' }));
+        });
+      } catch (e) {
+        r({ error: e && e.message ? e.message : String(e) });
+      }
+    })`);
+
+    const findActiveSwVersion = () => {
+      for (const v of swVersions.values()) {
+        if (v.status === 'activated' && v.runningStatus === 'running') return v;
+      }
+      for (const v of swVersions.values()) {
+        if (v.runningStatus === 'running' || v.runningStatus === 'starting') return v;
+      }
+      return null;
+    };
+
+    const stopExtServiceWorker = async () => {
+      let activeVer = findActiveSwVersion();
+      if (!swTargetId || !activeVer || activeVer.runningStatus !== 'running') {
+        await getBgState().catch(() => null);
+        const ready = await waitForSwState(() => Boolean(swTargetId && findActiveSwVersion()), 10000);
+        activeVer = ready ? findActiveSwVersion() : null;
+      }
+      if (!swTargetId || !activeVer) throw new Error('No active extension service worker found to stop');
+      const crashedBefore = swCrashedCount;
+      await browser.send('Target.closeTarget', { targetId: swTargetId });
+      const stopped = await waitForSwState(() => {
+        const cur = swVersions.get(activeVer.versionId);
+        return (swCrashedCount > crashedBefore || swSessions.size === 0) && (!cur || cur.runningStatus === 'stopped');
+      }, 10000);
+      if (!stopped) throw new Error(`ServiceWorker ${activeVer.versionId} did not stop within timeout`);
+    };
+
+    if (swReadyCount === 0) {
+      await waitForSwState(() => swReadyCount > 0, 3000);
+    }
+    // Wake/wait for the worker and let onInstalled/onStartup reinjectOpenMapTabs settle
+    // via GET_STATE while only about:blank + manifest.json are open.
+    const bootBgState = await waitUntil(async () => {
+      const st = await getBgState().catch(() => null);
+      return swReadyCount > 0 && st && !st.error ? st : null;
+    }, 12000, 100);
+    if (swReadyCount === 0) throw new Error('extension service worker not found (extension failed to load?)');
+    if (!bootBgState) throw new Error('extension service worker did not respond to GET_STATE');
 
     const openTab = async (url) => {
       const target = await http(`/json/new?${encodeURI(url)}`, 'PUT');
@@ -782,9 +1006,24 @@ async function main() {
       }
       const kyCals = recorded.calibrate_provider.filter((r) => r && r.provider === 'kongying');
       const lastCal = kyCals.length ? kyCals[kyCals.length - 1] : null;
+      const nowDiag = Date.now();
+      const bgStateNow = await getBgState().catch((e) => ({ evalErr: String(e) }));
       const extStats = {
         recordedCalibrateCount: kyCals.length,
-        lastCalibrateAnchors: lastCal && Array.isArray(lastCal.anchors) ? lastCal.anchors.length : 0
+        lastCalibrateAnchors: lastCal && Array.isArray(lastCal.anchors) ? lastCal.anchors.length : 0,
+        swStarts,
+        swReadyCount,
+        swCrashedCount,
+        swSessions: swSessions.size,
+        swAckSeq,
+        latestSeq,
+        eventLogLen: eventLog.length,
+        hasWaitingPoll: Boolean(waitingPoll),
+        lastPollReqAgoMs: lastPollReqAt ? nowDiag - lastPollReqAt : -1,
+        lastPollFulfillAgoMs: lastPollFulfillAt ? nowDiag - lastPollFulfillAt : -1,
+        lastActionFbAgoMs: lastActionFbAt ? nowDiag - lastActionFbAt : -1,
+        bgState: bgStateNow,
+        swLog: swLifecycleLog.slice(-15)
       };
       console.log(`  [DIAG][kongying] state=${JSON.stringify(pageState)} ext=${JSON.stringify(extStats)} extra=${JSON.stringify(extra)}`);
       if (diag) {
@@ -815,17 +1054,6 @@ async function main() {
       } catch (e) {
         console.warn(`[WARN] closeTab(${tab.targetId}) failed:`, e && e.message ? e.message : e);
       }
-    };
-
-    const waitUntil = async (fn, timeoutMs = 45000, intervalMs = 400) => {
-      const t0 = Date.now();
-      let last = null;
-      while (Date.now() - t0 < timeoutMs) {
-        try { last = await fn(); } catch (e) { last = null; }
-        if (last) return last;
-        await sleep(intervalMs);
-      }
-      return last;
     };
 
     // Helper: run synthetic 8-heading walk on a loaded provider tab
@@ -1040,6 +1268,21 @@ async function main() {
         Boolean(asBoot && asBoot.providerId === 'appsample' && asBoot.hasRegister && asBoot.mapId === 2),
         JSON.stringify(asBoot)
       );
+
+      if (process.env.GH_FORCE_SW_RESTART === '1') {
+        const swReadyBeforeStop = swReadyCount;
+        await stopExtServiceWorker();
+        console.log(`  [INFO] Forced SW restart: stopped extension worker (swStarts=${swStarts}, swReadyCount=${swReadyBeforeStop})`);
+        let restarted = await waitForSwState(() => swReadyCount > swReadyBeforeStop, 5000);
+        if (!restarted) {
+          await getBgState().catch(() => null);
+          restarted = await waitForSwState(() => swReadyCount > swReadyBeforeStop, 10000);
+        }
+        if (!restarted) {
+          throw new Error(`Forced SW restart did not attach a restarted worker (swReadyCount=${swReadyCount})`);
+        }
+        console.log(`  [INFO] Forced SW restart: extension worker restarted and re-armed app mock (swStarts=${swStarts}, swReadyCount=${swReadyCount})`);
+      }
 
       // Ensure calibration triggered now that markersComplete=true
       await asTab.page.eval(`window.__GH_BRIDGE__ && window.__GH_BRIDGE__.calibrateNow()`);
@@ -1624,7 +1867,7 @@ async function main() {
           if (!(kyWalk.posOk && kyWalk.orientOk) && !kyDumped) {
             await ensureKyDumped({ phase: '8heading_walk', kyWalkSummary });
           }
-          record('kongying_8heading_walk', kyWalk.posOk && kyWalk.orientOk, kyWalkSummary);
+          record('kongying_8heading_walk', kyWalk.posOk && kyWalk.orientOk, (kyWalk.posOk && kyWalk.orientOk) ? kyWalkSummary : `${kyWalkSummary} samples=${JSON.stringify(kyWalk.perHeading)}`);
         }
 
         // INFORMATIONAL: ~200-frame QA replay on Kongying v3
@@ -1726,6 +1969,7 @@ async function main() {
       const pct = (n) => (common > 0 ? ((n / common) * 100).toFixed(1) : '0.0');
       console.log(`  [INFO] cross-provider (n=${common}): screen_angle_agree=${screenAllAgree}/${common} (${pct(screenAllAgree)}%) arrow_css_agree=${arrowAllAgree}/${common} (${pct(arrowAllAgree)}%) cone_css_agree=${coneAllAgree}/${common} (${pct(coneAllAgree)}%)`);
     }
+    console.log(`\n[INFO] extension service worker started ${swStarts} time(s) (ready=${swReadyCount}, crashed=${swCrashedCount}); app mock attached each time`);
   } finally {
     await killAndClean();
   }
