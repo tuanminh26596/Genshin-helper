@@ -13,6 +13,10 @@ use gh_core::frame::{FrameBuf, PixelFormat, RectI32};
 use gh_core::traits::OcrProvider;
 pub use gh_core::ui_layout::compute_tracker_hud_crop;
 use gh_core::ui_layout::compute_ui_layout;
+use gh_cv::heading360::{
+    extract_camera_view_cone_frame_with_prior, extract_player_arrow_360_frame,
+    shortest_angle_delta,
+};
 use gh_cv::locator::{LocateResult, LocatorPaths, MapLocator};
 use gh_win32::win_ocr::WindowsOcrService;
 use image::ImageReader;
@@ -84,6 +88,25 @@ pub struct MMapLocateExpectation {
     pub perturb_seeds: Vec<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MinimapHeadingExpectation {
+    #[serde(default)]
+    pub expected_body_deg: Option<f64>,
+    #[serde(default)]
+    pub body_tolerance_deg: Option<f64>,
+    #[serde(default)]
+    pub expected_cone_deg: Option<f64>,
+    #[serde(default)]
+    pub cone_tolerance_deg: Option<f64>,
+    #[serde(default)]
+    pub cone_prior_deg: Option<f64>,
+    #[serde(default = "default_true")]
+    pub require_trusted_cone: bool,
+    #[serde(default)]
+    pub perturb_seeds: Vec<u64>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -114,6 +137,8 @@ pub struct FrameFixture {
     pub expect_circle_in_crop: bool,
     #[serde(default)]
     pub mmap_locate: Option<MMapLocateExpectation>,
+    #[serde(default)]
+    pub minimap_heading: Option<MinimapHeadingExpectation>,
 }
 
 impl FrameFixture {
@@ -165,9 +190,9 @@ impl FrameFixture {
             ));
         }
         let has_layout = layout_field_count == 4;
-        if !has_layout && self.mmap_locate.is_none() {
+        if !has_layout && self.mmap_locate.is_none() && self.minimap_heading.is_none() {
             return Err(format!(
-                "{source_label}: fixture must specify at least one check mode (layout fields or mmap_locate)"
+                "{source_label}: fixture must specify at least one check mode (layout fields, mmap_locate, or minimap_heading)"
             ));
         }
 
@@ -235,6 +260,61 @@ impl FrameFixture {
                         hint.prime_image
                     ));
                 }
+            }
+        }
+
+        if let Some(mh) = &self.minimap_heading {
+            if mh.expected_body_deg.is_none() && mh.expected_cone_deg.is_none() {
+                return Err(format!(
+                    "{source_label}: minimap_heading must specify expected_body_deg and/or expected_cone_deg"
+                ));
+            }
+            match (mh.expected_body_deg, mh.body_tolerance_deg) {
+                (Some(exp), Some(tol)) => {
+                    if !exp.is_finite() {
+                        return Err(format!(
+                            "{source_label}: minimap_heading expected_body_deg must be finite, got {exp}"
+                        ));
+                    }
+                    if !tol.is_finite() || tol <= 0.0 {
+                        return Err(format!(
+                            "{source_label}: minimap_heading body_tolerance_deg must be finite and > 0, got {tol}"
+                        ));
+                    }
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err(format!(
+                        "{source_label}: minimap_heading expected_body_deg and body_tolerance_deg must both be present"
+                    ));
+                }
+                (None, None) => {}
+            }
+            match (mh.expected_cone_deg, mh.cone_tolerance_deg) {
+                (Some(exp), Some(tol)) => {
+                    if !exp.is_finite() {
+                        return Err(format!(
+                            "{source_label}: minimap_heading expected_cone_deg must be finite, got {exp}"
+                        ));
+                    }
+                    if !tol.is_finite() || tol <= 0.0 {
+                        return Err(format!(
+                            "{source_label}: minimap_heading cone_tolerance_deg must be finite and > 0, got {tol}"
+                        ));
+                    }
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err(format!(
+                        "{source_label}: minimap_heading expected_cone_deg and cone_tolerance_deg must both be present"
+                    ));
+                }
+                (None, None) => {}
+            }
+            if let Some(prior) = mh.cone_prior_deg
+                && !prior.is_finite()
+            {
+                return Err(format!(
+                    "{source_label}: minimap_heading cone_prior_deg must be finite, got {prior}"
+                ));
             }
         }
 
@@ -575,6 +655,56 @@ fn check_locate_result(
     }
 }
 
+fn check_minimap_heading_variant(
+    variant_label: &str,
+    frame: &FrameBuf,
+    exp: &MinimapHeadingExpectation,
+    failures: &mut Vec<String>,
+) {
+    if let (Some(exp_b), Some(tol_b)) = (exp.expected_body_deg, exp.body_tolerance_deg) {
+        let det = extract_player_arrow_360_frame(frame.as_view());
+        match det.heading_deg {
+            Some(got) if got.is_finite() => {
+                let err = shortest_angle_delta(exp_b, got).abs();
+                if err > tol_b {
+                    failures.push(format!(
+                        "minimap_heading[{variant_label}]: body got {got:.1} deg vs exp {exp_b:.1} deg (err={err:.1} > tol {tol_b:.1}, conf={:.2})",
+                        det.confidence
+                    ));
+                }
+            }
+            _ => {
+                failures.push(format!(
+                    "minimap_heading[{variant_label}]: body returned None (exp {exp_b:.1} +/- {tol_b:.1} deg)"
+                ));
+            }
+        }
+    }
+    if let (Some(exp_c), Some(tol_c)) = (exp.expected_cone_deg, exp.cone_tolerance_deg) {
+        let det = extract_camera_view_cone_frame_with_prior(frame.as_view(), exp.cone_prior_deg);
+        match det.heading_deg {
+            Some(got) if got.is_finite() => {
+                let err = shortest_angle_delta(exp_c, got).abs();
+                let trust_ok = !exp.require_trusted_cone || det.method.is_trusted();
+                if !trust_ok || err > tol_c {
+                    failures.push(format!(
+                        "minimap_heading[{variant_label}]: cone got {got:.1} deg ({}) vs exp {exp_c:.1} deg (err={err:.1}, tol={tol_c:.1}, conf={:.2}, require_trusted={})",
+                        det.method.as_str(),
+                        det.confidence,
+                        exp.require_trusted_cone
+                    ));
+                }
+            }
+            _ => {
+                failures.push(format!(
+                    "minimap_heading[{variant_label}]: cone returned None ({}, exp {exp_c:.1} +/- {tol_c:.1} deg)",
+                    det.method.as_str()
+                ));
+            }
+        }
+    }
+}
+
 pub fn evaluate_fixture(
     fixture: &FrameFixture,
     fixture_path: &Path,
@@ -771,6 +901,27 @@ pub fn evaluate_fixture(
                 Err(err) => {
                     failures.push(format!("failed to decode PNG for mmap_locate: {err}"));
                 }
+            }
+        }
+    }
+
+    // (d) Optional minimap heading checks (original + deterministic +/-2 LSB perturbations)
+    if let Some(mh) = &fixture.minimap_heading {
+        match load_png_as_bgra(&resolved_image) {
+            Ok(orig_frame) => {
+                check_minimap_heading_variant("orig", &orig_frame, mh, &mut failures);
+                for &seed in &mh.perturb_seeds {
+                    let perturbed = perturb_bgra_frame(&orig_frame, seed);
+                    check_minimap_heading_variant(
+                        &format!("perturb(seed={seed})"),
+                        &perturbed,
+                        mh,
+                        &mut failures,
+                    );
+                }
+            }
+            Err(err) => {
+                failures.push(format!("failed to decode PNG for minimap_heading: {err}"));
             }
         }
     }
@@ -1013,6 +1164,7 @@ mod tests {
             }),
             expect_circle_in_crop: true,
             mmap_locate: None,
+            minimap_heading: None,
         }
     }
 
@@ -1040,6 +1192,7 @@ mod tests {
                 prev_hint: None,
                 perturb_seeds: vec![101, 202],
             }),
+            minimap_heading: None,
         }
     }
 
@@ -1434,5 +1587,145 @@ mod tests {
                 .unwrap_or("")
                 .contains("datasets missing")
         );
+    }
+
+    #[test]
+    fn schema_validates_minimap_heading_fields() {
+        let mut f = base_mmap_fixture("mh_empty", "scratch/a.png");
+        f.mmap_locate = None;
+        f.width = 291;
+        f.height = 291;
+        f.minimap_heading = Some(MinimapHeadingExpectation {
+            expected_body_deg: None,
+            body_tolerance_deg: None,
+            expected_cone_deg: None,
+            cone_tolerance_deg: None,
+            cone_prior_deg: None,
+            require_trusted_cone: true,
+            perturb_seeds: vec![],
+        });
+        assert!(
+            f.validate("mh_empty.json")
+                .expect_err("empty minimap_heading must fail")
+                .contains("expected_body_deg")
+        );
+
+        let mut f_missing_tol = f.clone();
+        f_missing_tol.minimap_heading.as_mut().unwrap().expected_body_deg = Some(90.0);
+        assert!(
+            f_missing_tol
+                .validate("mh_tol.json")
+                .expect_err("missing body_tolerance_deg must fail")
+                .contains("body_tolerance_deg")
+        );
+
+        let mut f_bad_cone_tol = f.clone();
+        f_bad_cone_tol.minimap_heading.as_mut().unwrap().expected_cone_deg = Some(120.0);
+        f_bad_cone_tol
+            .minimap_heading
+            .as_mut()
+            .unwrap()
+            .cone_tolerance_deg = Some(-1.0);
+        assert!(
+            f_bad_cone_tol
+                .validate("mh_cone_tol.json")
+                .expect_err("non-positive cone_tolerance_deg must fail")
+                .contains("cone_tolerance_deg")
+        );
+    }
+
+    #[test]
+    fn minimap_heading_outcome_pass_and_fail_on_synthetic_crop() {
+        let tmp = TempDirGuard::new("minimap_heading");
+        let img_rel = "scratch/mh_crop.png";
+        let sz = 212u32;
+        let c = sz as f64 * 0.5;
+        let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(sz, sz);
+        for y in 0..sz {
+            for x in 0..sz {
+                let dx = x as f64 - c;
+                let dy = y as f64 - c;
+                let r = dx.hypot(dy);
+                let ang = ((dx.atan2(-dy).to_degrees()) + 360.0) % 360.0;
+                let mut rgb = [
+                    (55.0 + 14.0 * ((x + y) as f64 / 21.0).sin()) as u8,
+                    (75.0 + 18.0 * (x as f64 / 13.0).cos()) as u8,
+                    (45.0 + 16.0 * (x as f64 / 17.0).sin()) as u8,
+                ];
+                let d_cone = ((ang - 90.0 + 180.0).rem_euclid(360.0) - 180.0).abs();
+                if r >= 20.0 && r <= c * 0.92 && d_cone <= 45.0 {
+                    for ch in &mut rgb {
+                        *ch = (0.75 * (*ch as f64) + 63.75).round() as u8;
+                    }
+                }
+                // Cyan player arrow pointing North (0 deg): tip (0,-13), left (-8.5,9), notch (0,4), right (8.5,9)
+                let in_left = (-8.5..=0.0).contains(&dx)
+                    && dy >= (-13.0 + (22.0 / 8.5) * (-dx))
+                    && dy <= (4.0 - (5.0 / 8.5) * dx);
+                let in_right = (0.0..=8.5).contains(&dx)
+                    && dy >= (-13.0 + (22.0 / 8.5) * dx)
+                    && dy <= (4.0 - (5.0 / 8.5) * (-dx));
+                if in_left || in_right {
+                    rgb = [0, 240, 255];
+                }
+                img.put_pixel(x, y, Rgb(rgb));
+            }
+        }
+        let img_abs = tmp.path.join(img_rel);
+        std::fs::create_dir_all(img_abs.parent().unwrap()).expect("create scratch dir");
+        img.save(&img_abs).expect("save crop png");
+
+        let fixtures_dir = tmp.path.join("tests/frame_fixtures");
+        let pass_fx = FrameFixture {
+            schema_version: FRAME_FIXTURE_SCHEMA_VERSION,
+            name: "mh_pass".to_owned(),
+            description: "synthetic crop pass".to_owned(),
+            notes: "arrow=0, cone=90".to_owned(),
+            image: img_rel.to_owned(),
+            width: sz,
+            height: sz,
+            is_gamepad: false,
+            known_bug: None,
+            expected_minimap_rect: None,
+            expected_paimon_rect: None,
+            tolerance_px: None,
+            true_minimap_circle: None,
+            expect_circle_in_crop: true,
+            mmap_locate: None,
+            minimap_heading: Some(MinimapHeadingExpectation {
+                expected_body_deg: Some(0.0),
+                body_tolerance_deg: Some(6.0),
+                expected_cone_deg: Some(90.0),
+                cone_tolerance_deg: Some(5.0),
+                cone_prior_deg: None,
+                require_trusted_cone: true,
+                perturb_seeds: vec![101],
+            }),
+        };
+        write_fixture_json(&fixtures_dir, "01_pass.json", &pass_fx);
+
+        let rep_pass = run_frames(&FramesOptions {
+            dir: fixtures_dir.clone(),
+            repo_root: Some(tmp.path.clone()),
+            data_dir: tmp.path.join("no_data_needed"),
+        })
+        .expect("run_frames pass");
+        assert_eq!(rep_pass.pass, 1, "failures: {:?}", rep_pass.results[0].failures);
+
+        let mut fail_fx = pass_fx;
+        fail_fx.name = "mh_fail".to_owned();
+        fail_fx
+            .minimap_heading
+            .as_mut()
+            .unwrap()
+            .expected_body_deg = Some(180.0);
+        write_fixture_json(&fixtures_dir, "01_pass.json", &fail_fx);
+        let rep_fail = run_frames(&FramesOptions {
+            dir: fixtures_dir,
+            repo_root: Some(tmp.path.clone()),
+            data_dir: tmp.path.join("no_data_needed"),
+        })
+        .expect("run_frames fail");
+        assert_eq!(rep_fail.fail, 1);
     }
 }

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "name": "081807_f432_mm_arrow_waypoint",
+  "description": "Real minimap crop where an adjacent teleport waypoint makes the binary arrow detector flip +120 deg.",
+  "notes": "Exported from sess_20261127_081807 frame i=432 (0-based n=431, 2560x1440 crop 291x291+79+20). True arrow nose is ~17.0 deg; baseline flipped to 127.5 deg.",
+  "image": "scratch/frame_fixtures/sess_20261127_081807_f432_mm.png",
+  "width": 291,
+  "height": 291,
+  "is_gamepad": false,
+  "known_bug": null,
+  "minimap_heading": {
+    "expected_body_deg": 17.0,
+    "body_tolerance_deg": 15.0,
+    "perturb_seeds": [101, 202]
+  }
+}
