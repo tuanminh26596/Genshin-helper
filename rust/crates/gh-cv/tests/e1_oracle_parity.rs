@@ -682,9 +682,13 @@ fn e1_heading360_yt_bench_and_minimap_rec_parity() {
     // Visually verified 1440p cropped minimap player arrow ground truth, including frames
     // overlapping teleport waypoints & icons (#241, #406, #1021, #1666) where the legacy
     // hollow-BGR Canny solver flipped by 23-129 deg.
+    // #241 was recorded as 7.0 from the old broad-mask solver, which fused the adjacent
+    // blue teleport waypoint into the arrow (6.89 deg). The nose/wing geometry, tail jewel
+    // and the 60 Hz trajectory f240 28.6 -> f242 9.4 put the true heading at ~19 deg;
+    // a solver that re-fuses the waypoint fails here again.
     for &(idx, gt_arrow_deg) in &[
         (1usize, 148.0f64),
-        (241, 7.0),
+        (241, 19.0),
         (406, 32.0),
         (1021, 173.0),
         (1261, 163.0),
