@@ -12,6 +12,7 @@ serde_json.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
 # X11 screen capture and window management
 x11rb.workspace = true
 

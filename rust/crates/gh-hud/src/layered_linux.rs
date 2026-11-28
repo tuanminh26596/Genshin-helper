@@ -310,6 +310,7 @@ impl<'a> LayeredWindowCtx<'a> {
         self.shared.capture_visible.store(visible, Ordering::Release);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn present_premultiplied_rgba(
         &mut self,
         x: i32,
@@ -333,6 +334,7 @@ impl<'a> LayeredWindowCtx<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn present_straight_rgba(
         &mut self,
         x: i32,

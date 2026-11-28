@@ -4,7 +4,7 @@
 //! doesn't have the same hotkey conflict ecosystem as Windows.
 
 use gh_core::traits::ConflictAdvisor;
-use gh_core::{CoreError, CoreResult};
+use gh_core::CoreResult;
 use serde_json::Value;
 
 /// Modifier virtual key codes for Linux (evdev).

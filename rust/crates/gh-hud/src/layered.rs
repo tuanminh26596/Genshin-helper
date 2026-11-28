@@ -62,6 +62,7 @@ pub use crate::layered_linux::{
 };
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 const HTCLIENT: u32 = 1;
 #[cfg(not(windows))]
 const HTCAPTION: u32 = 2;

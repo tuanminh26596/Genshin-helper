@@ -5329,6 +5329,7 @@ mod tests {
     use image::{Frame, ImageEncoder, codecs::png::PngEncoder};
     #[cfg(windows)]
     use std::ffi::c_void;
+    #[cfg(windows)]
     use std::time::Duration;
     #[cfg(windows)]
     use windows::Win32::Foundation::HWND;

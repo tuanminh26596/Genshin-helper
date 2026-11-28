@@ -8,7 +8,7 @@ use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::ptr::null_mut;
 use std::sync::{Mutex, OnceLock};
-use tracing::{debug, warn};
+use tracing::debug;
 use wayland_client::protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool};
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, delegate_noop};
 use wayland_protocols_wlr::screencopy::v1::client::{
@@ -267,10 +267,10 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for WaylandSt
                 state.pending_pool = Some(pool);
                 state.pending_buffer = Some(buffer);
             }
-            zwlr_screencopy_frame_v1::Event::Flags { flags } => {
-                if let wayland_client::WEnum::Value(f) = flags {
-                    state.y_invert = f.contains(zwlr_screencopy_frame_v1::Flags::YInvert);
-                }
+            zwlr_screencopy_frame_v1::Event::Flags {
+                flags: wayland_client::WEnum::Value(f),
+            } => {
+                state.y_invert = f.contains(zwlr_screencopy_frame_v1::Flags::YInvert);
             }
             zwlr_screencopy_frame_v1::Event::Ready { .. } => {
                 state.copy_state = CopyState::Ready;
@@ -300,7 +300,7 @@ fn create_memfd(size: usize) -> std::io::Result<OwnedFd> {
 }
 
 struct WaylandCapturerInner {
-    conn: Connection,
+    _conn: Connection,
     queue: EventQueue<WaylandState>,
     state: WaylandState,
 }
@@ -310,9 +310,7 @@ static WAYLAND_CAPTURER: OnceLock<Option<Mutex<WaylandCapturerInner>>> = OnceLoc
 fn get_wayland_capturer() -> Option<&'static Mutex<WaylandCapturerInner>> {
     WAYLAND_CAPTURER
         .get_or_init(|| {
-            if std::env::var_os("WAYLAND_DISPLAY").is_none() {
-                return None;
-            }
+            std::env::var_os("WAYLAND_DISPLAY")?;
             let conn = match Connection::connect_to_env() {
                 Ok(c) => c,
                 Err(e) => {
@@ -338,7 +336,7 @@ fn get_wayland_capturer() -> Option<&'static Mutex<WaylandCapturerInner>> {
                 return None;
             }
 
-            Some(Mutex::new(WaylandCapturerInner { conn, queue, state }))
+            Some(Mutex::new(WaylandCapturerInner { _conn: conn, queue, state }))
         })
         .as_ref()
 }
@@ -369,7 +367,7 @@ pub fn capture_region(
     }
     let lock = get_wayland_capturer()?;
     let mut guard = lock.lock().ok()?;
-    let WaylandCapturerInner { conn: _, queue, state } = &mut *guard;
+    let WaylandCapturerInner { _conn: _, queue, state } = &mut *guard;
 
     let screencopy = state.screencopy.as_ref()?.clone();
     // Pick output containing (x, y), or fallback to first output

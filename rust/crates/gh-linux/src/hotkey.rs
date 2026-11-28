@@ -179,11 +179,10 @@ impl UnifiedHotkeyManager {
         }
 
         let actions = Arc::clone(&self.actions);
-        let should_suppress = Arc::clone(&self.should_suppress);
         let running = Arc::clone(&self.running);
 
         let handle = std::thread::spawn(move || {
-            evdev_listener(actions, should_suppress, running);
+            evdev_listener(actions, running);
         });
         *self.thread.lock().expect("lock poisoned") = Some(handle);
         true
@@ -238,7 +237,6 @@ impl Drop for UnifiedHotkeyManager {
 
 fn evdev_listener(
     actions: Arc<RwLock<ActionMap>>,
-    should_suppress: Arc<RwLock<Option<ShouldSuppressFn>>>,
     running: Arc<AtomicBool>,
 ) {
     use evdev::{Device, Key};
@@ -261,7 +259,7 @@ fn evdev_listener(
         warn!(
             "gh-linux: no readable /dev/input/event* devices (add user to 'input' group for global Wayland hotkeys); falling back to X11/XWayland keymap polling"
         );
-        x11_keymap_listener(actions, should_suppress, running);
+        x11_keymap_listener(actions, running);
         return;
     }
 
@@ -286,15 +284,10 @@ fn evdev_listener(
                 if entry.enabled && hotkey_matches_pressed(&entry.parsed, &pressed) {
                     now_matched.insert(name.clone());
                     if !prev_matched.contains(name) {
-                        let suppressed = should_suppress
-                            .read()
-                            .ok()
-                            .and_then(|g| g.as_ref().map(|f| f(name)))
-                            .unwrap_or(false);
-                        if !suppressed {
-                            let cb = Arc::clone(&entry.callback);
-                            std::thread::spawn(move || cb());
-                        }
+                        // Read-only listener: `should_suppress` only gates Win32 key-swallowing,
+                        // never whether the hotkey callback itself fires.
+                        let cb = Arc::clone(&entry.callback);
+                        std::thread::spawn(move || cb());
                     }
                 }
             }
@@ -347,7 +340,6 @@ fn hotkey_matches_pressed(parsed: &ParsedHotkey, pressed: &HashSet<u16>) -> bool
 
 fn x11_keymap_listener(
     actions: Arc<RwLock<ActionMap>>,
-    should_suppress: Arc<RwLock<Option<ShouldSuppressFn>>>,
     running: Arc<AtomicBool>,
 ) {
     use std::time::Duration;
@@ -420,15 +412,10 @@ fn x11_keymap_listener(
                 if alt_ok && ctrl_ok && shift_ok && main_ok {
                     now_matched.insert(name.clone());
                     if !prev_matched.contains(name) {
-                        let suppressed = should_suppress
-                            .read()
-                            .ok()
-                            .and_then(|g| g.as_ref().map(|f| f(name)))
-                            .unwrap_or(false);
-                        if !suppressed {
-                            let cb = Arc::clone(&entry.callback);
-                            std::thread::spawn(move || cb());
-                        }
+                        // Read-only listener: `should_suppress` only gates Win32 key-swallowing,
+                        // never whether the hotkey callback itself fires.
+                        let cb = Arc::clone(&entry.callback);
+                        std::thread::spawn(move || cb());
                     }
                 }
             }

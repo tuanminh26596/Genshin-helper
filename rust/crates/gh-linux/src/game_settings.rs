@@ -4,8 +4,6 @@
 //! SetWindowDisplayAffinity. On Linux these are either not needed or trivially
 //! replaced.
 
-use gh_core::ui_layout::{UiLayout, compute_ui_layout};
-use gh_core::CoreResult;
 use serde::{Deserialize, Serialize};
 
 pub use gh_core::ui_layout::{

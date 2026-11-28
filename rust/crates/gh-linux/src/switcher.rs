@@ -3,10 +3,6 @@
 //! Mirrors `gh-win32::switcher`.
 
 use crate::capture::WindowFinder;
-use std::time::{Duration, Instant};
-
-const FOCUS_TAB_POLL_TIMEOUT: Duration = Duration::from_millis(150);
-const FOCUS_TAB_POLL_INTERVAL: Duration = Duration::from_millis(15);
 
 pub trait SwitcherOps {
     fn foreground_hwnd(&self) -> isize;

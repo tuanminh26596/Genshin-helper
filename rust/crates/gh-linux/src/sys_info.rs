@@ -85,14 +85,14 @@ fn read_gpu_adapters() -> Vec<String> {
     if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
         for entry in entries.flatten() {
             let path = entry.path().join("device/vendor");
-            if let Ok(vendor) = std::fs::read_to_string(&path) {
+            if std::fs::read_to_string(&path).is_ok() {
                 let device_path = entry.path().join("device/uevent");
                 if let Ok(uevent) = std::fs::read_to_string(device_path) {
                     for line in uevent.lines() {
-                        if let Some(driver) = line.strip_prefix("DRIVER=") {
-                            if !adapters.contains(&driver.to_owned()) {
-                                adapters.push(driver.to_owned());
-                            }
+                        if let Some(driver) = line.strip_prefix("DRIVER=")
+                            && !adapters.contains(&driver.to_owned())
+                        {
+                            adapters.push(driver.to_owned());
                         }
                     }
                 }

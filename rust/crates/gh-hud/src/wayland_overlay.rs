@@ -155,10 +155,10 @@ impl Dispatch<wl_seat::WlSeat, ()> for WlState {
         if let wl_seat::Event::Capabilities {
             capabilities: WEnum::Value(caps),
         } = event
+            && caps.contains(wl_seat::Capability::Pointer)
+            && state.pointer.is_none()
         {
-            if caps.contains(wl_seat::Capability::Pointer) && state.pointer.is_none() {
-                state.pointer = Some(seat.get_pointer(qh, ()));
-            }
+            state.pointer = Some(seat.get_pointer(qh, ()));
         }
     }
 }
@@ -285,9 +285,7 @@ pub struct WaylandOverlay {
 
 impl WaylandOverlay {
     pub fn try_new(namespace: &str) -> Option<Self> {
-        if std::env::var_os("WAYLAND_DISPLAY").is_none() {
-            return None;
-        }
+        std::env::var_os("WAYLAND_DISPLAY")?;
         let conn = Connection::connect_to_env().ok()?;
         let display = conn.display();
         let mut queue = conn.new_event_queue();
@@ -368,6 +366,7 @@ impl WaylandOverlay {
         let _ = self.conn.flush();
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn present(
         &mut self,
         x: i32,
@@ -392,6 +391,26 @@ impl WaylandOverlay {
             self.layer_surface.set_size(width as u32, height as u32);
             self.layer_surface.set_margin(y.max(0), 0, 0, x.max(0));
             self.last_rect = Some((x, y, width, height));
+        }
+
+        // Per zwlr_layer_shell_v1 protocol, a layer surface must be configured
+        // (via an unbuffered commit + Configure + ack_configure) before any buffer
+        // is attached — both on first show and after hide() unmapped it.
+        if !self.state.configured {
+            self.surface.commit();
+            for _ in 0..3 {
+                if self.queue.roundtrip(&mut self.state).is_err() {
+                    return Err(HudError::InvalidBuffer(
+                        "wayland roundtrip failed during configure".into(),
+                    ));
+                }
+                if self.state.configured || self.state.closed {
+                    break;
+                }
+            }
+            if !self.state.configured || self.state.closed {
+                return Ok(());
+            }
         }
 
         let need_new_slot = self
@@ -472,6 +491,7 @@ impl WaylandOverlay {
             self.surface.commit();
             let _ = self.conn.flush();
             self.mapped = false;
+            self.state.configured = false;
         }
     }
 

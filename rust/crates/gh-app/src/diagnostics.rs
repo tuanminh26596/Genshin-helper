@@ -312,7 +312,7 @@ fn redact_secret_kv(input: &str) -> String {
                             p += 1;
                         }
                         let val_len = p.saturating_sub(val_start);
-                        if (key == "pin" && val_len >= 4) || val_len >= 4 {
+                        if val_len >= 4 {
                             out.push_str(&input[i..val_start]);
                             out.push_str("<REDACTED>");
                             if let Some(q) = quote_char

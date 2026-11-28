@@ -272,10 +272,10 @@ impl WindowFinder {
     /// Returns the focused window (Hyprland IPC on Wayland, X11 fallback).
     pub fn get_foreground_window() -> Option<isize> {
         if let Some(raw) = hypr_ipc("j/activewindow") {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(addr) = v.get("address").and_then(|a| a.as_str()) {
-                    return hypr_addr_to_isize(addr);
-                }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
+                && let Some(addr) = v.get("address").and_then(|a| a.as_str())
+            {
+                return hypr_addr_to_isize(addr);
             }
             return None;
         }
@@ -482,19 +482,19 @@ fn enumerate_recursive(conn: &RustConnection, win: Window, out: &mut Vec<WindowI
 
     for child in reply.children {
         // Check if mapped (visible)
-        if let Some(attrs) = conn.get_window_attributes(child).ok().and_then(|c| c.reply().ok()) {
-            if attrs.map_state != MapState::UNMAPPED {
-                let title = get_window_title(conn, child).unwrap_or_default();
-                let class = get_window_class(conn, child).unwrap_or_default();
-                if !title.is_empty() {
-                    let rect = get_win_rect(conn, child);
-                    out.push(WindowInfo {
-                        hwnd: child as isize,
-                        title,
-                        class,
-                        rect: rect.unwrap_or_default(),
-                    });
-                }
+        if let Some(attrs) = conn.get_window_attributes(child).ok().and_then(|c| c.reply().ok())
+            && attrs.map_state != MapState::UNMAPPED
+        {
+            let title = get_window_title(conn, child).unwrap_or_default();
+            let class = get_window_class(conn, child).unwrap_or_default();
+            if !title.is_empty() {
+                let rect = get_win_rect(conn, child);
+                out.push(WindowInfo {
+                    hwnd: child as isize,
+                    title,
+                    class,
+                    rect: rect.unwrap_or_default(),
+                });
             }
         }
         enumerate_recursive(conn, child, out);
@@ -520,10 +520,9 @@ fn get_window_title(conn: &RustConnection, win: Window) -> Option<String> {
         .get_property(false, win, atom_net_wm_name, atom_utf8, 0, 1024)
         .ok()
         .and_then(|c| c.reply().ok())
+        && !reply.value.is_empty()
     {
-        if !reply.value.is_empty() {
-            return String::from_utf8(reply.value).ok();
-        }
+        return String::from_utf8(reply.value).ok();
     }
 
     // Fallback: WM_NAME (Latin-1)
@@ -532,10 +531,9 @@ fn get_window_title(conn: &RustConnection, win: Window) -> Option<String> {
         .get_property(false, win, atom_wm_name, AtomEnum::STRING, 0, 1024)
         .ok()
         .and_then(|c| c.reply().ok())
+        && !reply.value.is_empty()
     {
-        if !reply.value.is_empty() {
-            return Some(String::from_utf8_lossy(&reply.value).into_owned());
-        }
+        return Some(String::from_utf8_lossy(&reply.value).into_owned());
     }
     None
 }
