@@ -78,6 +78,9 @@ pub(super) const VOTE_MIN_MARGIN: usize = 2;
 /// Vote bin and inlier tolerance, screen px @1440p.
 const VOTE_CELL_PX_1440: f64 = 12.0;
 const VOTE_TOL_PX_1440: f64 = 9.0;
+/// Symmetric re-centering tolerance after snapping off the `12 px` grid-cell boundary.
+/// Keeps the full `9.0 px` capture for jittered scenes while removing boundary quantization bias.
+const VOTE_REFINE_TOL_PX_1440: f64 = 9.0;
 const VOTE_TOP_BINS: usize = 16;
 
 /// Minimum terrain alignment for a 3-waypoint match to be trusted (e3 report: every wrong
@@ -565,18 +568,16 @@ impl MapLocator {
         top.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));
         top.truncate(VOTE_TOP_BINS);
 
-        // Verify: unique nearest-waypoint inliers within `tol` for each hypothesis.
-        let mut hyps: Vec<(Vec<InlierPair<'a>>, [f64; 2], f64)> = Vec::new();
-        for &(_, (n, sx, sy)) in &top {
-            let t = [sx / f64::from(n), sy / f64::from(n)];
+        // Verify: unique nearest-waypoint inliers within `max_d` for a translation center.
+        let collect_inliers = |center: [f64; 2], max_d: f64| -> (Vec<InlierPair<'a>>, f64) {
             let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
             for (ci, c) in candidates.iter().enumerate() {
-                let mut bestd = tol;
+                let mut bestd = max_d;
                 let mut bestk = None;
                 for (k, &i) in idx.iter().enumerate() {
                     let (ox, oy) = offs[k];
-                    let d = (wps[i].x_pos - (scale * (c.0 + ox) + t[0]))
-                        .hypot(wps[i].y_pos - (scale * (c.1 + oy) + t[1]));
+                    let d = (wps[i].x_pos - (scale * (c.0 + ox) + center[0]))
+                        .hypot(wps[i].y_pos - (scale * (c.1 + oy) + center[1]));
                     if d < bestd {
                         bestd = d;
                         bestk = Some(k);
@@ -597,8 +598,19 @@ impl MapLocator {
                     sq += (d / scale) * (d / scale);
                 }
             }
+            let rmse = if inl.is_empty() {
+                f64::INFINITY
+            } else {
+                (sq / inl.len() as f64).sqrt()
+            };
+            (inl, rmse)
+        };
+
+        let mut hyps: Vec<(Vec<InlierPair<'a>>, [f64; 2], f64)> = Vec::new();
+        for &(_, (n, sx, sy)) in &top {
+            let t = [sx / f64::from(n), sy / f64::from(n)];
+            let (inl, rmse) = collect_inliers(t, tol);
             if !inl.is_empty() {
-                let rmse = (sq / inl.len() as f64).sqrt();
                 hyps.push((inl, t, rmse));
             }
         }
@@ -617,7 +629,56 @@ impl MapLocator {
             return None;
         }
         let (inl, t, rmse) = hyps.swap_remove(0);
-        Some((inl, scale, t, rmse))
+
+        // Re-center around the component-wise median translation so a cluster straddling a 12 px
+        // vote-cell boundary is not pulled toward the quantized bin center (which otherwise drops
+        // valid inliers across the boundary and admits off-center outliers).
+        let median_f64 = |vals: &mut [f64]| -> f64 {
+            vals.sort_by(|a, b| a.total_cmp(b));
+            let m = vals.len();
+            if m % 2 == 1 {
+                vals[m / 2]
+            } else {
+                0.5 * (vals[m / 2 - 1] + vals[m / 2])
+            }
+        };
+        let mut txs = Vec::with_capacity(inl.len());
+        let mut tys = Vec::with_capacity(inl.len());
+        for &(c, wp) in &inl {
+            let (ox, oy) = icon_anchor_offset_px(wp.label_id, ui);
+            txs.push(wp.x_pos - scale * (c.0 + ox));
+            tys.push(wp.y_pos - scale * (c.1 + oy));
+        }
+        let t_med = [median_f64(&mut txs), median_f64(&mut tys)];
+
+        let refine_tol = scale * VOTE_REFINE_TOL_PX_1440 * ui;
+        let (ref_inl, _) = collect_inliers(t_med, refine_tol);
+        if ref_inl.len() < VOTE_MIN_INLIERS {
+            return Some((inl, scale, t, rmse));
+        }
+
+        let nf = ref_inl.len() as f64;
+        let mut sum_tx = 0.0;
+        let mut sum_ty = 0.0;
+        let mut ref_ts = Vec::with_capacity(ref_inl.len());
+        for &(c, wp) in &ref_inl {
+            let (ox, oy) = icon_anchor_offset_px(wp.label_id, ui);
+            let tx_i = wp.x_pos - scale * (c.0 + ox);
+            let ty_i = wp.y_pos - scale * (c.1 + oy);
+            sum_tx += tx_i;
+            sum_ty += ty_i;
+            ref_ts.push((tx_i, ty_i));
+        }
+        let t_ref = [sum_tx / nf, sum_ty / nf];
+        let sq: f64 = ref_ts
+            .iter()
+            .map(|&(tx_i, ty_i)| {
+                let dx = (tx_i - t_ref[0]) / scale;
+                let dy = (ty_i - t_ref[1]) / scale;
+                dx * dx + dy * dy
+            })
+            .sum();
+        Some((ref_inl, scale, t_ref, (sq / nf).sqrt()))
     }
 }
 
@@ -657,5 +718,58 @@ mod tests {
         let (wx, wy) = r.screen_to_world(1280.0, 720.0);
         let (sx, sy) = r.world_to_screen(wx, wy);
         assert!((sx - 1280.0).abs() < 1e-9 && (sy - 720.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn translation_votes_recenters_across_cell_boundary_and_prunes_outlier() {
+        let absent = PathBuf::from("__absent_unit_test_asset__");
+        let loc = MapLocator::with_paths(
+            LocatorPaths {
+                db_path: Some(absent.clone()),
+                terrain_npz_path: Some(absent.clone()),
+                cave_masks_npz_path: Some(absent.clone()),
+                ui_anchors_npz_path: Some(absent.clone()),
+                legacy_underground_db_path: Some(absent),
+            },
+            None,
+        );
+
+        // Cluster straddling the 12 px cell boundary at tx=12.0 (scale=1.0, frame_h=1440):
+        // Bin (0,0) collects 6 votes [2.2, 2.4, 11.2, 11.4, 11.6, 11.8] (mean 8.433), whose raw
+        // 9 px window keeps the 6.0-6.2 px outliers (2.2, 2.4) while dropping valid point 19.2.
+        // Re-centering at median t_med=11.5 recovers 19.2 across the boundary and prunes 2.2 & 2.4.
+        let txs = [2.2, 2.4, 11.2, 11.4, 11.6, 11.8, 12.4, 12.6, 19.2];
+        let mut candidates = Vec::with_capacity(txs.len());
+        let mut wps = Vec::with_capacity(txs.len());
+        for (i, &tx_i) in txs.iter().enumerate() {
+            let sx = 200.0 + (i as f64) * 180.0;
+            let sy = 300.0 + ((i % 3) as f64) * 200.0;
+            candidates.push((sx, sy, 100));
+            wps.push(WaypointEntry {
+                id: (i + 1) as i64,
+                label_id: 3,
+                is_primary: true,
+                x_pos: sx + tx_i,
+                y_pos: sy + 5.0 + 6.0,
+                area_id: 1,
+                map_id: 2,
+                z_level: 0,
+                icon_sign: 0,
+                point_group: None,
+            });
+        }
+        let idx: Vec<usize> = (0..wps.len()).collect();
+        let (inl, sc, t_ref, _) = loc
+            .match_by_translation_votes(&candidates, &wps, &idx, 1.0, 1440)
+            .expect("expected translation-vote match");
+        assert!((sc - 1.0).abs() < 1e-12);
+
+        let mut got_ids: Vec<i64> = inl.iter().map(|(_, wp)| wp.id).collect();
+        got_ids.sort_unstable();
+        assert_eq!(got_ids, vec![3, 4, 5, 6, 7, 8, 9], "got ids={got_ids:?}");
+        assert!(
+            (t_ref[0] - 12.8857).abs() < 0.05 && (t_ref[1] - 6.0).abs() < 1e-6,
+            "unexpected refined mean translation: {t_ref:?}"
+        );
     }
 }
