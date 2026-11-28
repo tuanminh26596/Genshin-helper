@@ -24,7 +24,9 @@ use gh_app::tracking_loop::{
     LoopRuntimeState, PostTickContext, TickMode, TickParams, apply_tick_output,
     prepare_tick_locate, run_tick_worker,
 };
-use gh_app::tracking_stack::{TrackingStackOptions, build_tracking_stack};
+use gh_app::tracking_stack::{
+    SharedTrackingAssets, TrackingStackOptions, build_tracking_stack,
+};
 use gh_app::updater::AppUpdater;
 use gh_core::atomic_io::write_json_atomic;
 use gh_core::config::AppConfig;
@@ -34,8 +36,8 @@ use gh_core::map_bridge::PerMapAffineRegistry;
 use gh_core::nav_controller::NavigationController;
 use gh_core::paths::{AppPaths, RuntimeMode};
 use gh_core::provenance::{
-    DATASET_FILENAMES, ENGINE_PROVENANCE_PATHS, ReplayProvenance, SessionProvenance,
-    compare_git_commits, fingerprint_data_dir,
+    DATASET_FILENAMES, DatasetFingerprint, ENGINE_PROVENANCE_PATHS, ReplayProvenance,
+    SessionProvenance, compare_git_commits, fingerprint_data_dir,
 };
 use gh_core::traits::OcrProvider;
 use gh_cv::map_state::MapState;
@@ -55,11 +57,12 @@ use gh_win32::win_ocr::WindowsOcrService;
 use image::ImageReader;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
@@ -292,12 +295,15 @@ pub struct MapMSyncRecord {
     pub payload: Value,
 }
 
-struct TempSandboxDir(PathBuf);
+pub(crate) struct TempSandboxDir(pub(crate) PathBuf);
+
+static SANDBOX_SEQ: AtomicU64 = AtomicU64::new(0);
 
 impl TempSandboxDir {
-    fn new(prefix: &str) -> Result<Self, String> {
+    pub(crate) fn new(prefix: &str) -> Result<Self, String> {
+        let seq = SANDBOX_SEQ.fetch_add(1, Ordering::Relaxed);
         let p = std::env::temp_dir().join(format!(
-            "{prefix}_{}_{}",
+            "{prefix}_{}_{seq}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -524,21 +530,32 @@ fn load_png_as_bgra(path: &Path) -> Result<FrameBuf, String> {
 
 struct VideoPipeDecoder {
     child: Child,
-    stdout: std::process::ChildStdout,
-    w: u32,
-    h: u32,
+    frame_rx: Option<Receiver<Result<Option<FrameBuf>, String>>>,
+    recycle_tx: Option<SyncSender<FrameBuf>>,
+    reader_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl VideoPipeDecoder {
-    fn spawn(ffmpeg_abs: &Path, video_path: &Path, w: u32, h: u32) -> Result<Self, String> {
+    fn spawn(
+        ffmpeg_abs: &Path,
+        video_path: &Path,
+        w: u32,
+        h: u32,
+        ffmpeg_threads: Option<usize>,
+    ) -> Result<Self, String> {
         if !ffmpeg_abs.is_absolute() || !ffmpeg_abs.is_file() {
             return Err(format!(
                 "--ffmpeg must be an existing absolute file path (never resolved from PATH): {}",
                 ffmpeg_abs.display()
             ));
         }
-        let mut child = Command::new(ffmpeg_abs)
-            .args(["-v", "error", "-i"])
+        let mut cmd = Command::new(ffmpeg_abs);
+        cmd.args(["-v", "error"]);
+        if let Some(threads) = ffmpeg_threads.filter(|&n| n > 0) {
+            cmd.args(["-threads", &threads.to_string()]);
+        }
+        let mut child = cmd
+            .args(["-i"])
             .arg(video_path)
             .args(["-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"])
             .stdin(Stdio::null())
@@ -546,45 +563,82 @@ impl VideoPipeDecoder {
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| format!("failed to spawn ffmpeg ({}): {e}", ffmpeg_abs.display()))?;
-        let stdout = child
+        let mut stdout = child
             .stdout
             .take()
             .ok_or_else(|| "ffmpeg stdout pipe missing".to_owned())?;
+
+        let (frame_tx, frame_rx) = sync_channel::<Result<Option<FrameBuf>, String>>(1);
+        let (recycle_tx, recycle_rx) = sync_channel::<FrameBuf>(2);
+        for _ in 0..2 {
+            let _ = recycle_tx.send(FrameBuf::new_zeroed(w, h, PixelFormat::Bgr8));
+        }
+
+        let reader_thread = std::thread::Builder::new()
+            .name("gh-sim-ffmpeg-read".to_owned())
+            .spawn(move || {
+                while let Ok(mut buf) = recycle_rx.recv() {
+                    let mut filled = 0usize;
+                    let res = loop {
+                        if filled >= buf.data.len() {
+                            break Ok(Some(buf));
+                        }
+                        match stdout.read(&mut buf.data[filled..]) {
+                            Ok(0) => {
+                                if filled == 0 {
+                                    break Ok(None);
+                                }
+                                break Err(format!(
+                                    "truncated video frame: read {filled} of {} bytes",
+                                    buf.data.len()
+                                ));
+                            }
+                            Ok(n) => filled += n,
+                            Err(e) => break Err(format!("ffmpeg pipe read error: {e}")),
+                        }
+                    };
+                    let done = !matches!(&res, Ok(Some(_)));
+                    if frame_tx.send(res).is_err() || done {
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| format!("failed to spawn ffmpeg reader thread: {e}"))?;
+
         Ok(Self {
             child,
-            stdout,
-            w,
-            h,
+            frame_rx: Some(frame_rx),
+            recycle_tx: Some(recycle_tx),
+            reader_thread: Some(reader_thread),
         })
     }
 
     fn read_next_frame(&mut self) -> Result<Option<FrameBuf>, String> {
-        let mut buf = FrameBuf::new_zeroed(self.w, self.h, PixelFormat::Bgr8);
-        let mut filled = 0usize;
-        while filled < buf.data.len() {
-            let n = self
-                .stdout
-                .read(&mut buf.data[filled..])
-                .map_err(|e| format!("ffmpeg pipe read error: {e}"))?;
-            if n == 0 {
-                if filled == 0 {
-                    return Ok(None);
-                }
-                return Err(format!(
-                    "truncated video frame: read {filled} of {} bytes",
-                    buf.data.len()
-                ));
-            }
-            filled += n;
+        let Some(ref rx) = self.frame_rx else {
+            return Ok(None);
+        };
+        match rx.recv() {
+            Ok(res) => res,
+            Err(_) => Ok(None),
         }
-        Ok(Some(buf))
+    }
+
+    fn recycle_frame(&self, buf: FrameBuf) {
+        if let Some(ref tx) = self.recycle_tx {
+            let _ = tx.try_send(buf);
+        }
     }
 }
 
 impl Drop for VideoPipeDecoder {
     fn drop(&mut self) {
+        self.recycle_tx.take();
+        self.frame_rx.take();
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(handle) = self.reader_thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -613,6 +667,7 @@ struct OfflineReplayState {
     sim_clock_bits: Arc<AtomicU64>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_offline_replay_state(
     sandbox_root: &Path,
     data_dir: &Path,
@@ -621,6 +676,7 @@ fn build_offline_replay_state(
     paimon_cache_path: PathBuf,
     capturer: Arc<ReplayCapturer>,
     enable_mmap_view: bool,
+    shared_assets: Option<Arc<SharedTrackingAssets>>,
 ) -> Result<OfflineReplayState, String> {
     let paths = AppPaths {
         mode: RuntimeMode::Installed,
@@ -648,6 +704,7 @@ fn build_offline_replay_state(
     // Shared production tracking stack builder — only explicit offline/sync options differ from live.
     let stack = build_tracking_stack(TrackingStackOptions {
         explicit_data_dir: Some(data_dir.to_path_buf()),
+        shared_assets,
         tiles_dir,
         ug_overlays_dir: ug_dir,
         paimon_cache_path,
@@ -780,14 +837,14 @@ fn build_offline_replay_state(
     })
 }
 
-fn evaluate_session_accuracy(
+fn evaluate_session_accuracy_with_gt(
     gt_file: &Path,
+    gt: &VerifiedGtFile,
     session_name: &str,
     observed: &[ObservedFrame],
-) -> Result<AccuracyReport, String> {
-    let gt = VerifiedGtFile::load_or_default(gt_file)?;
+) -> AccuracyReport {
     let Some(sess_gt) = gt.sessions.get(session_name) else {
-        return Ok(AccuracyReport {
+        return AccuracyReport {
             has_verified_gt: false,
             gt_file: gt_file.display().to_string(),
             note: format!(
@@ -795,11 +852,11 @@ fn evaluate_session_accuracy(
                 gt_file.display()
             ),
             ..Default::default()
-        });
+        };
     };
 
     if sess_gt.checkpoints.is_empty() {
-        return Ok(AccuracyReport {
+        return AccuracyReport {
             has_verified_gt: false,
             gt_file: gt_file.display().to_string(),
             note: format!(
@@ -807,7 +864,7 @@ fn evaluate_session_accuracy(
                 gt_file.display()
             ),
             ..Default::default()
-        });
+        };
     }
 
     let by_idx: BTreeMap<usize, &ObservedFrame> = observed.iter().map(|o| (o.idx, o)).collect();
@@ -894,7 +951,7 @@ fn evaluate_session_accuracy(
         });
     }
 
-    Ok(AccuracyReport {
+    AccuracyReport {
         has_verified_gt: true,
         gt_file: gt_file.display().to_string(),
         note: sess_gt.note.clone(),
@@ -904,7 +961,7 @@ fn evaluate_session_accuracy(
         median_pos_err_w: percentile(&pos_errs, 0.50).map(round3),
         max_pos_err_w: pos_errs.iter().copied().reduce(f64::max).map(round3),
         details,
-    })
+    }
 }
 
 fn resolve_checkpoint_frame<'a>(
@@ -1287,9 +1344,30 @@ pub fn run_replay_full(
     run_replay_with_hook(opts, None).map(|o| (o.report, o.observed, o.map_m_syncs))
 }
 
+/// Preloaded read-only datasets, relocator index, ground truth, and git provenance shared
+/// across parallel replay sessions in `gh-sim qa`.
+#[derive(Clone)]
+pub struct ReplaySharedContext {
+    pub tracking_assets: Arc<SharedTrackingAssets>,
+    pub verified_gt: Arc<VerifiedGtFile>,
+    pub current_commit: String,
+    pub repo_root: Option<PathBuf>,
+    pub dataset_fingerprint: DatasetFingerprint,
+    pub engine_unchanged_cache: Arc<Mutex<HashMap<String, Option<bool>>>>,
+    pub ffmpeg_threads: Option<usize>,
+}
+
 pub fn run_replay_with_hook(
     opts: &ReplayOptions,
     hook: Option<&ReplayScenarioHook>,
+) -> Result<ReplayFullOutput, String> {
+    run_replay_with_context(opts, hook, None)
+}
+
+pub fn run_replay_with_context(
+    opts: &ReplayOptions,
+    hook: Option<&ReplayScenarioHook>,
+    ctx: Option<&ReplaySharedContext>,
 ) -> Result<ReplayFullOutput, String> {
     let kind = detect_session_kind(&opts.source_dir)?;
     let session_name = opts
@@ -1331,14 +1409,61 @@ pub fn run_replay_with_hook(
     let (effective_data_dir, replay_data_source) =
         resolve_replay_data_dir(&opts.source_dir, &opts.data_dir);
     let recorded_provenance = read_session_provenance(&opts.source_dir);
-    let (current_commit, repo_root) = resolve_current_git_commit_and_root(BUILD_GIT_COMMIT);
-    let provenance = build_replay_provenance_with_repo(
-        recorded_provenance,
-        replay_data_source,
-        &effective_data_dir,
-        &current_commit,
-        repo_root.as_deref(),
-    );
+    let provenance = if let Some(c) = ctx {
+        let datasets_match = recorded_provenance
+            .as_ref()
+            .map(|rec| rec.datasets.matches(&c.dataset_fingerprint));
+        let same_commit = recorded_provenance
+            .as_ref()
+            .and_then(|rec| compare_git_commits(&rec.git_commit, &c.current_commit));
+        let engine_code_unchanged = match same_commit {
+            Some(true) => Some(true),
+            Some(false) => recorded_provenance.as_ref().and_then(|rec| {
+                let root = c.repo_root.as_deref()?;
+                {
+                    let guard = c
+                        .engine_unchanged_cache
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if let Some(&cached) = guard.get(&rec.git_commit) {
+                        return cached;
+                    }
+                }
+                let val = check_engine_paths_unchanged(root, &rec.git_commit, &c.current_commit);
+                c.engine_unchanged_cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(rec.git_commit.clone(), val);
+                val
+            }),
+            None => None,
+        };
+        let effective_cur = if c.current_commit.trim().is_empty()
+            || c.current_commit.trim().eq_ignore_ascii_case("unknown")
+        {
+            None
+        } else {
+            Some(c.current_commit.trim().to_owned())
+        };
+        ReplayProvenance {
+            recorded: recorded_provenance,
+            replay_data_source: replay_data_source.to_owned(),
+            replay_datasets: c.dataset_fingerprint.clone(),
+            datasets_match,
+            same_commit,
+            engine_code_unchanged,
+            current_commit: effective_cur,
+        }
+    } else {
+        let (current_commit, repo_root) = resolve_current_git_commit_and_root(BUILD_GIT_COMMIT);
+        build_replay_provenance_with_repo(
+            recorded_provenance,
+            replay_data_source,
+            &effective_data_dir,
+            &current_commit,
+            repo_root.as_deref(),
+        )
+    };
 
     let enable_mmap_view = opts.verify_mmap_view || opts.render_out.is_some();
     let capturer = Arc::new(ReplayCapturer::new());
@@ -1355,6 +1480,7 @@ pub fn run_replay_with_hook(
         paimon_cache.clone(),
         Arc::clone(&capturer),
         enable_mmap_view,
+        ctx.map(|c| Arc::clone(&c.tracking_assets)),
     )?;
     let _state_cleanup = ReplayStateCleanupGuard(Arc::clone(&state));
 
@@ -1392,7 +1518,14 @@ pub fn run_replay_with_hook(
                 .first()
                 .map(|r| (r.frame_w.max(1) as u32, r.frame_h.max(1) as u32))
                 .ok_or_else(|| "video session meta.jsonl has no records".to_owned())?;
-            video_decoder = Some(VideoPipeDecoder::spawn(ffmpeg_abs, &video_path, vw, vh)?);
+            let ff_threads = ctx.and_then(|c| c.ffmpeg_threads);
+            video_decoder = Some(VideoPipeDecoder::spawn(
+                ffmpeg_abs,
+                &video_path,
+                vw,
+                vh,
+                ff_threads,
+            )?);
         }
         SessionKind::DiagnosticBundle => {
             let img = load_png_as_bgra(&opts.source_dir.join("01_game.png"))?;
@@ -1833,6 +1966,11 @@ pub fn run_replay_with_hook(
 
         tick_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
         observed.push(obs);
+        if let Some(used) = capturer.take_frame()
+            && let Some(ref dec) = video_decoder
+        {
+            dec.recycle_frame(used);
+        }
     }
 
     for ev in timeline.drain_remaining() {
@@ -1855,7 +1993,18 @@ pub fn run_replay_with_hook(
     };
     let regression = compute_regression(&records[..frames_processed], &observed, drift_thresh);
     let recording_fidelity = summarize_recording_fidelity(&records[..frames_processed]);
-    let accuracy = evaluate_session_accuracy(&opts.gt_file, &session_name, &observed)?;
+    let accuracy = match ctx {
+        Some(c) => evaluate_session_accuracy_with_gt(
+            &opts.gt_file,
+            &c.verified_gt,
+            &session_name,
+            &observed,
+        ),
+        None => {
+            let gt = VerifiedGtFile::load_or_default(&opts.gt_file)?;
+            evaluate_session_accuracy_with_gt(&opts.gt_file, &gt, &session_name, &observed)
+        }
+    };
     let truth = evaluate_truth_oracle(&observed, &accuracy, &truth_meta);
     let tc_stats = tile_cache.stats();
 
@@ -2264,8 +2413,14 @@ mod tests {
         assert_eq!(info["capture_paths_seen"], json!(["gdi"]));
 
         // Verify exact bit-lossless BGR decoding via VideoPipeDecoder
-        let mut dec =
-            VideoPipeDecoder::spawn(&ffmpeg_abs, &sess_dir.join("video.mkv"), w, h).unwrap();
+        let mut dec = VideoPipeDecoder::spawn(
+            &ffmpeg_abs,
+            &sess_dir.join("video.mkv"),
+            w,
+            h,
+            None,
+        )
+        .unwrap();
         for (idx, exp) in expected_px.iter().enumerate() {
             let f = dec.read_next_frame().unwrap().expect("decoded frame");
             assert_eq!(
@@ -2396,6 +2551,7 @@ mod tests {
             rec_sandbox.join("paimon.npz"),
             Arc::clone(&rec_capturer),
             false,
+            None,
         )
         .unwrap();
         let srec = SessionRecorder::new(
@@ -2840,6 +2996,7 @@ mod tests {
             rec_sandbox.join("paimon.npz"),
             Arc::clone(&rec_capturer),
             false,
+            None,
         )
         .unwrap();
         let rec_cb = AppServerCallbacks::new_offline_replay(Arc::clone(&rec_state));
@@ -3025,6 +3182,7 @@ mod tests {
             tmp.0.join("paimon.npz"),
             capturer,
             false,
+            None,
         )
         .unwrap();
 

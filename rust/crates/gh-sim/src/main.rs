@@ -150,7 +150,7 @@ enum Cmd {
         force: bool,
     },
 
-    /// Run sequential offline QA regression checks across all recorded sessions against blessed poses.
+    /// Run offline QA regression checks across all recorded sessions against blessed poses.
     Qa {
         /// Directory containing recorded QA sessions (default: scratch/qa_sessions).
         #[arg(long, default_value = "scratch/qa_sessions")]
@@ -187,6 +187,22 @@ enum Cmd {
         /// Record fresh blessed_poses.jsonl and update tests/qa_baseline.json (requires explicit user approval).
         #[arg(long)]
         bless: bool,
+
+        /// Number of parallel worker threads (`1` = serial path; omit = auto from CPU/RAM).
+        #[arg(long, short = 'j')]
+        jobs: Option<usize>,
+
+        /// Disable input-keyed QA result caching for this run.
+        #[arg(long)]
+        no_cache: bool,
+
+        /// Optional override directory for QA result cache files.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+
+        /// Optional directory to write `<session>.jsonl` ObservedFrame poses (bypasses cache read).
+        #[arg(long)]
+        dump_poses_dir: Option<PathBuf>,
 
         /// Optional CLI override for per-frame position drift threshold (world units).
         #[arg(long, allow_hyphen_values = true)]
@@ -441,6 +457,10 @@ fn main() {
             only,
             out,
             bless,
+            jobs,
+            no_cache,
+            cache_dir,
+            dump_poses_dir,
             pos_threshold_w,
             max_over_threshold,
             max_map_mismatches,
@@ -472,6 +492,10 @@ fn main() {
                     max_p95_pos_delta_w,
                     max_pos_delta_w,
                 },
+                jobs,
+                no_cache,
+                cache_dir,
+                dump_poses_dir,
             });
             match res {
                 Ok(report) => {

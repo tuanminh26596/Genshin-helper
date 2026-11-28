@@ -24,11 +24,68 @@ use std::time::Duration;
 
 pub const PRODUCTION_TILE_CACHE_CAPACITY: usize = 72;
 
+/// Preloaded read-only map datasets and global relocator index shared across replay workers.
+pub struct SharedTrackingAssets {
+    pub data_dir: PathBuf,
+    pub data_source: String,
+    pub locator_template: MapLocator,
+    pub state_machine_template: MapScreenStateMachine,
+    pub global_relocator: Arc<TeyvatGlobalRelocator>,
+    pub relocator_ready: bool,
+}
+
+impl SharedTrackingAssets {
+    pub fn load_for_data_dir(
+        data_dir: &Path,
+        global_index_path: Option<PathBuf>,
+        sync_relocator_warmup: bool,
+    ) -> Self {
+        let locator_template = MapLocator::with_paths(
+            LocatorPaths {
+                db_path: Some(data_dir.join("multimap_v4.json")),
+                terrain_npz_path: Some(data_dir.join("terrain_n2_v4.npz")),
+                cave_masks_npz_path: Some(data_dir.join("cave_masks_v4.npz")),
+                ui_anchors_npz_path: Some(data_dir.join("ui_anchors_v4.npz")),
+                legacy_underground_db_path: Some(data_dir.join("underground_db.json")),
+            },
+            None,
+        );
+        let anchors = data_dir.join("ui_anchors_v4.npz");
+        let state_machine_template = if anchors.is_file() {
+            MapScreenStateMachine::with_anchors_path(Some(&anchors))
+        } else {
+            MapScreenStateMachine::with_anchors_path(None)
+        };
+        let global_relocator = Arc::new(TeyvatGlobalRelocator::from_terrain_data_with_fallback(
+            locator_template.terrain_data(),
+            global_index_path,
+            !sync_relocator_warmup,
+            false,
+        ));
+        let relocator_ready = if sync_relocator_warmup {
+            global_relocator.ensure_ready()
+        } else {
+            global_relocator.warmup_async();
+            global_relocator.is_ready()
+        };
+        Self {
+            data_dir: data_dir.to_path_buf(),
+            data_source: "custom".to_owned(),
+            locator_template,
+            state_machine_template,
+            global_relocator,
+            relocator_ready,
+        }
+    }
+}
+
 pub struct TrackingStackOptions {
     /// Explicit dataset directory (`multimap_v4.json`, `terrain_n2_v4.npz`, `cave_masks_v4.npz`,
     /// optional `ui_anchors_v4.npz`). `None` uses `MapLocator::new` / `MapScreenStateMachine::new`
     /// default runtime resolution.
     pub explicit_data_dir: Option<PathBuf>,
+    /// Optional preloaded read-only datasets + global relocator shared across parallel replay sessions.
+    pub shared_assets: Option<Arc<SharedTrackingAssets>>,
     pub tiles_dir: PathBuf,
     pub ug_overlays_dir: PathBuf,
     pub paimon_cache_path: PathBuf,
@@ -46,6 +103,7 @@ impl TrackingStackOptions {
     pub fn for_live(paths: &AppPaths, offline_mode: bool, ocr: Option<Arc<dyn OcrProvider>>) -> Self {
         Self {
             explicit_data_dir: None,
+            shared_assets: None,
             tiles_dir: paths.tiles_dir.clone(),
             ug_overlays_dir: paths.ug_overlays_dir.clone(),
             paimon_cache_path: paths.paimon_cache_path(),
@@ -108,36 +166,67 @@ fn resolve_live_data_dir_and_source() -> (PathBuf, String) {
 }
 
 pub fn build_tracking_stack(opts: TrackingStackOptions) -> CoreResult<TrackingStack> {
-    let (data_dir, data_source) = match opts.explicit_data_dir {
-        Some(ref dir) => (dir.clone(), "custom".to_owned()),
-        None => resolve_live_data_dir_and_source(),
-    };
-    let (locator, state_machine, npz_path, use_default_npz) = match opts.explicit_data_dir {
-        Some(ref dir) => {
-            let loc = Arc::new(MapLocator::with_paths(
-                LocatorPaths {
-                    db_path: Some(dir.join("multimap_v4.json")),
-                    terrain_npz_path: Some(dir.join("terrain_n2_v4.npz")),
-                    cave_masks_npz_path: Some(dir.join("cave_masks_v4.npz")),
-                    ui_anchors_npz_path: Some(dir.join("ui_anchors_v4.npz")),
-                    legacy_underground_db_path: Some(dir.join("underground_db.json")),
-                },
-                opts.ocr,
-            ));
-            let anchors = dir.join("ui_anchors_v4.npz");
-            let sm = if anchors.is_file() {
-                MapScreenStateMachine::with_anchors_path(Some(&anchors))
-            } else {
-                MapScreenStateMachine::with_anchors_path(None)
-            };
-            (loc, sm, Some(dir.join("terrain_n2_v4.npz")), false)
-        }
-        None => (
-            Arc::new(MapLocator::new(opts.ocr)),
-            MapScreenStateMachine::new(),
+    let (
+        data_dir,
+        data_source,
+        locator,
+        state_machine,
+        npz_path,
+        use_default_npz,
+        preloaded_relocator,
+    ) = if let Some(ref shared) = opts.shared_assets {
+        let loc = Arc::new(shared.locator_template.clone_for_session(opts.ocr));
+        let sm = shared.state_machine_template.clone_templates_fresh();
+        (
+            shared.data_dir.clone(),
+            shared.data_source.clone(),
+            loc,
+            sm,
+            Some(shared.data_dir.join("terrain_n2_v4.npz")),
+            false,
+            Some((Arc::clone(&shared.global_relocator), shared.relocator_ready)),
+        )
+    } else {
+        let (data_dir, data_source) = match opts.explicit_data_dir {
+            Some(ref dir) => (dir.clone(), "custom".to_owned()),
+            None => resolve_live_data_dir_and_source(),
+        };
+        let (locator, state_machine, npz_path, use_default_npz) = match opts.explicit_data_dir {
+            Some(ref dir) => {
+                let loc = Arc::new(MapLocator::with_paths(
+                    LocatorPaths {
+                        db_path: Some(dir.join("multimap_v4.json")),
+                        terrain_npz_path: Some(dir.join("terrain_n2_v4.npz")),
+                        cave_masks_npz_path: Some(dir.join("cave_masks_v4.npz")),
+                        ui_anchors_npz_path: Some(dir.join("ui_anchors_v4.npz")),
+                        legacy_underground_db_path: Some(dir.join("underground_db.json")),
+                    },
+                    opts.ocr,
+                ));
+                let anchors = dir.join("ui_anchors_v4.npz");
+                let sm = if anchors.is_file() {
+                    MapScreenStateMachine::with_anchors_path(Some(&anchors))
+                } else {
+                    MapScreenStateMachine::with_anchors_path(None)
+                };
+                (loc, sm, Some(dir.join("terrain_n2_v4.npz")), false)
+            }
+            None => (
+                Arc::new(MapLocator::new(opts.ocr)),
+                MapScreenStateMachine::new(),
+                None,
+                true,
+            ),
+        };
+        (
+            data_dir,
+            data_source,
+            locator,
+            state_machine,
+            npz_path,
+            use_default_npz,
             None,
-            true,
-        ),
+        )
     };
 
     let maps_db = locator.multimap_db_arc();
@@ -187,17 +276,23 @@ pub fn build_tracking_stack(opts: TrackingStackOptions) -> CoreResult<TrackingSt
         })?,
     );
 
-    let global_relocator = Arc::new(TeyvatGlobalRelocator::from_terrain_data_with_fallback(
-        locator.terrain_data(),
-        opts.global_index_path,
-        !opts.sync_relocator_warmup,
-        use_default_npz,
-    ));
-    let relocator_ready = if opts.sync_relocator_warmup {
-        global_relocator.ensure_ready()
-    } else {
-        global_relocator.warmup_async();
-        global_relocator.is_ready()
+    let (global_relocator, relocator_ready) = match preloaded_relocator {
+        Some((reloc, ready)) => (reloc, ready),
+        None => {
+            let reloc = Arc::new(TeyvatGlobalRelocator::from_terrain_data_with_fallback(
+                locator.terrain_data(),
+                opts.global_index_path,
+                !opts.sync_relocator_warmup,
+                use_default_npz,
+            ));
+            let ready = if opts.sync_relocator_warmup {
+                reloc.ensure_ready()
+            } else {
+                reloc.warmup_async();
+                reloc.is_ready()
+            };
+            (reloc, ready)
+        }
     };
 
     let minimap_tracker = HybridMinimapTracker::new(

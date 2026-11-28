@@ -5,11 +5,14 @@
 //! then checks post-tick [`NavFrameSnapshot`] fields at target frames (with optional
 //! `within_frames` windows).
 
-use crate::replay::{ReplayOptions, ReplayScenarioHook, round3, run_replay_with_hook};
+use crate::replay::{
+    ReplayOptions, ReplayScenarioHook, ReplaySharedContext, round3, run_replay_with_context,
+};
 use crate::timeline::TimelineInputKind;
 use gh_app::REPLAY_DISPATCHABLE_HOTKEYS;
 use gh_app::session_recorder::{NavFrameSnapshot, RECORDED_WEB_CALLBACKS};
 use gh_app::state::UiFrameSnapshot;
+use gh_core::sha256::sha256_hex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -336,6 +339,8 @@ pub struct ScenarioFile {
     pub known_bug: Option<String>,
     pub inputs: Vec<ScenarioInput>,
     pub expect: Vec<ScenarioExpectation>,
+    #[serde(skip)]
+    pub file_sha256: Option<String>,
 }
 
 impl ScenarioFile {
@@ -667,6 +672,7 @@ pub fn parse_scenario_str(raw: &str, source_label: &str) -> Result<ScenarioFile,
         known_bug,
         inputs,
         expect,
+        file_sha256: None,
     })
 }
 
@@ -678,7 +684,9 @@ pub fn load_scenario_file(path: &Path) -> Result<ScenarioFile, String> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("scenario.json");
-    parse_scenario_str(&raw, label)
+    let mut sc = parse_scenario_str(&raw, label)?;
+    sc.file_sha256 = Some(sha256_hex(raw.as_bytes()));
+    Ok(sc)
 }
 
 /// Loads all `*.json` scenario files from `dir` sorted deterministically by filename.
@@ -860,6 +868,18 @@ pub fn run_scenario(
     gt_file: &Path,
     ffmpeg_path: Option<&Path>,
 ) -> Result<ScenarioResult, String> {
+    run_scenario_with_context(scenario, session_dir, data_dir, gt_file, ffmpeg_path, None)
+}
+
+/// Runs one scenario using an optional preloaded [`ReplaySharedContext`].
+pub fn run_scenario_with_context(
+    scenario: &ScenarioFile,
+    session_dir: &Path,
+    data_dir: &Path,
+    gt_file: &Path,
+    ffmpeg_path: Option<&Path>,
+    ctx: Option<&ReplaySharedContext>,
+) -> Result<ScenarioResult, String> {
     let t0 = Instant::now();
     let hook = ReplayScenarioHook {
         extra_inputs: scenario
@@ -885,7 +905,7 @@ pub fn run_scenario(
         render_out: None,
         out_report: None,
     };
-    let out = run_replay_with_hook(&opts, Some(&hook))?;
+    let out = run_replay_with_context(&opts, Some(&hook), ctx)?;
     let elapsed = t0.elapsed().as_secs_f64();
     Ok(evaluate_scenario(
         scenario,
@@ -1152,6 +1172,7 @@ mod tests {
                     ui: None,
                 },
             ],
+            file_sha256: None,
         };
         let res = evaluate_scenario(&sc, &navs, &uis, 13, 0.1);
         assert_eq!(res.outcome, ScenarioOutcome::Pass);
@@ -1191,6 +1212,7 @@ mod tests {
                 }),
                 ui: None,
             }],
+            file_sha256: None,
         };
 
         let r_pass = evaluate_scenario(&mk("ok", None, "demo:alpha"), &navs, &uis, 1, 0.01);
@@ -1369,6 +1391,7 @@ mod tests {
                     }),
                 },
             ],
+            file_sha256: None,
         };
         let res_ok = evaluate_scenario(&sc_ok, &navs, &uis, 6, 0.05);
         assert_eq!(res_ok.outcome, ScenarioOutcome::Pass);
@@ -1391,6 +1414,7 @@ mod tests {
                     ..Default::default()
                 }),
             }],
+            file_sha256: None,
         };
         let res_fail = evaluate_scenario(&sc_fail, &navs, &uis, 6, 0.05);
         assert_eq!(res_fail.outcome, ScenarioOutcome::Fail);

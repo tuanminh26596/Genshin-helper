@@ -171,6 +171,25 @@ impl MapScreenStateMachine {
         }
     }
 
+    /// Clones only the immutable UI anchor templates into a fresh `Closed` state machine.
+    pub fn clone_templates_fresh(&self) -> Self {
+        Self {
+            tpl_gear: self.tpl_gear.clone(),
+            tpl_close_x: self.tpl_close_x.clone(),
+            scaled_cache: HashMap::new(),
+            state: MapState::Closed,
+            prev_thumb: None,
+            prev_hud: None,
+            synced_thumb: None,
+            prev_hist64: None,
+            stable_frames: 0,
+            closed_frames: 0,
+            settling_frames: 0,
+            settling_drag_frames: 0,
+            retries: 0,
+        }
+    }
+
     pub fn reset(&mut self) {
         self.state = MapState::Closed;
         self.prev_thumb = None;

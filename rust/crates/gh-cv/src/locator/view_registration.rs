@@ -359,7 +359,7 @@ impl MapLocator {
             && target_map_id.is_none()
             && target_area_id.is_none()
         {
-            for &mid in &self.map_order {
+            for &mid in &self.shared.map_order {
                 if mid == 2 {
                     continue;
                 }

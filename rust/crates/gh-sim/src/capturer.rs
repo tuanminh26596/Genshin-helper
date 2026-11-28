@@ -106,6 +106,11 @@ impl ReplayCapturer {
         s.is_hdr = is_hdr;
     }
 
+    /// Returns the previously loaded frame buffer (if any) so callers can recycle allocations.
+    pub fn take_frame(&self) -> Option<FrameBuf> {
+        self.slot.lock().unwrap_or_else(|e| e.into_inner()).frame.take()
+    }
+
     pub fn stats(&self) -> CaptureCoverageStats {
         self.slot.lock().unwrap_or_else(|e| e.into_inner()).stats
     }
