@@ -199,14 +199,14 @@
             "tracking_frames": 229
         },
         "sess_20261127_210432": {
-            "blessed_poses_sha256": "ab65492d1a9ac477441ccaa62640dc172a5babdcc5404f3503b2a56f3d2269ea",
+            "blessed_poses_sha256": "ae29071eca56e24fc2ac5adaf76f6b55da87a6ecca832f1ae7b6901df8b64734",
             "codec": "libx264rgb",
             "color_safe": true,
             "frames": 709,
             "map_m_synced_count": 6,
-            "meta_ref_max_pos_delta_w": 2844.266,
-            "meta_ref_over_threshold": 34,
-            "meta_ref_p95_pos_delta_w": 443.467,
+            "meta_ref_max_pos_delta_w": 2844.066,
+            "meta_ref_over_threshold": 12,
+            "meta_ref_p95_pos_delta_w": 3.709,
             "mmap_view_acquired": 161,
             "mmap_view_drawer_open": 0,
             "mmap_view_frames": 196,
