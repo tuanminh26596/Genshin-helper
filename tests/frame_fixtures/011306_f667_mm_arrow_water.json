@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "name": "011306_f667_mm_arrow_water",
+  "description": "Real minimap crop over blue water where glow contaminates the broad cyan mask and flips the arrow.",
+  "notes": "Exported from sess_20261127_011306 frame i=667 (0-based n=666, 2560x1440 crop 291x291+79+20). True arrow nose is ~260.0 deg; baseline locked at 121.3 deg before snapping to 271.0 deg on f668.",
+  "image": "scratch/frame_fixtures/sess_20261127_011306_f667_mm.png",
+  "width": 291,
+  "height": 291,
+  "is_gamepad": false,
+  "known_bug": null,
+  "minimap_heading": {
+    "expected_body_deg": 260.0,
+    "body_tolerance_deg": 15.0,
+    "perturb_seeds": [101, 202]
+  }
+}
