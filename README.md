@@ -8,7 +8,7 @@
   <p>
     <a href="https://github.com/tuanminh26596/Genshin-helper/releases"><img src="https://img.shields.io/badge/release-v5.8.0-38bdf8?style=flat-square" alt="Release v5.8.0"></a>
     <a href="https://github.com/tuanminh26596/Genshin-helper/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/tuanminh26596/Genshin-helper/ci.yml?branch=main&label=CI&style=flat-square" alt="CI"></a>
-    <img src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0ea5e9?style=flat-square" alt="Windows 10/11 x64">
+    <img src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64%20%7C%20Linux%20(Wayland%2FX11)-0ea5e9?style=flat-square" alt="Windows 10/11 x64 | Linux (Wayland/X11)">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="MIT License"></a>
     <a href="https://discord.gg/DdA4qyvqH3"><img src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord Community"></a>
     <a href="https://ko-fi.com/minmories"><img src="https://img.shields.io/badge/Ko--fi-minmories-FF5E5B?style=flat-square&logo=kofi&logoColor=white" alt="Ko-fi"></a>
@@ -33,7 +33,7 @@
 
 ## Key Features (`v5.8.0`)
 
-**Genshin-Helper** is a local-only, **100% passive Computer Vision** companion for **Genshin Impact (Windows 10/11 x64)** — pure Rust (`0` external DLLs, `~2%` CPU, `0%` in Standby) that syncs your real-time position & 360° camera onto the official **HoYoLAB Interactive Map** without reading memory, injecting DLLs, or sending fake inputs.
+**Genshin-Helper** is a local-only, **100% passive Computer Vision** companion for **Genshin Impact (Windows 10/11 x64 & Linux Wayland/X11 via Proton)** — pure Rust (`0` external DLLs, `~2%` CPU, `0%` in Standby) that syncs your real-time position & 360° camera onto the official **HoYoLAB Interactive Map** without reading memory, injecting DLLs, or sending fake inputs.
 
 - **Floating Live Radar (60 fps, ``Alt + ` ``) & Mode A Route Sync:** Default OFF (`0%` CPU/RAM). Official HoYoLAB pin icons, 360° camera cone, live filter sync, colored route polylines, and next-teleport highlight.
 - **In-Game Map (`M`) Route Overlay & Capture-Ready HUDs:** Projects active HoYoLAB farming routes directly onto fullscreen Map (`M`), alongside the 360° click-through Mini-HUD and proximity Guide Card (`Alt + H`) with OBS / Screenshot / NVIDIA `Alt + F9` visibility toggle.
@@ -90,6 +90,18 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/register_dev_native_host.p
 
 Launch `GenshinHelper.exe` directly (auto-prompts UAC; pass `--no-elevate` or `GH_NO_ELEVATE=1` to skip; run `installer/build_release.ps1` with Inno Setup 6 to build `dist/installer/GenshinHelper-Setup-v5.8.0.exe`).
 
+**Linux (Wayland / X11 + Proton):**
+
+```bash
+cargo build --manifest-path rust/Cargo.toml --release -p gh-app -p gh-host
+./rust/target/release/GenshinHelper --sync-data
+# Optional: add user to 'input' group for global evdev hotkeys across native Wayland windows
+sudo usermod -aG input "$USER"
+./rust/target/release/GenshinHelper
+```
+
+Load `extension/` as an unpacked extension in Chrome/Chromium (`chrome://extensions`). For auto-wake via Native Messaging, point `~/.config/google-chrome/NativeMessagingHosts/com.genshinhelper.host.json` (or `chromium`) at `GenshinHelperHost` with allowed origin `chrome-extension://nfkijdoblmphmdljfogooajhbldkeojh/`.
+
 - **CLI Flags:** `--sync-data`, `--no-tray`, `--standby`, `--minimized`, `--record-minimap <SECONDS>`, `--port <PORT>`, `--lan-port <LAN_PORT>`, `--config <PATH>`, `--no-mutex`, `--no-elevate`.
 - **`hoyolab_sync` (`config.json`):** Auto-checks HoYoLAB `map_version` on startup (`"auto_check_on_startup": true`, `"auto_update_mode": "auto_download"` | `"notify_only"` | `"off"`).
 
@@ -130,9 +142,10 @@ Shift/Ctrl-free left-hand `Alt` combos — fully customizable in **Extension Pop
 | **Admin / UIPI** *(Windows Limit)* | Matching Admin | Setup creates `GenshinHelper_Elevated` Scheduled Task for UAC-free wakes (cleanly removed on uninstall). |
 | **Windows HDR / Auto-HDR** | Full support *(Auto WGC)* | Auto-detects HDR via DXGI (`IDXGIOutput6`), captures 16-bit float WGC with tonemapping, falls back to GDI `SRCCOPY` on SDR. |
 | **Aspect Ratios / DPI / Input / Rotation** | Full support | Supports `16:9`, `16:10`, `21:9`, `4:3`, `100%–200%` DPI, KB+M & Gamepad, Lock & Follow-View minimap. |
+| **Linux (Wayland / X11 + Proton)** | Experimental *(Source build)* | Hyprland/wlroots `zwlr_screencopy_manager_v1` + `zwlr_layer_shell_v1` overlays & X11 fallback; `evdev` hotkeys (`input` group) or X11/XWayland fallback; D-Bus tray. |
 
 - **NVIDIA Overlay Remap:** Opt-in only after explicit confirmation in Popup, with automatic backup and 1-click restore.
-- **Scope & License:** Windows 10/11 64-bit PC client only; released under the [MIT License](LICENSE) **AS IS**.
+- **Scope & License:** Windows 10/11 64-bit & Linux (Wayland/X11 + Proton); released under the [MIT License](LICENSE) **AS IS**.
 
 ```text
 +----------------------------------+          localhost:8765 (HTTP)         +---------------------------------+
