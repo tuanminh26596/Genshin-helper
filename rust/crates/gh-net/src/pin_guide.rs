@@ -863,7 +863,9 @@ impl PinGuideFetcher {
 
     pub fn fetch_sync(&self, pin_id: &str, map_id: i32, lang: Option<&str>) -> PinGuide {
         let lang_tag = self.active_lang_tag(lang).to_owned();
-        if self.inner.offline {
+        // Same rule as `request`: only bare HoYoLAB numeric ids reach the HoYoLAB API,
+        // so namespaced third-party ids (`appsample:`, `kongying:`) never leak there.
+        if self.inner.offline || !Self::is_fetchable_id(pin_id) {
             return PinGuide {
                 pin_id: pin_id.to_owned(),
                 description: String::new(),
@@ -3339,11 +3341,17 @@ mod tests {
                 !provider.request_guide(invalid_id, 2, Box::new(|_| {}), Some("en")),
                 "provider.request_guide({invalid_id:?}) must return false"
             );
+            let g = fetcher.fetch_sync(invalid_id, 2, Some("en"));
+            assert!(!g.ok, "fetcher.fetch_sync({invalid_id:?}) must not succeed");
+            assert_eq!(g.pin_id, invalid_id);
+            assert!(g.description.is_empty() && g.image_bytes.is_none());
+            let g = provider.fetch_guide(invalid_id, 2, Some("en"));
+            assert!(!g.ok, "provider.fetch_guide({invalid_id:?}) must not succeed");
         }
         assert_eq!(
             json_calls.load(AtomicOrdering::SeqCst),
             0,
-            "namespaced/non-numeric IDs must trigger 0 HoYoLAB network calls via request_guide"
+            "namespaced/non-numeric IDs must trigger 0 HoYoLAB network calls via request_guide, fetch_sync or fetch_guide"
         );
 
         // Pure-digit HoYoLAB IDs are fetchable and perform the HoYoLAB call when fetched.
