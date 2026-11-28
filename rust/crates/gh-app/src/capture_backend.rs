@@ -5,8 +5,8 @@
 //! `run_tick_worker` and `AppState` code paths.
 
 use gh_core::frame::FrameBuf;
-use gh_win32::capture::ScreenCapturer;
-use gh_win32::wgc_hdr::{MonitorHdrInfo, WgcWindowCaptureOutcome};
+use gh_platform::capture::ScreenCapturer;
+use gh_platform::wgc_hdr::{MonitorHdrInfo, WgcWindowCaptureOutcome};
 
 /// Capture interface consumed by `AppState`, `tracking_loop`, and `DiagnosticManager`.
 pub trait FrameCapturer: Send + Sync {

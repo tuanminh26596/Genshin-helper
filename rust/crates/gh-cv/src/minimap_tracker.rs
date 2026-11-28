@@ -964,8 +964,7 @@ impl MinimapGate {
 
         if full_std < self.min_std
             || inner_std < self.min_std
-            || inner_mean < 6.0
-            || inner_mean > 249.0
+            || !(6.0..=249.0).contains(&inner_mean)
         {
             self.reset_keyframe();
             return MinimapGateResult {
@@ -4744,7 +4743,7 @@ impl HybridMinimapTracker {
         }
         let mean = mean_f64_u8(&samples);
         let std = std_f64_u8(&samples);
-        if std < 8.0 || mean < 20.0 || mean > 240.0 {
+        if std < 8.0 || !(20.0..=240.0).contains(&mean) {
             return None;
         }
         let ts = self.resolve_timestamp(now);
@@ -5839,7 +5838,7 @@ fn is_strided_blank_or_flash_gray(gray: ArrayView2<'_, u8>) -> bool {
     }
     let std = std_f64_u8(&vals);
     let mean = mean_f64_u8(&vals);
-    std < 12.0 || mean < 22.0 || mean > 238.0
+    std < 12.0 || !(22.0..=238.0).contains(&mean)
 }
 
 fn is_strided_blank_or_flash_frame(view: FrameView<'_>) -> bool {
@@ -5861,7 +5860,7 @@ fn is_strided_blank_or_flash_frame(view: FrameView<'_>) -> bool {
     }
     let std = std_f64_u8(&vals);
     let mean = mean_f64_u8(&vals);
-    std < 12.0 || mean < 22.0 || mean > 238.0
+    std < 12.0 || !(22.0..=238.0).contains(&mean)
 }
 
 // ---------------------------------------------------------------------------

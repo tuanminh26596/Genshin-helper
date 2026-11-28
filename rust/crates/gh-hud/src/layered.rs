@@ -3,26 +3,40 @@
 
 use crate::{HudError, HudResult};
 use gh_core::frame::RectI32;
-use gh_win32::capture::{
+#[cfg(windows)]
+use gh_platform::capture::{
     WindowFinder, ensure_default_desktop, ensure_dpi_awareness, BITBLT_ROP_SRCCOPY,
 };
-use gh_win32::game_settings::refresh_exclude_from_capture;
+#[cfg(windows)]
+use gh_platform::game_settings::refresh_exclude_from_capture;
+#[cfg(windows)]
 use std::ffi::c_void;
+#[cfg(windows)]
 use std::mem::size_of;
+#[cfg(windows)]
 use std::ptr::null_mut;
+#[cfg(windows)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(windows)]
 use std::sync::{Arc, Condvar, Mutex};
+#[cfg(windows)]
 use std::thread::{self, JoinHandle};
+#[cfg(windows)]
 use std::time::Duration;
+#[cfg(windows)]
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+#[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
     CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush,
     GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     MonitorFromPoint, SelectObject,
 };
+#[cfg(windows)]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWL_EXSTYLE,
     GWLP_USERDATA, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect, HTBOTTOM,
@@ -38,26 +52,72 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WMSZ_TOPRIGHT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
+#[cfg(windows)]
 use windows::core::PCWSTR;
+
+#[cfg(target_os = "linux")]
+pub use crate::layered_linux::{
+    LayeredDibSurface, LayeredWindowCtx, LayeredWindowHost, query_monitor_bounds,
+    query_monitor_work_area,
+};
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+const HTCLIENT: u32 = 1;
+#[cfg(not(windows))]
+const HTCAPTION: u32 = 2;
+#[cfg(not(windows))]
+const HTLEFT: u32 = 10;
+#[cfg(not(windows))]
+const HTRIGHT: u32 = 11;
+#[cfg(not(windows))]
+const HTTOP: u32 = 12;
+#[cfg(not(windows))]
+const HTTOPLEFT: u32 = 13;
+#[cfg(not(windows))]
+const HTTOPRIGHT: u32 = 14;
+#[cfg(not(windows))]
+const HTBOTTOM: u32 = 15;
+#[cfg(not(windows))]
+const HTBOTTOMLEFT: u32 = 16;
+#[cfg(not(windows))]
+const HTBOTTOMRIGHT: u32 = 17;
+#[cfg(not(windows))]
+const WMSZ_LEFT: u32 = 1;
+#[cfg(not(windows))]
+const WMSZ_TOP: u32 = 3;
+#[cfg(not(windows))]
+const WMSZ_TOPLEFT: u32 = 4;
+#[cfg(not(windows))]
+const WMSZ_TOPRIGHT: u32 = 5;
+#[cfg(not(windows))]
+const WMSZ_BOTTOMLEFT: u32 = 7;
 
 pub use gh_core::{WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WM_APP_CAPTURE_AFFINITY};
 
 pub const WDA_REFRESH_INTERVAL_MS: u64 = 2000;
 pub const WDA_REFRESH_MS: u32 = 2000;
 pub const CAPTURE_AFFINITY_MSG: u32 = gh_core::WM_APP_CAPTURE_AFFINITY;
+#[cfg(windows)]
 pub const CAPTURE_ROP_GUARD: u32 = BITBLT_ROP_SRCCOPY;
+#[cfg(not(windows))]
+pub const CAPTURE_ROP_GUARD: u32 = 0x00CC_0020;
 
+#[cfg(windows)]
 pub const EX_STYLE_CLICK_THROUGH: u32 = WS_EX_LAYERED.0
     | WS_EX_TRANSPARENT.0
     | WS_EX_TOPMOST.0
     | WS_EX_NOACTIVATE.0
     | WS_EX_TOOLWINDOW.0;
+#[cfg(windows)]
 pub const EX_STYLE_INTERACTIVE: u32 = EX_STYLE_CLICK_THROUGH & !WS_EX_TRANSPARENT.0;
 
 pub const TIMER_ID_WDA_REFRESH: usize = 102;
+#[cfg(windows)]
 const WM_APP_HOST_CLOSE: u32 = WM_APP + 0x7F; // 0x807F, reserved away from 0x8001..=0x8015
 pub const OFFSCREEN_TEST_OFFSET: (i32, i32) = (-20_000, -20_000);
 
+#[cfg(windows)]
 static INSTANCE_SEQ: AtomicUsize = AtomicUsize::new(1);
 
 fn env_flag_truthy(val: Option<&str>) -> bool {
@@ -154,6 +214,7 @@ pub fn premultiplied_rgba_to_bgra(pm_rgba: &[u8]) -> HudResult<Vec<u8>> {
 }
 
 /// Queries the Win32 monitor work area `(left, top, right, bottom)` containing `(point_x, point_y)`.
+#[cfg(windows)]
 pub fn query_monitor_work_area(point_x: i32, point_y: i32) -> (i32, i32, i32, i32) {
     // SAFETY: `MonitorFromPoint` and `GetMonitorInfoW` operate on stack structs with `cbSize` set.
     unsafe {
@@ -179,6 +240,7 @@ pub fn query_monitor_work_area(point_x: i32, point_y: i32) -> (i32, i32, i32, i3
 
 /// Queries the full Win32 monitor bounds (`rcMonitor`, including the taskbar strip covered by
 /// Borderless Fullscreen games) containing `(point_x, point_y)`.
+#[cfg(windows)]
 pub fn query_monitor_bounds(point_x: i32, point_y: i32) -> (i32, i32, i32, i32) {
     // SAFETY: `MonitorFromPoint` and `GetMonitorInfoW` operate on stack structs with `cbSize` set.
     unsafe {
@@ -203,6 +265,7 @@ pub fn query_monitor_bounds(point_x: i32, point_y: i32) -> (i32, i32, i32, i32) 
 }
 
 /// UI-thread-owned top-down 32bpp `CreateDIBSection` surface for `UpdateLayeredWindow`.
+#[cfg(windows)]
 pub struct LayeredDibSurface {
     memdc: HDC,
     hbmp: HBITMAP,
@@ -213,6 +276,7 @@ pub struct LayeredDibSurface {
     realloc_count: usize,
 }
 
+#[cfg(windows)]
 impl LayeredDibSurface {
     pub const fn new() -> Self {
         Self {
@@ -476,12 +540,14 @@ impl LayeredDibSurface {
     }
 }
 
+#[cfg(windows)]
 impl Default for LayeredDibSurface {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(windows)]
 impl Drop for LayeredDibSurface {
     fn drop(&mut self) {
         self.release();
@@ -702,6 +768,7 @@ pub trait LayeredHandler: Send + 'static {
     fn on_destroy(&mut self, _ctx: &mut LayeredWindowCtx<'_>) {}
 }
 
+#[cfg(windows)]
 struct HostMutable {
     hwnd: isize,
     closed: bool,
@@ -714,6 +781,7 @@ struct HostMutable {
     state_seq: u64,
 }
 
+#[cfg(windows)]
 struct HostShared {
     state: Mutex<HostMutable>,
     ready_cv: Condvar,
@@ -725,6 +793,7 @@ struct HostShared {
 }
 
 /// Safe UI-thread context passed to `LayeredHandler` callbacks inside `wndproc`.
+#[cfg(windows)]
 pub struct LayeredWindowCtx<'a> {
     hwnd: HWND,
     shared: &'a Arc<HostShared>,
@@ -735,6 +804,7 @@ pub struct LayeredWindowCtx<'a> {
     click_through: &'a mut bool,
 }
 
+#[cfg(windows)]
 impl<'a> LayeredWindowCtx<'a> {
     pub const fn hwnd(&self) -> HWND {
         self.hwnd
@@ -946,6 +1016,7 @@ impl<'a> LayeredWindowCtx<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(windows)]
 struct DirectDragState {
     hit: u32,
     start_cursor: (i32, i32),
@@ -954,6 +1025,7 @@ struct DirectDragState {
     work_area: (i32, i32, i32, i32),
 }
 
+#[cfg(windows)]
 struct WindowInner {
     shared: Arc<HostShared>,
     surface: LayeredDibSurface,
@@ -966,6 +1038,7 @@ struct WindowInner {
     destroyed: bool,
 }
 
+#[cfg(windows)]
 impl WindowInner {
     fn ctx(&mut self, hwnd: HWND) -> LayeredWindowCtx<'_> {
         LayeredWindowCtx {
@@ -994,15 +1067,18 @@ impl WindowInner {
     }
 }
 
+#[cfg(windows)]
 struct WindowState<H: LayeredHandler> {
     inner: WindowInner,
     handler: H,
 }
 
+#[cfg(windows)]
 struct CreateParams<H: LayeredHandler> {
     state: Option<Box<WindowState<H>>>,
 }
 
+#[cfg(windows)]
 unsafe extern "system" fn layered_wnd_proc<H: LayeredHandler>(
     hwnd: HWND,
     msg: u32,
@@ -1381,11 +1457,13 @@ unsafe extern "system" fn layered_wnd_proc<H: LayeredHandler>(
 }
 
 /// Thread-safe Win32 layered window host with lazy UI-thread startup and clean shutdown.
+#[cfg(windows)]
 pub struct LayeredWindowHost {
     shared: Arc<HostShared>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
+#[cfg(windows)]
 impl LayeredWindowHost {
     /// Creates a new `LayeredWindowHost` WITHOUT spawning any OS thread or HWND yet.
     pub fn new(config: LayeredWindowConfig) -> Self {
@@ -1808,6 +1886,7 @@ impl LayeredWindowHost {
     }
 }
 
+#[cfg(windows)]
 impl Drop for LayeredWindowHost {
     fn drop(&mut self) {
         self.close();
@@ -1822,7 +1901,7 @@ const _: () = {
     assert!(CAPTURE_ROP_GUARD == 0x00CC_0020);
 };
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn assert_hwnd_offscreen_from_virtual_desktop(hwnd: isize) {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -1861,7 +1940,7 @@ pub(crate) fn assert_hwnd_offscreen_from_virtual_desktop(hwnd: isize) {
     );
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
     use gh_win32::game_settings::get_window_display_affinity;

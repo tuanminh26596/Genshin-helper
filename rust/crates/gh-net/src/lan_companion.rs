@@ -252,6 +252,7 @@ fn qr_penalty(grid: &[Vec<bool>]) -> i32 {
         }
     }
 
+    #[allow(clippy::needless_range_loop)]
     for c in 0..n {
         let mut run_len = 1i32;
         for r in 1..n {
@@ -296,7 +297,8 @@ fn qr_penalty(grid: &[Vec<bool>]) -> i32 {
             }
         }
         let mut col = Vec::with_capacity(n);
-        for c in 0..n {
+        #[allow(clippy::needless_range_loop)]
+    for c in 0..n {
             col.clear();
             col.extend(grid.iter().map(|row| row[c]));
             for r in 0..=(n - 11) {
@@ -519,7 +521,8 @@ pub fn generate_qr_matrix(data: &str) -> CoreResult<Vec<Vec<bool>>> {
     for mask_id in 0..8usize {
         let mut cand = base.clone();
         for r in 0..n {
-            for c in 0..n {
+            #[allow(clippy::needless_range_loop)]
+    for c in 0..n {
                 if !is_func[r][c] && mask_bit(mask_id, r, c) {
                     cand[r][c] = !cand[r][c];
                 }
@@ -2546,6 +2549,7 @@ mod tests {
             assert_eq!(mat.len(), expected_dim, "{label} row count");
             assert!(mat.iter().all(|r| r.len() == expected_dim), "{label} col count");
             // Top-left 7x7 finder outer ring dark
+            #[allow(clippy::needless_range_loop)]
             for i in 0..7 {
                 assert!(mat[0][i], "{label} finder top");
                 assert!(mat[6][i], "{label} finder bottom");

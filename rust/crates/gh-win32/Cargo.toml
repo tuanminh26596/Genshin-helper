@@ -10,7 +10,7 @@ gh-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-[dependencies.windows]
+[target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [
     # Core Win32 types, handles, errors

@@ -8,7 +8,7 @@
   <p>
     <a href="https://github.com/tuanminh26596/Genshin-helper/releases"><img src="https://img.shields.io/badge/release-v5.8.0-38bdf8?style=flat-square" alt="Phiên bản v5.8.0"></a>
     <a href="https://github.com/tuanminh26596/Genshin-helper/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/tuanminh26596/Genshin-helper/ci.yml?branch=main&label=CI&style=flat-square" alt="CI"></a>
-    <img src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0ea5e9?style=flat-square" alt="Windows 10/11 x64">
+    <img src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64%20%7C%20Linux%20(Wayland%2FX11)-0ea5e9?style=flat-square" alt="Windows 10/11 x64 | Linux (Wayland/X11)">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="Giấy phép MIT"></a>
     <a href="https://discord.gg/DdA4qyvqH3"><img src="https://img.shields.io/badge/Discord-C%E1%BB%99ng%20%C4%91%E1%BB%93ng-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Cộng đồng Discord"></a>
     <a href="https://ko-fi.com/minmories"><img src="https://img.shields.io/badge/Ko--fi-minmories-FF5E5B?style=flat-square&logo=kofi&logoColor=white" alt="Ko-fi"></a>
@@ -33,7 +33,7 @@
 
 ## Tính năng nổi bật (`v5.8.0`)
 
-**Genshin-Helper** là công cụ đồng bộ bản đồ chạy cục bộ hoàn toàn bằng **Thị giác Máy tính (Computer Vision) thụ động 100%** cho **Genshin Impact (Windows 10/11 64-bit)** — viết thuần Rust (`0` DLL ngoài, `~2%` CPU, `0%` khi Standby), không đọc RAM, không inject DLL và không gửi phím giả vào game.
+**Genshin-Helper** là công cụ đồng bộ bản đồ chạy cục bộ hoàn toàn bằng **Thị giác Máy tính (Computer Vision) thụ động 100%** cho **Genshin Impact (Windows 10/11 64-bit & Linux Wayland/X11 qua Proton)** — viết thuần Rust (`0` DLL ngoài, `~2%` CPU, `0%` khi Standby), không đọc RAM, không inject DLL và không gửi phím giả vào game.
 
 - **Bản đồ nổi Live Radar 60 fps (``Alt + ` ``) & Đồng bộ Tuyến (Mode A):** Mặc định TẮT (`0%` CPU/RAM). Icon ghim chính chủ HoYoLAB, nón camera 360°, đồng bộ bộ lọc ghim, vẽ đường nối theo chặng và làm sáng điểm dịch chuyển cần tới.
 - **Phủ Tuyến đường lên Map (`M`) & HUD quay được OBS:** Vẽ trực tiếp tuyến đường HoYoLAB lên bản đồ toàn màn hình (`M`), đi kèm Mini-HUD 360° xuyên chuột và Thẻ Hướng Dẫn (`Alt + H`) có công tắc hiển thị khi chụp ảnh / quay OBS / NVIDIA `Alt + F9`.
@@ -90,6 +90,18 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/register_dev_native_host.p
 
 Chạy thẳng `GenshinHelper.exe` (tự xin quyền Admin; truyền `--no-elevate` hoặc `GH_NO_ELEVATE=1` nếu không muốn; dùng `installer/build_release.ps1` cùng Inno Setup 6 để đóng gói `dist/installer/GenshinHelper-Setup-v5.8.0.exe`).
 
+**Linux (Wayland / X11 + Proton):**
+
+```bash
+cargo build --manifest-path rust/Cargo.toml --release -p gh-app -p gh-host
+./rust/target/release/GenshinHelper --sync-data
+# (Tùy chọn) Thêm user vào nhóm 'input' để phím tắt evdev hoạt động trên mọi cửa sổ Wayland
+sudo usermod -aG input "$USER"
+./rust/target/release/GenshinHelper
+```
+
+Nạp thư mục `extension/` vào Chrome/Chromium (`chrome://extensions`). Để tự đánh thức qua Native Messaging, trỏ `~/.config/google-chrome/NativeMessagingHosts/com.genshinhelper.host.json` (hoặc `chromium`) tới `GenshinHelperHost` với origin `chrome-extension://nfkijdoblmphmdljfogooajhbldkeojh/`.
+
 - **Cờ CLI:** `--sync-data`, `--no-tray`, `--standby`, `--minimized`, `--record-minimap <GIÂY>`, `--port <PORT>`, `--lan-port <LAN_PORT>`, `--config <PATH>`, `--no-mutex`, `--no-elevate`.
 - **`hoyolab_sync` (`config.json`):** Tự kiểm tra `map_version` khi khởi động (`"auto_check_on_startup": true`, `"auto_update_mode": "auto_download"` | `"notify_only"` | `"off"`).
 
@@ -130,9 +142,10 @@ Tổ hợp `Alt` tay trái không dùng `Shift/Ctrl` — tùy chỉnh trực ti�
 | **Quyền Admin / UIPI** *(Giới hạn Windows)* | Cần quyền Admin | Bộ cài tạo tác vụ `GenshinHelper_Elevated` bật không hiện lại UAC (tự dọn sạch khi gỡ cài đặt). |
 | **Windows HDR / Auto-HDR** | Hỗ trợ đầy đủ *(Tự động WGC)* | Tự nhận diện HDR qua DXGI (`IDXGIOutput6`), chụp WGC 16-bit float kèm tone-map, tự lùi về GDI `SRCCOPY` trên SDR. |
 | **Tỷ lệ màn / DPI / Tay cầm / Xoay Minimap** | Hỗ trợ đầy đủ | Hỗ trợ `16:9`, `16:10`, `21:9`, `4:3`, DPI `100%–200%`, Phím/Chuột & Tay cầm, khóa hướng Bắc & xoay theo góc nhìn. |
+| **Linux (Wayland / X11 + Proton)** | Thử nghiệm *(Build nguồn)* | Hỗ trợ Hyprland/wlroots `zwlr_screencopy_manager_v1` + `zwlr_layer_shell_v1` & X11 fallback; phím tắt `evdev` (nhóm `input`) hoặc X11/XWayland; khay hệ thống D-Bus. |
 
 - **Đổi phím NVIDIA Overlay:** Chỉ thay đổi khi bạn bấm xác nhận trong Popup, luôn sao lưu tự động để hoàn tác 1 chạm.
-- **Phạm vi & Giấy phép:** Chỉ hỗ trợ Genshin Impact PC trên Windows 10/11 64-bit; phát hành theo [Giấy phép MIT](LICENSE) nguyên trạng (**AS IS**).
+- **Phạm vi & Giấy phép:** Hỗ trợ Windows 10/11 64-bit & Linux (Wayland/X11 + Proton); phát hành theo [Giấy phép MIT](LICENSE) nguyên trạng (**AS IS**).
 
 ```text
 +----------------------------------+          localhost:8765 (HTTP)         +---------------------------------+

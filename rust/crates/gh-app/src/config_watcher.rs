@@ -5,7 +5,7 @@ use gh_core::config::AppConfig;
 use gh_core::i18n::set_language;
 use gh_net::pin_guide::HoYoLABLabelCatalog;
 use gh_net::sync_server::HOTKEY_ACTIONS;
-use gh_win32::locale::Win32LocaleProvider;
+use gh_platform::locale::Win32LocaleProvider;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};

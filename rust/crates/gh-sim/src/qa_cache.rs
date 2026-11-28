@@ -18,7 +18,7 @@ use gh_app::session_recorder::WEB_INPUTS_FILENAME;
 use gh_core::atomic_io::write_json_atomic;
 use gh_core::provenance::DATASET_FILENAMES;
 use gh_core::sha256::{sha256_file, sha256_hex};
-use gh_win32::win_ocr::WindowsOcrService;
+use gh_platform::win_ocr::WindowsOcrService;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;

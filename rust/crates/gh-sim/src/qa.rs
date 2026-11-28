@@ -2388,7 +2388,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                     let cpus = std::thread::available_parallelism()
                         .map(std::num::NonZeroUsize::get)
                         .unwrap_or(1);
-                    let (total_mb, avail_mb) = gh_win32::sys_info::query_system_memory_mb()
+                    let (total_mb, avail_mb) = gh_platform::sys_info::query_system_memory_mb()
                         .map(|(t, a)| (Some(t), Some(a)))
                         .unwrap_or((None, None));
                     compute_auto_jobs(cpus, avail_mb, total_mb, work_items.len())

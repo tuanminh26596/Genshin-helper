@@ -6,7 +6,12 @@ use cosmic_text::{
     Align, Attrs, Buffer, Color, Ellipsize, Family, FontSystem, Metrics, Shaping, Style,
     SwashCache, SwashContent, Weight, Wrap, fontdb,
 };
-use gh_win32::locale::detect_windows_locale_name;
+#[cfg(windows)]
+use gh_platform::locale::detect_windows_locale_name;
+#[cfg(target_os = "linux")]
+fn detect_windows_locale_name() -> Option<String> {
+    gh_platform::locale::detect_linux_locale()
+}
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -199,19 +204,25 @@ impl HudFonts {
             }
         }
 
-        let sans_serif_family = if loaded_families.contains("Segoe UI") {
-            "Segoe UI".to_owned()
-        } else if loaded_families.contains("Arial") {
-            "Arial".to_owned()
-        } else if loaded_families.contains("Tahoma") {
-            "Tahoma".to_owned()
-        } else {
-            loaded_families
-                .iter()
-                .next()
-                .cloned()
-                .unwrap_or_else(|| "Segoe UI".to_owned())
-        };
+        let preferred_families = [
+            "Segoe UI",
+            "Arial",
+            "Tahoma",
+            "Open Sans",
+            "Adwaita Sans",
+            "Noto Sans",
+            "Inter",
+            "Ubuntu",
+            "Cantarell",
+            "DejaVu Sans",
+            "Liberation Sans",
+        ];
+        let sans_serif_family = preferred_families
+            .iter()
+            .find(|&&f| loaded_families.contains(f))
+            .map(|&f| f.to_owned())
+            .or_else(|| loaded_families.iter().min().cloned())
+            .unwrap_or_else(|| "Segoe UI".to_owned());
         db.set_sans_serif_family(&sans_serif_family);
 
         let locale = detect_windows_locale_name().unwrap_or_else(|| "en-US".to_owned());
@@ -839,6 +850,7 @@ mod tests {
         (count, bounds)
     }
 
+    #[cfg(windows)]
     #[test]
     fn targeted_windows_font_load_avoids_system_scan() {
         let fonts = HudFonts::new();

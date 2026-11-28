@@ -19,7 +19,10 @@ use gh_core::frame::RectI32;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tiny_skia::{Color, FillRule, IntSize, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::WM_APP;
+#[cfg(not(windows))]
+const WM_APP: u32 = 0x8000;
 
 pub const WM_APP_MMAP_UPDATE: u32 = WM_APP + 31;
 pub const WM_APP_MMAP_HIDE: u32 = WM_APP + 32;
@@ -245,7 +248,8 @@ pub fn layout_scene(fonts: &mut HudFonts, sc: &MMapGuideScene) -> Option<SceneLa
             let (w, h) = card_size(fonts, &[(&a.label, st_sub)], pad * 0.8, max_card_w);
             // Label sits on the screen-centre side of the arrow.
             let back = a.angle_rad + std::f32::consts::PI;
-            let (lx, ly) = (a.x + back.cos() * 70.0 * s, a.y + back.sin() * 52.0 * s);
+            let dist_x = (70.0 * s).max(w * 0.5 + 16.0 * s);
+            let (lx, ly) = (a.x + back.cos() * dist_x, a.y + back.sin() * 52.0 * s);
             let left = (lx - w * 0.5).clamp(8.0 * s, (gw - w - 8.0 * s).max(8.0 * s));
             let top = (ly - h * 0.5).clamp(8.0 * s, (gh - h - 8.0 * s).max(8.0 * s));
             let b = [left, top, left + w, top + h];
@@ -988,6 +992,7 @@ mod tests {
         assert_eq!(bytes4, fresh4.data(), "resized larger render must match fresh");
     }
 
+    #[cfg(windows)]
     #[test]
     fn mmap_overlay_capture_visible_toggles_wda_affinity_cleanly() {
         use crate::layered::{WDA_EXCLUDEFROMCAPTURE, WDA_NONE};

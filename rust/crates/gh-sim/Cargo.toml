@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 gh-core.workspace = true
-gh-win32.workspace = true
+gh-platform.workspace = true
 gh-net.workspace = true
 gh-cv.workspace = true
 gh-hud.workspace = true

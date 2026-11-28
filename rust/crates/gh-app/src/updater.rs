@@ -37,8 +37,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
+#[cfg(windows)]
 use windows::Win32::UI::Shell::ShellExecuteW;
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+#[cfg(windows)]
 use windows::core::{PCWSTR, w};
 
 /// Maximum automatic install retries per target version before requiring manual action.
@@ -582,61 +585,80 @@ fn spawn_verified_installer_exe(
     }
 
     let args = build_inno_update_args(lang, trigger);
-    let path_str = verified.path.to_string_lossy();
-    let exe_w: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
-    let args_w: Vec<u16> = args.encode_utf16().chain(std::iter::once(0)).collect();
-    let dir_w: Option<Vec<u16>> = verified.path.parent().map(|p| {
-        p.to_string_lossy()
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect()
-    });
-    let verb = if gh_win32::game_settings::is_process_elevated() {
-        w!("open")
-    } else {
-        w!("runas")
-    };
+    #[cfg(windows)]
+    {
+        let path_str = verified.path.to_string_lossy();
+        let exe_w: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let args_w: Vec<u16> = args.encode_utf16().chain(std::iter::once(0)).collect();
+        let dir_w: Option<Vec<u16>> = verified.path.parent().map(|p| {
+            p.to_string_lossy()
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect()
+        });
+        let verb = if gh_platform::game_settings::is_process_elevated() {
+            w!("open")
+        } else {
+            w!("runas")
+        };
 
-    // SAFETY: All wide strings are NUL-terminated for the duration of `ShellExecuteW`.
-    let res = unsafe {
-        ShellExecuteW(
-            None,
-            verb,
-            PCWSTR(exe_w.as_ptr()),
-            PCWSTR(args_w.as_ptr()),
-            dir_w.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
-            SW_SHOWNORMAL,
-        )
-    };
-    if (res.0 as isize) <= 32 {
-        return Err(format!(
-            "Windows declined or failed to start installer (ShellExecute code {})",
-            res.0 as isize
-        ));
+        // SAFETY: All wide strings are NUL-terminated for the duration of `ShellExecuteW`.
+        let res = unsafe {
+            ShellExecuteW(
+                None,
+                verb,
+                PCWSTR(exe_w.as_ptr()),
+                PCWSTR(args_w.as_ptr()),
+                dir_w.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
+                SW_SHOWNORMAL,
+            )
+        };
+        if (res.0 as isize) <= 32 {
+            return Err(format!(
+                "Windows declined or failed to start installer (ShellExecute code {})",
+                res.0 as isize
+            ));
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        let _ = args;
+        Err("In-app Windows Inno Setup installer is not supported on Linux".to_owned())
+    }
 }
 
 fn open_https_url_in_browser(url: &str) -> Result<(), String> {
     if !url.starts_with("https://github.com/") {
         return Err(format!("refused to open non-GitHub URL: {url}"));
     }
-    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: `wide` is NUL-terminated for the duration of `ShellExecuteW`.
-    let res = unsafe {
-        ShellExecuteW(
-            None,
-            w!("open"),
-            PCWSTR(wide.as_ptr()),
-            None,
-            None,
-            SW_SHOWNORMAL,
-        )
-    };
-    if (res.0 as isize) <= 32 {
-        return Err(format!("failed to open browser URL (code {})", res.0 as isize));
+    #[cfg(windows)]
+    {
+        let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: `wide` is NUL-terminated for the duration of `ShellExecuteW`.
+        let res = unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                PCWSTR(wide.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        if (res.0 as isize) <= 32 {
+            return Err(format!("failed to open browser URL (code {})", res.0 as isize));
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("failed to open browser URL: {e}"))
+    }
 }
 
 impl AppState {
@@ -688,7 +710,7 @@ impl AppState {
         let allow_exit_install = should_allow_install_on_exit(
             no_tray,
             self.paths.mode,
-            gh_win32::game_settings::is_process_elevated(),
+            gh_platform::game_settings::is_process_elevated(),
         );
         self.updater.set_allow_install_on_exit(allow_exit_install);
 
@@ -1261,7 +1283,7 @@ impl AppState {
     pub fn apply_pending_update_on_exit(&self, dry_run: bool) -> bool {
         if !dry_run
             && (!self.updater.allows_install_on_exit()
-                || !gh_win32::game_settings::is_process_elevated())
+                || !gh_platform::game_settings::is_process_elevated())
         {
             return false;
         }

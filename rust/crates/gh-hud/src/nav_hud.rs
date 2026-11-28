@@ -13,7 +13,7 @@ use gh_core::frame::RectI32;
 use gh_core::i18n::{get_language, t_lang};
 use gh_core::nav_controller::{NavGuidance, NavState};
 use gh_core::ui_layout::compute_ui_layout;
-use gh_win32::capture::WindowFinder;
+use gh_platform::capture::WindowFinder;
 use image::codecs::gif::GifDecoder;
 use image::codecs::webp::WebPDecoder;
 use image::imageops::FilterType;
@@ -28,8 +28,12 @@ use tiny_skia::{
     FillRule, FilterQuality, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap,
     PixmapMut, PixmapPaint, PremultipliedColorU8, Stroke, Transform,
 };
+#[cfg(windows)]
 use windows::Win32::Foundation::POINT;
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, GetCursorPos, WM_APP};
+#[cfg(not(windows))]
+const WM_APP: u32 = 0x8000;
 
 // ---------------------------------------------------------------------------
 // Public Constants
@@ -4061,10 +4065,18 @@ impl NavHandler {
         let Some(rect) = self.last_hud_screen_rect else {
             return false;
         };
-        let mut pt = POINT::default();
-        // SAFETY: `GetCursorPos` writes cursor screen coordinates into a valid stack `POINT`.
-        let ok = unsafe { GetCursorPos(&mut pt).is_ok() };
-        ok && point_in_rect(pt.x, pt.y, rect)
+        #[cfg(windows)]
+        {
+            let mut pt = POINT::default();
+            // SAFETY: `GetCursorPos` writes cursor screen coordinates into a valid stack `POINT`.
+            let ok = unsafe { GetCursorPos(&mut pt).is_ok() };
+            ok && point_in_rect(pt.x, pt.y, rect)
+        }
+        #[cfg(not(windows))]
+        {
+            gh_platform::capture::get_cursor_pos()
+                .is_some_and(|(x, y)| point_in_rect(x, y, rect))
+        }
     }
 
     fn update_hover_fade(
@@ -4521,10 +4533,13 @@ impl LayeredHandler for NavHandler {
                     self.render_timer_active = false;
                 }
                 self.stop_guide_anim(ctx);
+                #[cfg(windows)]
                 // SAFETY: Valid HWND on owning UI thread.
                 unsafe {
                     let _ = DestroyWindow(ctx.hwnd());
                 }
+                #[cfg(not(windows))]
+                ctx.request_close();
                 Some(0)
             }
             _ => None,
@@ -4888,6 +4903,7 @@ impl NavMiniHud {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     fn hide_ack_seq(&self) -> u64 {
         self.shared
             .lock()
@@ -5304,19 +5320,25 @@ fn _unix_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layered::{
-        EX_STYLE_CLICK_THROUGH, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, premultiplied_rgba_to_bgra,
-    };
+    #[cfg(windows)]
+    use crate::layered::{EX_STYLE_CLICK_THROUGH, WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
+    use crate::layered::premultiplied_rgba_to_bgra;
     use gh_core::nav_controller::{NavPin, NavRouteMode, NavigationController};
+    #[cfg(windows)]
     use gh_win32::game_settings::get_window_display_affinity;
     use image::codecs::gif::{GifEncoder, Repeat};
     use image::{Frame, ImageEncoder, codecs::png::PngEncoder};
+    #[cfg(windows)]
     use std::ffi::c_void;
+    #[cfg(windows)]
     use std::time::Duration;
+    #[cfg(windows)]
     use windows::Win32::Foundation::HWND;
+    #[cfg(windows)]
     use windows::Win32::System::Threading::{
         GR_GDIOBJECTS, GR_USEROBJECTS, GetCurrentProcess, GetGuiResources,
     };
+    #[cfg(windows)]
     use windows::Win32::UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GetWindowLongPtrW, WS_EX_TRANSPARENT,
     };
@@ -6536,6 +6558,7 @@ mod tests {
         assert!((drag_pos[0] - 0.5).abs() < 1e-6 && (drag_pos[1] - 0.25).abs() < 1e-6);
     }
 
+    #[cfg(windows)]
     fn gui_counts() -> (u32, u32) {
         // SAFETY: Process pseudo-handle query for GDI/USER object leak assertions.
         unsafe {
@@ -6547,6 +6570,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     fn wait_until<F: Fn() -> bool>(timeout: Duration, pred: F, msg: &str) {
         let deadline = Instant::now() + timeout;
         while !pred() {
@@ -6555,6 +6579,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     fn wait_render<F: FnMut() -> bool>(hud: &NavMiniHud, pred: F, msg: &str) {
         assert!(
             hud.wait_until_render(Duration::from_secs(15), pred),
@@ -6562,6 +6587,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn nav_mini_hud_offscreen_wda_dib_reuse_guide_zoom_and_zero_leaks() {
         let hud = NavMiniHud::new(NavHudConfig {
@@ -7206,6 +7232,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn guide_text_names_the_pin_source_for_third_party_pins() {
         assert_eq!(guide_source_name("107596"), "HoYoLAB");
@@ -7307,6 +7334,7 @@ mod tests {
         assert_ne!(second, third, "the hint follows the shown suggestion");
     }
 
+    #[cfg(windows)]
     #[test]
     fn nav_mini_hud_offscreen_advances_animated_gif_frames_without_dib_realloc() {
         let hud = NavMiniHud::new(NavHudConfig {

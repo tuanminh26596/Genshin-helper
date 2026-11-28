@@ -2,7 +2,9 @@
 //! Console subsystem is REQUIRED for 4-byte little-endian stdio framing (`src/native_host.py`).
 
 use gh_core::protocol::{MAX_NATIVE_MESSAGE_BYTES, NativeResponse};
-use gh_core::{DEFAULT_SYNC_PORT, ELEVATED_TASK_NAME, HOST_VERSION};
+#[cfg(windows)]
+use gh_core::ELEVATED_TASK_NAME;
+use gh_core::{DEFAULT_SYNC_PORT, HOST_VERSION};
 use serde_json::{Value, json};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -13,8 +15,11 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(windows)]
 const DETACHED_PROCESS: u32 = 0x0000_0008;
+#[cfg(windows)]
 const SCHTASKS_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
@@ -24,6 +29,7 @@ const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
 struct HostEnv {
     port: u16,
     launch_timeout: Duration,
+    #[allow(dead_code)]
     skip_schtasks: bool,
     server_exe_override: Option<PathBuf>,
     current_exe: Option<PathBuf>,
@@ -306,13 +312,18 @@ fn launch_desktop_app(env: &HostEnv) -> bool {
     if let Some(ref override_exe) = env.server_exe_override {
         candidates.push(override_exe.clone());
     }
+    let bin_name = if cfg!(windows) {
+        "GenshinHelper.exe"
+    } else {
+        "GenshinHelper"
+    };
     if let Some(ref exe) = env.current_exe
         && let Some(dir) = exe.parent()
     {
-        candidates.push(dir.join("GenshinHelper.exe"));
+        candidates.push(dir.join(bin_name));
     }
     if let Some(ref cwd) = env.current_dir {
-        candidates.push(cwd.join("GenshinHelper.exe"));
+        candidates.push(cwd.join(bin_name));
     }
 
     for exe_path in candidates {

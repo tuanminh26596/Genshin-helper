@@ -18,9 +18,9 @@ use gh_hud::layered::query_monitor_work_area;
 use gh_hud::mmap_overlay::MMapOverlayMode;
 use gh_hud::toast::ToastKind;
 use gh_net::pin_guide::HoYoLABLabelCatalog;
-use gh_win32::capture::WindowFinder;
-use gh_win32::game_settings::check_uipi_status;
-use gh_win32::runtime::HighResTimer;
+use gh_platform::capture::WindowFinder;
+use gh_platform::game_settings::check_uipi_status;
+use gh_platform::runtime::HighResTimer;
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -557,9 +557,9 @@ pub fn run_tick_worker(state: &AppState, p: TickParams) -> TickOutput {
                         .capturer
                         .capture_window_client_outcome(p.game_hwnd, cl, ct, cw, ch)
                     {
-                        gh_win32::wgc_hdr::WgcWindowCaptureOutcome::Frame(wf) => (Some(wf), true),
-                        gh_win32::wgc_hdr::WgcWindowCaptureOutcome::WarmingUp
-                        | gh_win32::wgc_hdr::WgcWindowCaptureOutcome::Failed => {
+                        gh_platform::wgc_hdr::WgcWindowCaptureOutcome::Frame(wf) => (Some(wf), true),
+                        gh_platform::wgc_hdr::WgcWindowCaptureOutcome::WarmingUp
+                        | gh_platform::wgc_hdr::WgcWindowCaptureOutcome::Failed => {
                             (state.capturer.capture_region(cl, ct, cw, ch), false)
                         }
                     }
@@ -763,9 +763,9 @@ pub fn run_tick_worker(state: &AppState, p: TickParams) -> TickOutput {
             .capturer
             .capture_window_client_outcome(p.game_hwnd, cl, ct, cw, ch)
         {
-            gh_win32::wgc_hdr::WgcWindowCaptureOutcome::Frame(wf) => (Some(wf), true),
-            gh_win32::wgc_hdr::WgcWindowCaptureOutcome::WarmingUp
-            | gh_win32::wgc_hdr::WgcWindowCaptureOutcome::Failed => {
+            gh_platform::wgc_hdr::WgcWindowCaptureOutcome::Frame(wf) => (Some(wf), true),
+            gh_platform::wgc_hdr::WgcWindowCaptureOutcome::WarmingUp
+            | gh_platform::wgc_hdr::WgcWindowCaptureOutcome::Failed => {
                 if state.mmap_overlay.capture_visible() {
                     // Zero-frame CV safety guard: switch overlay back to WDA_EXCLUDEFROMCAPTURE and
                     // skip this single transition frame rather than feeding overlay pixels into CV.
@@ -2472,7 +2472,7 @@ mod tests {
         use crate::capture_backend::FrameCapturer;
         use gh_cv::minimap_tracker::{HybridMinimapTracker, MinimapTrackerConfig};
         use gh_cv::tile_cache::{LruTerrainTileCache, TileCacheConfig};
-        use gh_win32::wgc_hdr::WgcWindowCaptureOutcome;
+        use gh_platform::wgc_hdr::WgcWindowCaptureOutcome;
         use std::sync::Mutex;
         use std::sync::atomic::AtomicUsize;
 
@@ -2660,7 +2660,7 @@ mod tests {
         use crate::capture_backend::FrameCapturer;
         use gh_cv::minimap_tracker::{HybridMinimapTracker, MinimapTrackerConfig};
         use gh_cv::tile_cache::{LruTerrainTileCache, TileCacheConfig};
-        use gh_win32::wgc_hdr::WgcWindowCaptureOutcome;
+        use gh_platform::wgc_hdr::WgcWindowCaptureOutcome;
         use std::sync::Mutex;
 
         struct UltrawideMockCapturer {
@@ -3023,7 +3023,7 @@ mod tests {
     #[test]
     fn step_map_frame_reuses_single_capture_for_settling_when_recording_and_skips_when_inactive() {
         use crate::capture_backend::FrameCapturer;
-        use gh_win32::wgc_hdr::WgcWindowCaptureOutcome;
+        use gh_platform::wgc_hdr::WgcWindowCaptureOutcome;
         use std::sync::atomic::AtomicUsize;
 
         struct FullCountingCapturer {

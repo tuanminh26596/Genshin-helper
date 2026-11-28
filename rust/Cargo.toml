@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/gh-core",
     "crates/gh-win32",
+    "crates/gh-linux",
+    "crates/gh-platform",
     "crates/gh-net",
     "crates/gh-cv",
     "crates/gh-hud",
@@ -56,10 +58,21 @@ winresource = "0.1"
 # Internal acyclic DAG crates
 gh-core = { path = "crates/gh-core" }
 gh-win32 = { path = "crates/gh-win32" }
+gh-linux = { path = "crates/gh-linux" }
+gh-platform = { path = "crates/gh-platform" }
 gh-net = { path = "crates/gh-net" }
 gh-cv = { path = "crates/gh-cv" }
 gh-hud = { path = "crates/gh-hud" }
 gh-app = { path = "crates/gh-app" }
+
+# Linux platform crates (workspace-level declarations)
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "composite", "randr", "xfixes", "shape"] }
+evdev = "0.12"
+ksni = "0.2"
+rodio = { version = "0.19", default-features = false, features = ["wav"] }
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+libc = "0.2"
 
 # Keep third-party crates (image, rustfft, ndarray, tiny-skia, cosmic-text, zip)
 # optimized during dev/test so CV & HUD tests run 10-30x faster while gh-* keeps

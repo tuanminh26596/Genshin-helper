@@ -43,14 +43,14 @@ use gh_net::pin_guide::{
     HoYoLABLabelCatalog, NextSuggestion, PinGuide, PinGuideFetcher, PinIconCache,
 };
 use gh_net::sync_server::{HOTKEY_ACTIONS, SyncServer};
-use gh_win32::audio::AudioFeedback;
-use gh_win32::capture::WindowFinder;
-use gh_win32::game_settings::UipiStatus;
-use gh_win32::hotkey::UnifiedHotkeyManager;
-use gh_win32::hotkey_conflicts::HotkeyConflictAdvisor;
-use gh_win32::locale::Win32LocaleProvider;
-use gh_win32::switcher::WindowSwitcher;
-use gh_win32::tray::{SystemTrayApp, TrayState};
+use gh_platform::audio::AudioFeedback;
+use gh_platform::capture::WindowFinder;
+use gh_platform::game_settings::UipiStatus;
+use gh_platform::hotkey::UnifiedHotkeyManager;
+use gh_platform::hotkey_conflicts::HotkeyConflictAdvisor;
+use gh_platform::locale::Win32LocaleProvider;
+use gh_platform::switcher::WindowSwitcher;
+use gh_platform::tray::{SystemTrayApp, TrayState};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashSet};
@@ -2160,7 +2160,7 @@ impl AppState {
 
         json!({
             "uptime_sec": self.start_instant.elapsed().as_secs(),
-            "elevated_self": gh_win32::game_settings::is_process_elevated(),
+            "elevated_self": gh_platform::game_settings::is_process_elevated(),
             "engine_active": self.engine_active.load(Ordering::Acquire),
             "game_hwnd": game_hwnd,
             "uipi_status": uipi_val,
@@ -3004,7 +3004,7 @@ fn make_test_state_full(
 
     let config = Arc::new(RwLock::new(cfg.clone()));
     let capturer: Arc<dyn FrameCapturer> = custom_capturer
-        .unwrap_or_else(|| Arc::new(gh_win32::capture::ScreenCapturer::new(2)));
+        .unwrap_or_else(|| Arc::new(gh_platform::capture::ScreenCapturer::new(2)));
     let maps_db = custom_maps_db.unwrap_or_else(|| Arc::new(MultimapDb::default()));
     let hd_provider = Arc::new(
         HoyolabHdTileProvider::new(
@@ -4337,8 +4337,8 @@ mod tests {
             _: i32,
             _: i32,
             _: i32,
-        ) -> gh_win32::wgc_hdr::WgcWindowCaptureOutcome {
-            gh_win32::wgc_hdr::WgcWindowCaptureOutcome::Failed
+        ) -> gh_platform::wgc_hdr::WgcWindowCaptureOutcome {
+            gh_platform::wgc_hdr::WgcWindowCaptureOutcome::Failed
         }
         fn window_capture_status(&self) -> String {
             "test".to_owned()

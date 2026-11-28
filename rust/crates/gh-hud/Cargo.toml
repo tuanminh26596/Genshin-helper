@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 gh-core.workspace = true
-gh-win32.workspace = true
+gh-platform.workspace = true
 tiny-skia.workspace = true
 cosmic-text.workspace = true
 image.workspace = true
@@ -15,7 +15,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
-[dependencies.windows]
+[target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [
     "Win32_Foundation",
@@ -24,7 +24,15 @@ features = [
     "Win32_UI_WindowsAndMessaging",
 ]
 
-[dev-dependencies.windows]
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client.workspace = true
+wayland-protocols-wlr.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+gh-platform.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies.windows]
 workspace = true
 features = [
     "Win32_System_Threading",

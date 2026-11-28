@@ -1,0 +1,15 @@
+[package]
+name = "gh-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+gh-win32.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gh-linux.workspace = true
+
+[dependencies]
+gh-core.workspace = true

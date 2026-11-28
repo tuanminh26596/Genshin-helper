@@ -20,11 +20,11 @@ use gh_cv::locator::MapLocator;
 use gh_hud::diag_annotate::render_annotated_frame;
 use gh_hud::fonts::HudFonts;
 use gh_net::sync_server::decode_png_base64;
-use gh_win32::capture::WindowFinder;
-use gh_win32::game_settings::is_process_elevated;
-use gh_win32::locale::Win32LocaleProvider;
+use gh_platform::capture::WindowFinder;
+use gh_platform::game_settings::is_process_elevated;
+use gh_platform::locale::Win32LocaleProvider;
 use gh_core::traits::LocaleProvider;
-use gh_win32::sys_info::{
+use gh_platform::sys_info::{
     DisplayTopology, collect_display_topology, collect_os_env_info, probe_game_window_diag,
     reveal_path_in_explorer,
 };
@@ -34,6 +34,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
+#[cfg(windows)]
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
@@ -100,15 +101,30 @@ impl MinimapPreLostRingBuffer {
 }
 
 pub fn local_timestamp_compact_and_iso() -> (String, String) {
-    // SAFETY: `GetLocalTime` writes a stack-allocated `SYSTEMTIME` struct.
-    let st = unsafe { GetLocalTime() };
+    #[cfg(windows)]
+    let (year, month, day, hour, minute, second, ms) = {
+        // SAFETY: `GetLocalTime` writes a stack-allocated `SYSTEMTIME` struct.
+        let st = unsafe { GetLocalTime() };
+        (
+            st.wYear as i32,
+            st.wMonth as u32,
+            st.wDay as u32,
+            st.wHour as u32,
+            st.wMinute as u32,
+            st.wSecond as u32,
+            st.wMilliseconds as u32,
+        )
+    };
+    #[cfg(not(windows))]
+    let (year, month, day, hour, minute, second, ms) = gh_platform::sys_info::local_time_parts();
+
     let compact = format!(
         "{:04}{:02}{:02}_{:02}{:02}{:02}",
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
+        year, month, day, hour, minute, second
     );
     let iso = format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}",
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds
+        year, month, day, hour, minute, second, ms
     );
     (compact, iso)
 }
@@ -296,7 +312,7 @@ fn redact_secret_kv(input: &str) -> String {
                             p += 1;
                         }
                         let val_len = p.saturating_sub(val_start);
-                        if (key == "pin" && val_len >= 4) || val_len >= 4 {
+                        if val_len >= 4 {
                             out.push_str(&input[i..val_start]);
                             out.push_str("<REDACTED>");
                             if let Some(q) = quote_char
@@ -1767,7 +1783,7 @@ mod tests {
         log_buf.push_line(concat!("INFO gh_app: loaded ", "C:\\", "Users\\", "Player\\cache"));
         let mgr = DiagnosticManager::new(
             paths.clone(),
-            Arc::new(gh_win32::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
+            Arc::new(gh_platform::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
             None,
             Arc::new(RwLock::new(AppConfig::default())),
             Arc::new(Map::new),
@@ -1885,7 +1901,7 @@ mod tests {
         // Missing frames without log_buffer must omit unwritten PNG names from `files`
         let bare_mgr = DiagnosticManager::new(
             paths,
-            Arc::new(gh_win32::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
+            Arc::new(gh_platform::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
             None,
             Arc::new(RwLock::new(AppConfig::default())),
             Arc::new(Map::new),
@@ -1918,7 +1934,7 @@ mod tests {
 
         let mgr = DiagnosticManager::new(
             paths,
-            Arc::new(gh_win32::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
+            Arc::new(gh_platform::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
             None,
             Arc::new(RwLock::new(AppConfig::default())),
             Arc::new(Map::new),

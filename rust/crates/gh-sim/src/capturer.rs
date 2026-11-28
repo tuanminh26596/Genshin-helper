@@ -7,7 +7,7 @@
 use gh_app::capture_backend::FrameCapturer;
 use gh_core::frame::{FrameBuf, PixelFormat};
 use gh_cv::map_state::MapScreenStateMachine;
-use gh_win32::wgc_hdr::WgcWindowCaptureOutcome;
+use gh_platform::wgc_hdr::WgcWindowCaptureOutcome;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 

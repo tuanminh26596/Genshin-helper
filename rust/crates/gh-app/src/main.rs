@@ -40,22 +40,25 @@ use gh_net::hoyolab_sync::{
 use gh_net::lan_companion::{LanCompanionConfig, LanCompanionServer};
 use gh_net::pin_guide::{HoYoLABLabelCatalog, LabelCatalogConfig, PinGuideFetcher, PinIconCache};
 use gh_net::sync_server::{HOTKEY_ACTIONS, SyncServer, SyncServerConfig};
-use gh_win32::audio::AudioFeedback;
-use gh_win32::capture::{DIB_POOL_SLOTS, ScreenCapturer, WindowFinder};
-use gh_win32::hotkey::UnifiedHotkeyManager;
-use gh_win32::hotkey_conflicts::HotkeyConflictAdvisor;
-use gh_win32::locale::Win32LocaleProvider;
-use gh_win32::runtime::SingleInstanceMutex;
-use gh_win32::tray::{SystemTrayApp, TrayCallbacks};
-use gh_win32::win_ocr::WindowsOcrService;
+use gh_platform::audio::AudioFeedback;
+use gh_platform::capture::{DIB_POOL_SLOTS, ScreenCapturer, WindowFinder};
+use gh_platform::hotkey::UnifiedHotkeyManager;
+use gh_platform::hotkey_conflicts::HotkeyConflictAdvisor;
+use gh_platform::locale::Win32LocaleProvider;
+use gh_platform::runtime::SingleInstanceMutex;
+use gh_platform::tray::{SystemTrayApp, TrayCallbacks};
+use gh_platform::win_ocr::WindowsOcrService;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
+#[cfg(windows)]
 use windows::Win32::UI::Shell::ShellExecuteW;
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+#[cfg(windows)]
 use windows::core::{PCWSTR, w};
 
 #[derive(Debug, Clone, Parser)]
@@ -144,17 +147,24 @@ fn should_auto_elevate(args: &CliArgs, env_no_elevate: bool, is_elevated: bool) 
 }
 
 fn open_shell_target(target: &str) {
-    let wide: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: `wide` is NUL-terminated for the duration of `ShellExecuteW`.
-    unsafe {
-        let _ = ShellExecuteW(
-            None,
-            w!("open"),
-            PCWSTR(wide.as_ptr()),
-            None,
-            None,
-            SW_SHOWNORMAL,
-        );
+    #[cfg(windows)]
+    {
+        let wide: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: `wide` is NUL-terminated for the duration of `ShellExecuteW`.
+        unsafe {
+            let _ = ShellExecuteW(
+                None,
+                w!("open"),
+                PCWSTR(wide.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(target).spawn();
     }
 }
 
@@ -212,8 +222,8 @@ async fn main() {
     if should_auto_elevate(
         &args,
         env_no_elevate,
-        gh_win32::game_settings::is_process_elevated(),
-    ) && gh_win32::game_settings::relaunch_current_exe_elevated(&["--no-elevate"])
+        gh_platform::game_settings::is_process_elevated(),
+    ) && gh_platform::game_settings::relaunch_current_exe_elevated(&["--no-elevate"])
     {
         return;
     }
@@ -320,7 +330,7 @@ async fn main() {
             gh_hud::layered::OFFSCREEN_TEST_OFFSET
         );
     }
-    if gh_win32::runtime::is_desktop_sandbox_env() {
+    if gh_platform::runtime::is_desktop_sandbox_env() {
         tracing::info!(
             "[Startup] Desktop sandbox mode active (no window focus changes, no global input hooks)"
         );
