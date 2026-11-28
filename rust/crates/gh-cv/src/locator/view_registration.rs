@@ -72,9 +72,9 @@ impl Default for ViewOptions {
 
 /// Translation votes: accept outright at this many inliers (with the margin below), otherwise
 /// only replace a combinatorial match that has at least `VOTE_MIN_MARGIN` fewer inliers.
-const VOTE_ACCEPT_INLIERS: usize = 6;
+pub(super) const VOTE_ACCEPT_INLIERS: usize = 6;
 const VOTE_MIN_INLIERS: usize = 4;
-const VOTE_MIN_MARGIN: usize = 2;
+pub(super) const VOTE_MIN_MARGIN: usize = 2;
 /// Vote bin and inlier tolerance, screen px @1440p.
 const VOTE_CELL_PX_1440: f64 = 12.0;
 const VOTE_TOL_PX_1440: f64 = 9.0;
@@ -531,7 +531,7 @@ impl MapLocator {
     /// matches to share one area, which lost zoomed-out views spanning area borders. Returns
     /// raw-candidate inlier pairs like the combinatorial matcher (anchor compensation and LSQ
     /// happen afterwards), or `None` without a clear winner.
-    fn match_by_translation_votes<'a>(
+    pub(super) fn match_by_translation_votes<'a>(
         &self,
         candidates: &[(f64, f64, i32)],
         wps: &'a [WaypointEntry],
