@@ -444,7 +444,8 @@
     chrome.runtime.id &&
     typeof chrome.runtime.getURL === 'function'
   );
-  const isExtensionPage = window.location.protocol === 'chrome-extension:';
+  const isExtensionPage = window.location.protocol === 'chrome-extension:' ||
+    window.location.protocol === 'moz-extension:';
   const hostLower = String(window.location.hostname || '').toLowerCase();
   const isHoyolabMap = (hostLower.includes('hoyolab.com') &&
     window.location.pathname.includes('/interactive-map/')) ||

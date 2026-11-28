@@ -1,6 +1,17 @@
 'use strict';
 
-importScripts('providers_registry.js');
+// Firefox background pages do not have importScripts. The manifest loads
+// providers_registry.js before background.js there; Chromium's service worker
+// still needs importScripts.
+if (typeof importScripts === 'function') {
+  importScripts('providers_registry.js');
+}
+
+// Firefox exposes promise-based APIs under `browser`; Chromium MV3 returns
+// promises from `chrome.*` when no callback is supplied. Use the promise-based
+// object for the async/await call sites below so one background file works in
+// both browsers.
+const EXT = (typeof browser !== 'undefined' && browser && browser.tabs) ? browser : chrome;
 
 const API_BASE = 'http://127.0.0.1:8765';
 const ALARM_NAME = 'gh-keepalive-poll';
@@ -684,7 +695,7 @@ function scheduleNextPoll(gen, delayMs) {
 
 async function focusBestMapTab(targetProvider = null) {
   try {
-    const tabs = await chrome.tabs.query({ url: GHMapProviders.ALL_TAB_QUERY_URLS });
+    const tabs = await EXT.tabs.query({ url: GHMapProviders.ALL_TAB_QUERY_URLS });
     if (!Array.isArray(tabs) || tabs.length === 0) return;
 
     const wantedProvider = (typeof targetProvider === 'string' && targetProvider.trim())
@@ -733,10 +744,10 @@ async function focusBestMapTab(targetProvider = null) {
     if (!best || typeof best.id !== 'number') return;
 
     if (!best.active) {
-      await chrome.tabs.update(best.id, { active: true });
+      await EXT.tabs.update(best.id, { active: true });
     }
     if (typeof best.windowId === 'number') {
-      await chrome.windows.update(best.windowId, { focused: true }).catch(() => {});
+      await EXT.windows.update(best.windowId, { focused: true }).catch(() => {});
     }
   } catch (e) {
     // Best-effort tab focus
@@ -957,7 +968,7 @@ let nonForceReinjectPromise = null;
 
 async function tabHasLiveBridge(tabId) {
   try {
-    const results = await chrome.scripting.executeScript({
+    const results = await EXT.scripting.executeScript({
       target: { tabId },
       func: () => {
         const alive = Boolean(
@@ -1029,11 +1040,11 @@ function reinjectOpenMapTabs(opts = {}) {
                 reconnected += 1;
                 return;
               }
-              await chrome.scripting.executeScript({
+              await EXT.scripting.executeScript({
                 target: { tabId: tab.id },
                 files: ['content_bridge.js', 'i18n_bridge.js']
               });
-              await chrome.scripting.executeScript({
+              await EXT.scripting.executeScript({
                 target: { tabId: tab.id },
                 world: 'MAIN',
                 files: ['i18n.js', 'coord_transform.js', 'provider_runtime.js', 'page_main.js']
@@ -1282,7 +1293,7 @@ function captureHoYoLABMapViewport() {
           const applyPrivacyMask = async () => {
             if (!chrome.scripting || typeof chrome.scripting.executeScript !== 'function') return false;
             try {
-              await chrome.scripting.executeScript({
+              await EXT.scripting.executeScript({
                 target: { tabId: chosen.id },
                 args: [privacyCss],
                 func: (cssText) => {
@@ -1304,7 +1315,7 @@ function captureHoYoLABMapViewport() {
           const removePrivacyMask = async () => {
             if (!chrome.scripting || typeof chrome.scripting.executeScript !== 'function') return;
             try {
-              await chrome.scripting.executeScript({
+              await EXT.scripting.executeScript({
                 target: { tabId: chosen.id },
                 func: () => {
                   const el = document.getElementById('gh-diag-privacy-mask');
@@ -1476,7 +1487,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (!tab || typeof tab.id !== 'number') {
         return { ok: false, noTab: true, error: 'No open Appsample tab found' };
       }
-      const results = await chrome.scripting.executeScript({
+      const results = await EXT.scripting.executeScript({
         target: { tabId: tab.id },
         world: 'MAIN',
         func: () => {
@@ -1651,7 +1662,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (!tab || typeof tab.id !== 'number') {
         return { ok: false, noTab: true, error: 'No open Kongying Tavern tab found' };
       }
-      const results = await chrome.scripting.executeScript({
+      const results = await EXT.scripting.executeScript({
         target: { tabId: tab.id },
         world: 'MAIN',
         func: () => {
@@ -1705,7 +1716,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const mapIds = Array.isArray(msg.mapIds) && msg.mapIds.length > 0
         ? msg.mapIds.map((x) => Number(x)).filter((x) => Number.isInteger(x) && x > 0)
         : [2, 7, 9, 34, 36, 37, 40];
-      const results = await chrome.scripting.executeScript({
+      const results = await EXT.scripting.executeScript({
         target: { tabId: mapTab.id },
         world: 'MAIN',
         args: [mapIds],
@@ -1771,7 +1782,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (pointIds.length === 0) {
         return { ok: true, status: 200, retcode: 0, message: 'OK', ms: 0 };
       }
-      const results = await chrome.scripting.executeScript({
+      const results = await EXT.scripting.executeScript({
         target: { tabId: mapTab.id },
         world: 'MAIN',
         args: [mapId, pointIds, isDelete],
@@ -1837,7 +1848,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         });
         return { ok: true, reloaded: true };
       }
-      await chrome.scripting.executeScript({
+      await EXT.scripting.executeScript({
         target: { tabId: mapTab.id },
         world: 'MAIN',
         func: () => {
