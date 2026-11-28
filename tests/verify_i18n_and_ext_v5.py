@@ -67,25 +67,21 @@ def verify_desktop_i18n() -> None:
     # Domain coverage verification
     required_prefixes = (
         "tray.",
-        "hud.state.tracking",
         "hud.state.arrived",
         "hud.state.floor_mismatch",
         "hud.state.lost",
-        "hud.state.reacquiring",
         "toast.",
         "uipi.",
         "borderless.",
         "hdr.",
-        "lan.",
-        "export.",
     )
     for prefix in required_prefixes:
         assert any(k == prefix or k.startswith(prefix) for k in vi), f"Missing desktop i18n coverage for '{prefix}'"
 
     assert vi["hud.state.floor_mismatch"].format(player_floor="G", target_floor="B1") == "Khác tầng! (G → B1)"
     assert en["hud.state.floor_mismatch"].format(player_floor="G", target_floor="B1") == "Floor mismatch! (G → B1)"
-    assert en["lan.enabled"].format(url="http://192.168.1.10:8765") == "LAN Companion enabled at http://192.168.1.10:8765"
-    assert vi["export.success"].format(count=42, path="out.json") == "Đã xuất 42 điểm sang out.json"
+    assert en["toast.route.loaded_detail"].format(sections=7) == "Open M-Map in-game to see route guidance (7 sections)"
+    assert vi["toast.map_update.updated_detail"].format(count=42) == "Đã tải xong 42 bản đồ mới — có hiệu lực từ lần mở app kế tiếp"
 
     print("  [OK] assets/locales/{vi,en}.json domain coverage & interpolation passed")
 

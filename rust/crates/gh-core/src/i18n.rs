@@ -311,17 +311,15 @@ mod tests {
 
         for required in [
             "tray.tooltip.connected",
-            "hud.state.tracking",
             "hud.state.arrived",
             "hud.state.floor_mismatch",
             "hud.state.lost",
-            "hud.state.reacquiring",
             "toast.synced.title",
+            "toast.route.loaded_detail",
+            "toast.map_update.updated_detail",
             "uipi.warning.title",
-            "borderless.success",
+            "borderless.already_running",
             "hdr.warning.title",
-            "lan.enabled",
-            "export.success",
         ] {
             assert!(
                 vi.keys().any(|k| k == required || k.starts_with(required)),
@@ -384,19 +382,19 @@ mod tests {
         );
         assert!(floor_msg.contains("G") && floor_msg.contains("B2"));
 
-        let lan_msg = tr.t_lang(
-            "lan.enabled",
+        let route_msg = tr.t_lang(
+            "toast.route.loaded_detail",
             Some("en"),
-            &[("url", "http://192.168.1.2:8766")],
+            &[("sections", "7")],
         );
-        assert!(lan_msg.contains("192.168.1.2:8766"));
+        assert!(route_msg.contains("(7 sections)"));
 
-        let exp_msg = tr.t_lang(
-            "export.success",
+        let map_msg = tr.t_lang(
+            "toast.map_update.updated_detail",
             Some("vi"),
-            &[("count", "12"), ("path", "out.json")],
+            &[("count", "12")],
         );
-        assert!(exp_msg.contains("12") && exp_msg.contains("out.json"));
+        assert!(map_msg.contains("12") && !map_msg.contains("{count}"));
     }
 
     #[test]
