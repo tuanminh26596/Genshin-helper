@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "210311_f070_mmap_noise_robustness",
+  "description": "Nod-Krai moon surface (Map 40) zoomed-out M-Map pixel-noise robustness regression (CRF-18 / +/-2 LSB 30-33w 2-point false lock).",
+  "notes": "Uses existing scratch/frame_fixtures/sess_20261127_210311_f70.png (2560x1440, expected (5072, -174) from f146 11-inlier anchor). Under +/-2 LSB perturb_seeds 303 and 505 (mirroring near-lossless libx264rgb crf 18), Pass 2c picks up a false contour near (1043.8, 823.3) and 2-point matching produces a 30.6-32.8w shifted lock at (5102.0, -179.5) with terrain score 0.196 vs true terrain guard score 0.496, which TERRAIN_GUARD_MIN_SHIFT_W=40.0 previously ignored.",
+  "image": "scratch/frame_fixtures/sess_20261127_210311_f70.png",
+  "width": 2560,
+  "height": 1440,
+  "is_gamepad": false,
+  "mmap_locate": {
+    "expected_map_id": 40,
+    "expected_world_x": 5072.0,
+    "expected_world_y": -174.0,
+    "pos_tolerance_w": 15.0,
+    "perturb_seeds": [303, 505]
+  }
+}

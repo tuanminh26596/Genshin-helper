@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "082625_f1054_mmap_map2_control",
+  "description": "Teyvat (Map 2) Liyue/Guili Plains M-Map control capture with 9 waypoint inliers.",
+  "notes": "Exported from E:\\Dev Soft\\Genshin-Helper\\scratch\\qa_sessions\\sess_20261127_082625\\video.mkv frame i=1054 (0-based n=1053, 2560x1440) via: ffmpeg -i video.mkv -vf \"select='eq(n,1053)'\" -vsync 0 -frames:v 1 scratch/frame_fixtures/sess_20261127_082625_f1054.png. Trustworthy Map 2 anchor at (-783.7, 2163.0) with 9 inliers; verifies original and +/-2 LSB perturbed variants lock accurately.",
+  "image": "scratch/frame_fixtures/sess_20261127_082625_f1054.png",
+  "width": 2560,
+  "height": 1440,
+  "is_gamepad": false,
+  "mmap_locate": {
+    "expected_map_id": 2,
+    "expected_world_x": -783.7,
+    "expected_world_y": 2163.0,
+    "pos_tolerance_w": 50.0,
+    "perturb_seeds": [1054, 2054]
+  }
+}

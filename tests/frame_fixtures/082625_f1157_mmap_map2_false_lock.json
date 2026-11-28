@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "name": "082625_f1157_mmap_map2_false_lock",
+  "description": "Teyvat (Map 2) Mondstadt M-Map capture after teleporting from Liyue where 3-inlier coincidence false-locks ~15,308w away in Natlan at (-14869.6, 1580.7).",
+  "notes": "Exported from E:\\Dev Soft\\Genshin-Helper\\scratch\\qa_sessions\\sess_20261127_082625\\video.mkv frame i=1157 (0-based n=1156, 2560x1440) via: ffmpeg -i video.mkv -vf \"select='eq(n,1156)'\" -vsync 0 -frames:v 1 scratch/frame_fixtures/sess_20261127_082625_f1157.png (and prime f1054 via eq(n,1053)). Truth from all 23 primary Mondstadt waypoints in multimap_v4.json Map 2 (scale 1.3263 w/px) and live minimap global_teyvat_relocate/meta.jsonl at f1131..1154: player stands east of Mondstadt bridge at (369.2, 129.3); live M-Map synced to ~(388.3, 138.5). With prior f1054 (-783.7, 2163.0) in Liyue, MapLocator previously jumped 15,308w to Natlan (-14869.6, 1580.7) with 3 inliers and terrain score 0.067.",
+  "image": "scratch/frame_fixtures/sess_20261127_082625_f1157.png",
+  "width": 2560,
+  "height": 1440,
+  "is_gamepad": false,
+  "mmap_locate": {
+    "expected_map_id": 2,
+    "expected_world_x": 369.2,
+    "expected_world_y": 129.3,
+    "pos_tolerance_w": 50.0,
+    "prev_hint": {
+      "map_id": 2,
+      "world_x": -783.7,
+      "world_y": 2163.0,
+      "prime_image": "scratch/frame_fixtures/sess_20261127_082625_f1054.png"
+    },
+    "perturb_seeds": [1157, 2157]
+  }
+}
