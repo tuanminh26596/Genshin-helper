@@ -487,14 +487,6 @@ function runSuite() {
       GH_CMD_EXPORT_PINS: ['not_needed', 'cross-map export reads HoYoLAB marks; the app sends it to the HoYoLAB tab only'],
       HOTKEY_UPDATED: ['not_needed', 'provider pages show no hotkey labels'],
       SINGLE_MONITOR_UPDATED: ['not_needed', 'deprecated; the HoYoLAB handler is a no-op too'],
-      DIAGNOSTIC_CAPTURED: ['known_gap', 'Alt+F12 is confirmed in game; the optional note dialog for the bundle exists only on HoYoLAB'],
-      LANGUAGE_UPDATED: ['known_gap', 'overlay text already on a provider page is not re-rendered when the app language changes'],
-      LAN_FOCUS_PIN: ['known_gap', 'LAN Companion cannot focus a pin on AppSample / Kongying pages'],
-      LAN_SET_FLOOR: ['known_gap', 'LAN Companion cannot switch the floor on AppSample / Kongying pages'],
-      ROUTE_UPDATED: ['known_gap', 'route documents are drawn only on HoYoLAB pages'],
-      GH_CMD_ROUTE_CLEAR: ['known_gap', 'popup route clear works only on HoYoLAB pages'],
-      GH_CMD_ROUTE_EXPORT: ['known_gap', 'popup route export works only on HoYoLAB pages'],
-      GH_CMD_ROUTE_IMPORT: ['known_gap', 'popup route import works only on HoYoLAB pages'],
     };
     const pageSrc = readFileSync(join(ROOT, 'extension', 'page_main.js'), 'utf8');
     const provSrc = readFileSync(join(ROOT, 'extension', 'provider_runtime.js'), 'utf8');
