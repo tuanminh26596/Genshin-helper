@@ -953,9 +953,40 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 });
 
+let nonForceReinjectPromise = null;
+
+async function tabHasLiveBridge(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const alive = Boolean(
+          window.__gh_bridge_alive &&
+          typeof chrome !== 'undefined' &&
+          chrome.runtime &&
+          chrome.runtime.id &&
+          window.__gh_bridge_runtime_id === chrome.runtime.id
+        );
+        if (alive && typeof window.__gh_bridge_reconnect_now === 'function') {
+          try {
+            window.__gh_bridge_reconnect_now();
+          } catch (e) {}
+        }
+        return alive;
+      }
+    });
+    return Boolean(results && results[0] && results[0].result === true);
+  } catch (e) {
+    return false;
+  }
+}
+
 function reinjectOpenMapTabs(opts = {}) {
   const forceAll = Boolean(opts && opts.forceAll);
-  return new Promise((resolve) => {
+  if (!forceAll && nonForceReinjectPromise) {
+    return nonForceReinjectPromise;
+  }
+  const run = new Promise((resolve) => {
     try {
       if (
         typeof chrome === 'undefined' ||
@@ -964,7 +995,7 @@ function reinjectOpenMapTabs(opts = {}) {
         !chrome.scripting ||
         typeof chrome.scripting.executeScript !== 'function'
       ) {
-        resolve({ ok: false, injected: 0 });
+        resolve({ ok: false, injected: 0, reconnected: 0 });
         return;
       }
       const connectedTabIds = new Set();
@@ -986,13 +1017,18 @@ function reinjectOpenMapTabs(opts = {}) {
             )
           : [];
         if (targets.length === 0) {
-          resolve({ ok: true, injected: 0 });
+          resolve({ ok: true, injected: 0, reconnected: 0 });
           return;
         }
         let injected = 0;
+        let reconnected = 0;
         Promise.all(
           targets.map(async (tab) => {
             try {
+              if (!forceAll && (await tabHasLiveBridge(tab.id))) {
+                reconnected += 1;
+                return;
+              }
               await chrome.scripting.executeScript({
                 target: { tabId: tab.id },
                 files: ['content_bridge.js', 'i18n_bridge.js']
@@ -1005,12 +1041,21 @@ function reinjectOpenMapTabs(opts = {}) {
               injected += 1;
             } catch (e) {}
           })
-        ).then(() => resolve({ ok: true, injected }));
+        ).then(() => resolve({ ok: true, injected, reconnected }));
       });
     } catch (e) {
-      resolve({ ok: false, injected: 0 });
+      resolve({ ok: false, injected: 0, reconnected: 0 });
     }
   });
+  if (!forceAll) {
+    nonForceReinjectPromise = run;
+    run.finally(() => {
+      if (nonForceReinjectPromise === run) {
+        nonForceReinjectPromise = null;
+      }
+    });
+  }
+  return run;
 }
 
 function forwardCommandToMapTab(cmdType, payload = {}, broadcastAll = false, opts = {}) {
@@ -1880,7 +1925,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     };
     if (ports.size === 0) {
       reinjectOpenMapTabs().then(async (res) => {
-        if (res.injected > 0 && ports.size === 0) {
+        if ((res.injected > 0 || res.reconnected > 0) && ports.size === 0) {
           await sleep(180);
         }
         sendResponse(buildStatePayload());
@@ -1952,17 +1997,17 @@ chrome.runtime.onInstalled.addListener(() => {
   updateBadge(false, false);
   ensureAlarm();
   refreshStatusQuietly();
-  reinjectOpenMapTabs({ forceAll: true });
+  reinjectOpenMapTabs();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   updateBadge(false, false);
   ensureAlarm();
   refreshStatusQuietly();
-  reinjectOpenMapTabs({ forceAll: true });
+  reinjectOpenMapTabs();
 });
 
 updateBadge(false, false);
 ensureAlarm();
 refreshStatusQuietly();
-reinjectOpenMapTabs({ forceAll: true });
+reinjectOpenMapTabs();

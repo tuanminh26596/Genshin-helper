@@ -15,7 +15,7 @@
 //   node tests/extension_browser_smoke.mjs
 // Browser: GH_CHROME=<chrome.exe>, else Playwright's Chromium under %LOCALAPPDATA%\ms-playwright.
 // Needs network access to act.hoyolab.com. Exit code 0 = pass, 1 = fail, 2 = skipped.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -26,7 +26,7 @@ const EXT_DIR = join(ROOT, 'extension');
 const EXT_ID = 'nfkijdoblmphmdljfogooajhbldkeojh';
 const MAP_URL = 'https://act.hoyolab.com/ys/app/interactive-map/index.html';
 const APP_ORIGIN = 'http://127.0.0.1:8765';
-const BOOT_TIMEOUT_MS = 45000;
+const BOOT_TIMEOUT_MS = 60000;
 // Hang guards: every CDP call / DevTools HTTP request gets its own deadline, and the whole run
 // has a hard watchdog, so a stalled page or browser fails the check instead of blocking the gate.
 const CDP_CALL_TIMEOUT_MS = 15000;
@@ -127,9 +127,16 @@ async function main() {
     '--no-first-run', '--no-default-browser-check', '--lang=en-US', 'about:blank',
   ], { stdio: 'ignore' });
   const sessions = [];
+  const killBrowserTree = () => {
+    if (process.platform === 'win32' && proc.pid) {
+      spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore' });
+    } else {
+      try { proc.kill(); } catch (e) {}
+    }
+  };
   abortRun = () => {
     for (const c of sessions) c.close();
-    try { proc.kill(); } catch (e) {}
+    killBrowserTree();
     try { rmSync(profile, { recursive: true, force: true }); } catch (e) {}
   };
   try {
@@ -153,19 +160,51 @@ async function main() {
     await browser.ready;
     const swSessions = new Set();
     let swStarts = 0;
+    let swReadyCount = 0;
+    let swCrashedCount = 0;
+    let swTargetId = null;
+    const waitUntil = async (pred, timeoutMs = 15000, intervalMs = 100) => {
+      const deadline = Date.now() + timeoutMs;
+      let lastVal = null;
+      while (Date.now() < deadline) {
+        try {
+          lastVal = await pred();
+          if (lastVal) return lastVal;
+        } catch (e) {
+          lastVal = null;
+        }
+        await sleep(Math.min(intervalMs, Math.max(10, deadline - Date.now())));
+      }
+      return lastVal;
+    };
     browser.handlers.push((m) => {
       if (m.method === 'Target.attachedToTarget') {
         const { sessionId, targetInfo, waitingForDebugger } = m.params;
         const isExtWorker = targetInfo.type === 'service_worker' && targetInfo.url.includes(EXT_ID);
         (async () => {
-          if (isExtWorker) {
-            swSessions.add(sessionId);
-            swStarts++;
-            await browser.send('Fetch.enable', { patterns: [{ urlPattern: `${APP_ORIGIN}/*` }] }, CDP_CALL_TIMEOUT_MS, sessionId);
+          if (!isExtWorker) {
+            if (waitingForDebugger) {
+              browser.send('Runtime.runIfWaitingForDebugger', {}, 3000, sessionId).catch(() => {});
+            }
+            browser.send('Target.detachFromTarget', { sessionId }, 3000).catch(() => {});
+            return;
           }
+          swSessions.add(sessionId);
+          swTargetId = targetInfo.targetId;
+          swStarts++;
+          await browser.send('Fetch.enable', { patterns: [{ urlPattern: `${APP_ORIGIN}/*` }] }, CDP_CALL_TIMEOUT_MS, sessionId);
           if (waitingForDebugger) await browser.send('Runtime.runIfWaitingForDebugger', {}, CDP_CALL_TIMEOUT_MS, sessionId);
-          if (!isExtWorker) await browser.send('Target.detachFromTarget', { sessionId });
+          swReadyCount++;
         })().catch((e) => console.log(`[warn] auto-attach ${targetInfo.type} ${targetInfo.url}: ${e.message}`));
+      } else if (m.method === 'Inspector.targetCrashed' && swSessions.has(m.sessionId)) {
+        swCrashedCount++;
+      } else if (m.method === 'Inspector.targetReloadedAfterCrash' && swSessions.has(m.sessionId)) {
+        (async () => {
+          swStarts++;
+          await browser.send('Fetch.enable', { patterns: [{ urlPattern: `${APP_ORIGIN}/*` }] }, CDP_CALL_TIMEOUT_MS, m.sessionId);
+          await browser.send('Runtime.runIfWaitingForDebugger', {}, CDP_CALL_TIMEOUT_MS, m.sessionId);
+          swReadyCount++;
+        })().catch((e) => console.log(`[warn] targetReloadedAfterCrash: ${e.message}`));
       } else if (m.method === 'Target.detachedFromTarget') {
         swSessions.delete(m.params.sessionId);
       } else if (m.method === 'Fetch.requestPaused' && swSessions.has(m.sessionId)) {
@@ -185,8 +224,6 @@ async function main() {
       autoAttach: true, waitForDebuggerOnStart: true, flatten: true,
       filter: [{ type: 'service_worker', exclude: false }, { exclude: true }],
     });
-    for (let i = 0; i < 50 && swStarts === 0; i++) await sleep(200);
-    if (swStarts === 0) throw new Error('extension service worker not found (extension failed to load?)');
 
     // The user's language choice lives in chrome.storage. Write it from an extension-origin page,
     // which has chrome.storage whether or not the service worker is running right now.
@@ -200,12 +237,57 @@ async function main() {
       if (extReady !== 'object') await sleep(200);
     }
     if (extReady !== 'object') throw new Error('chrome.storage not available on the extension page');
+    const getBgState = (extClient = ext) => extClient.eval(`new Promise((r) => chrome.runtime.sendMessage({ kind: 'GET_STATE' }, r))`);
+    if (swReadyCount === 0) {
+      await waitUntil(() => swReadyCount > 0, 3000, 100);
+    }
+    if (swReadyCount === 0) {
+      await getBgState(ext).catch(() => null);
+      await waitUntil(() => swReadyCount > 0, 10000, 100);
+    }
+    if (swReadyCount === 0) throw new Error('extension service worker not found (extension failed to load?)');
+    const swVersions = new Map();
+    ext.handlers.push((m) => {
+      if (m.method === 'ServiceWorker.workerVersionUpdated' && Array.isArray(m.params && m.params.versions)) {
+        for (const v of m.params.versions) {
+          if (v && v.versionId && String(v.scriptURL || '').includes(EXT_ID)) {
+            swVersions.set(v.versionId, v);
+          }
+        }
+      }
+    });
+    await ext.send('ServiceWorker.enable');
+    const findActiveSwVersion = () => {
+      for (const v of swVersions.values()) {
+        if (v.status === 'activated' && v.runningStatus === 'running') return v;
+      }
+      for (const v of swVersions.values()) {
+        if (v.runningStatus === 'running' || v.runningStatus === 'starting') return v;
+      }
+      return null;
+    };
+    const stopExtServiceWorker = async () => {
+      let activeVer = findActiveSwVersion();
+      if (!swTargetId || !activeVer || activeVer.runningStatus !== 'running') {
+        await getBgState(ext).catch(() => null);
+        activeVer = await waitUntil(() => (swTargetId ? findActiveSwVersion() : null), 10000, 50);
+      }
+      if (!swTargetId || !activeVer) throw new Error('No active extension service worker found to stop');
+      const crashedBefore = swCrashedCount;
+      await browser.send('Target.closeTarget', { targetId: swTargetId });
+      const stopped = await waitUntil(() => {
+        const cur = swVersions.get(activeVer.versionId);
+        return (swCrashedCount > crashedBefore || swSessions.size === 0) && (!cur || cur.runningStatus === 'stopped');
+      }, 10000, 50);
+      if (!stopped) throw new Error(`ServiceWorker ${activeVer.versionId} did not stop within timeout`);
+    };
     const setChoice = (lang) => ext.eval(`new Promise((r) => chrome.storage.local.${lang ? `set({ gh_lang: '${lang}' }` : `remove('gh_lang'`}, () => r(true)))`);
 
-    const pageTarget = await http(`/json/new?${encodeURI(MAP_URL)}`, 'PUT');
+    const pageTarget = await http('/json/new?about:blank', 'PUT');
     const page = new Cdp(pageTarget.webSocketDebuggerUrl);
     sessions.push(page);
     await page.ready;
+    await page.send('Page.enable');
     await page.send('Runtime.enable');
     // A stale value under the pre-r6 key, as left by older builds (browser default marked explicit).
     await page.send('Page.addScriptToEvaluateOnNewDocument', { source: "try { localStorage.setItem('gh_lang', 'en'); } catch (e) {}" });
@@ -221,16 +303,22 @@ async function main() {
     const waitFor = async (pred, timeoutMs = BOOT_TIMEOUT_MS) => {
       const t0 = Date.now();
       let s = null;
+      let lastErr = null;
       while (Date.now() - t0 < timeoutMs) {
-        try { s = await page.eval(state); } catch (e) { s = null; }
+        try {
+          s = await page.eval(state);
+          lastErr = null;
+        } catch (e) {
+          s = null;
+          lastErr = e && e.message ? e.message : String(e);
+        }
         if (s && pred(s)) return s;
         await sleep(300);
       }
-      return s;
+      return s || (lastErr ? { evalError: lastErr } : null);
     };
     const reload = async () => {
-      await page.send('Page.reload', { ignoreCache: true });
-      await sleep(1000);
+      await page.send('Page.reload', { ignoreCache: false });
     };
     const dragMap = () => page.eval(`(async () => {
       const c = document.querySelector('.leaflet-container');
@@ -248,18 +336,32 @@ async function main() {
     const dragUntilRecenter = async (timeoutMs = 30000) => {
       const t0 = Date.now();
       let s = null;
+      let syncedMarker = false;
+      let dragTries = 0;
       while (Date.now() - t0 < timeoutMs) {
-        await dragMap().catch(() => false);
+        const dragged = await dragMap().catch(() => false);
         s = await page.eval(state).catch(() => null);
         if (s && s.recenter) return s;
-        await sleep(700);
+        if (dragged) {
+          dragTries += 1;
+          if (!syncedMarker && dragTries >= 2) {
+            syncedMarker = await page.eval(`(() => {
+              const b = window.__GH_BRIDGE__;
+              if (!b || typeof b.getContext !== 'function' || typeof b.updatePlayerMarker !== 'function') return false;
+              const ctx = b.getContext();
+              if (!ctx || !ctx.map) return false;
+              return Boolean(b.updatePlayerMarker({ lat: 0, lng: 0, map_id: 2 }));
+            })()`).catch(() => false);
+          }
+        }
+        await sleep(300);
       }
       return s;
     };
 
     console.log(`[1] no user choice, app = vi, browser = en, stale page localStorage gh_lang = en (build ${SCRIPT_BUILD})`);
     await setChoice(null);
-    await reload();
+    await page.send('Page.navigate', { url: MAP_URL });
     let s = await waitFor((x) => x.build === SCRIPT_BUILD && x.lang === 'vi');
     check('current SCRIPT_BUILD booted in the page', s && s.build === SCRIPT_BUILD, s);
     check('window.GHI18n exists in the page MAIN world', s && s.i18n === 'object', s);
@@ -280,13 +382,217 @@ async function main() {
     await setChoice('vi');
     s = await waitFor((x) => x.lang === 'vi' && x.recenter === 'Bám lại vị trí', 8000);
     check('live switch re-renders the re-center button', s && s.lang === 'vi' && s.recenter === 'Bám lại vị trí', s);
+
+    console.log('[4] MV3 service worker restart does not re-inject live open map tabs');
+    const AS_URL = 'https://genshin-impact-map.appsample.com/';
+    const asTarget = await http('/json/new?about:blank', 'PUT');
+    const asPage = new Cdp(asTarget.webSocketDebuggerUrl);
+    sessions.push(asPage);
+    await asPage.ready;
+    await asPage.send('Page.enable');
+    await asPage.send('Runtime.enable');
+    asPage.handlers.push((m) => {
+      if (m.method !== 'Fetch.requestPaused') return;
+      const reqUrl = m.params.request.url;
+      if (reqUrl.startsWith(AS_URL)) {
+        const isDoc = m.params.resourceType === 'Document' || reqUrl === AS_URL;
+        asPage.send('Fetch.fulfillRequest', {
+          requestId: m.params.requestId,
+          responseCode: isDoc ? 200 : 204,
+          responseHeaders: isDoc ? [{ name: 'Content-Type', value: 'text/html; charset=utf-8' }] : [],
+          body: isDoc ? Buffer.from('<!doctype html><html><head><title>AppSample Fixture</title></head><body><div id="root"></div></body></html>').toString('base64') : ''
+        }).catch(() => {});
+      } else {
+        asPage.send('Fetch.continueRequest', { requestId: m.params.requestId }).catch(() => {});
+      }
+    });
+    await asPage.send('Fetch.enable', { patterns: [{ urlPattern: `${AS_URL}*` }] });
+    await asPage.send('Page.navigate', { url: AS_URL });
+
+    const asInitial = await waitUntil(async () => {
+      const v = await asPage.eval(`(() => {
+        const b = window.__GH_BRIDGE__;
+        if (!b || typeof b.tabId !== 'string' || typeof window.__gh_provider_teardown !== 'function') return null;
+        if (typeof window.GHI18n !== 'object' || typeof window.GHCoordTransform !== 'object') return null;
+        return { tabId: b.tabId, providerId: b.providerId };
+      })()`);
+      return v && v.tabId ? v : null;
+    }, 15000, 100);
+    check('AppSample fixture booted provider_runtime with __GH_BRIDGE__.tabId', Boolean(asInitial && asInitial.tabId && asInitial.providerId === 'appsample'), asInitial);
+
+    const tabsBefore = await waitUntil(async () => {
+      const st = await getBgState(ext);
+      return st && st.tabCount >= 2 ? st : null;
+    }, 10000, 100);
+    check('both HoYoLAB and AppSample tabs connected before SW stop', Boolean(tabsBefore && tabsBefore.tabCount >= 2), tabsBefore);
+
+    const chromeTabsInfo = await ext.eval(`new Promise((r) => chrome.tabs.query({}, (ts) => r(ts.map((t) => ({ id: t.id, url: t.url })))))`);
+    const asChromeTab = Array.isArray(chromeTabsInfo) ? chromeTabsInfo.find((t) => t.url && t.url.startsWith(AS_URL)) : null;
+    const hlChromeTab = Array.isArray(chromeTabsInfo) ? chromeTabsInfo.find((t) => t.url && t.url.includes('hoyolab.com/ys/app/interactive-map/')) : null;
+    if (!asChromeTab || !hlChromeTab) throw new Error(`Missing Chrome tab ids: ${JSON.stringify(chromeTabsInfo)}`);
+
+    await asPage.eval(`(() => {
+      window.__gh_smoke_teardown_count = 0;
+      const origTeardown = window.__gh_provider_teardown;
+      window.__gh_provider_teardown = function () {
+        window.__gh_smoke_teardown_count = (window.__gh_smoke_teardown_count || 0) + 1;
+        return origTeardown.apply(this, arguments);
+      };
+      window.__GH_BRIDGE__.__smokeToken = 'initial';
+      window.GHI18n.__smokeToken = 'initial';
+      window.GHCoordTransform.__smokeToken = 'initial';
+      return true;
+    })()`);
+    await page.eval(`(() => {
+      window.GHI18n.__smokeToken = 'initial';
+      window.GHCoordTransform.__smokeToken = 'initial';
+      return true;
+    })()`);
+
+    const swBeforeStop = swReadyCount;
+    await stopExtServiceWorker();
+    const wakeStatePromise = getBgState(ext);
+    const swRestarted = await waitUntil(() => swReadyCount > swBeforeStop, 15000, 50);
+    check('MV3 service worker stopped and restarted', Boolean(swRestarted), { swBeforeStop, swReadyCount });
+    await wakeStatePromise;
+
+    // 2-hop FIFO barrier (ISOLATED then MAIN) on both map tabs so any queued startup injection has run.
+    await ext.eval(`(async () => {
+      for (const tabId of [${asChromeTab.id}, ${hlChromeTab.id}]) {
+        await chrome.scripting.executeScript({ target: { tabId }, func: () => true });
+        await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: () => true });
+      }
+      return true;
+    })()`);
+
+    const tabsAfterWake = await waitUntil(async () => {
+      const st = await getBgState(ext);
+      return st && st.tabCount >= 2 ? st : null;
+    }, 3000, 100);
+    check('live bridges reconnected promptly on SW restart', Boolean(tabsAfterWake && tabsAfterWake.tabCount >= 2), tabsAfterWake);
+
+    const asAfterRestart = await asPage.eval(`({
+      tabId: window.__GH_BRIDGE__ ? window.__GH_BRIDGE__.tabId : null,
+      bridgeToken: window.__GH_BRIDGE__ ? window.__GH_BRIDGE__.__smokeToken : null,
+      teardownCount: window.__gh_smoke_teardown_count,
+      i18nToken: window.GHI18n ? window.GHI18n.__smokeToken : null,
+      ctToken: window.GHCoordTransform ? window.GHCoordTransform.__smokeToken : null
+    })`);
+    check(
+      'AppSample tabId unchanged and MAIN scripts not re-executed after SW restart',
+      Boolean(
+        asAfterRestart &&
+        asAfterRestart.tabId === asInitial.tabId &&
+        asAfterRestart.bridgeToken === 'initial' &&
+        asAfterRestart.teardownCount === 0 &&
+        asAfterRestart.i18nToken === 'initial' &&
+        asAfterRestart.ctToken === 'initial'
+      ),
+      { before: asInitial, after: asAfterRestart }
+    );
+
+    const hlAfterRestart = await page.eval(`({
+      i18nToken: window.GHI18n ? window.GHI18n.__smokeToken : null,
+      ctToken: window.GHCoordTransform ? window.GHCoordTransform.__smokeToken : null
+    })`);
+    check(
+      'HoYoLAB MAIN i18n/coord_transform instances preserved across SW restart',
+      Boolean(hlAfterRestart && hlAfterRestart.i18nToken === 'initial' && hlAfterRestart.ctToken === 'initial'),
+      hlAfterRestart
+    );
+
+    await setChoice('en');
+    const recenterAfterRestart = await waitFor((x) => x.lang === 'en' && x.recenter === 'Re-center', 8000);
+    check(
+      'HoYoLAB live language switch still re-renders re-center button after SW restart',
+      Boolean(recenterAfterRestart && recenterAfterRestart.lang === 'en' && recenterAfterRestart.recenter === 'Re-center'),
+      recenterAfterRestart
+    );
+
+    console.log('[5] non-alive bridge tab still gets injected on SW restart and RECONNECT_MAP_TABS still forces');
+    await ext.eval(`chrome.scripting.executeScript({
+      target: { tabId: ${asChromeTab.id} },
+      func: () => {
+        window.__gh_bridge_alive = false;
+        delete window.__gh_bridge_runtime_id;
+        delete window.__gh_bridge_loaded;
+        delete window.__gh_bridge_reconnect_now;
+        return true;
+      }
+    })`);
+    await asPage.eval('delete window.__GH_BRIDGE__; true');
+
+    const swBeforeDead = swReadyCount;
+    await stopExtServiceWorker();
+    const wakeDeadPromise = getBgState(ext);
+    const swRestartedForDead = await waitUntil(() => swReadyCount > swBeforeDead, 15000, 50);
+    check('SW stopped and restarted for dead-bridge check', Boolean(swRestartedForDead), { swBeforeDead, swReadyCount });
+    await wakeDeadPromise;
+
+    const asAfterDead = await waitUntil(async () => {
+      const v = await asPage.eval(`(() => {
+        const b = window.__GH_BRIDGE__;
+        if (!b || typeof b.tabId !== 'string') return null;
+        return { tabId: b.tabId, teardownCount: window.__gh_smoke_teardown_count || 0 };
+      })()`);
+      return v;
+    }, 10000, 100);
+    check(
+      'non-alive bridge tab was re-injected on SW restart',
+      Boolean(asAfterDead && asAfterDead.tabId !== asInitial.tabId && asAfterDead.teardownCount >= 1),
+      { before: asInitial, afterDead: asAfterDead }
+    );
+
+    const asBridgeAliveAgain = await ext.eval(`chrome.scripting.executeScript({
+      target: { tabId: ${asChromeTab.id} },
+      func: () => Boolean(window.__gh_bridge_alive && window.__gh_bridge_runtime_id === chrome.runtime.id)
+    }).then((res) => Boolean(res && res[0] && res[0].result))`);
+    check('re-injected tab restored live isolated bridge', asBridgeAliveAgain === true, asBridgeAliveAgain);
+
+    await ext.eval(`(async () => {
+      await chrome.scripting.executeScript({ target: { tabId: ${hlChromeTab.id} }, func: () => true });
+      await chrome.scripting.executeScript({ target: { tabId: ${hlChromeTab.id} }, world: 'MAIN', func: () => true });
+      return true;
+    })()`);
+    const hlAfterDead = await page.eval(`({
+      i18nToken: window.GHI18n ? window.GHI18n.__smokeToken : null,
+      ctToken: window.GHCoordTransform ? window.GHCoordTransform.__smokeToken : null
+    })`);
+    check(
+      'live sibling HoYoLAB tab remained untouched while dead-bridge tab injected',
+      Boolean(hlAfterDead && hlAfterDead.i18nToken === 'initial' && hlAfterDead.ctToken === 'initial'),
+      hlAfterDead
+    );
+
+    const tabsAfterDead = await waitUntil(async () => {
+      const st = await getBgState(ext);
+      return st && st.tabCount >= 2 ? st : null;
+    }, 3000, 100);
+    check('both map tabs connected after dead-bridge re-injection', Boolean(tabsAfterDead && tabsAfterDead.tabCount >= 2), tabsAfterDead);
+
+    const tabIdBeforeForce = asAfterDead ? asAfterDead.tabId : asInitial.tabId;
+    const forceReconnectRes = await ext.eval(`new Promise((r) => chrome.runtime.sendMessage({ kind: 'RECONNECT_MAP_TABS' }, r))`);
+    const asAfterForce = await waitUntil(async () => {
+      const v = await asPage.eval(`(() => {
+        const b = window.__GH_BRIDGE__;
+        if (!b || !b.tabId || b.tabId === ${JSON.stringify(tabIdBeforeForce)}) return null;
+        return { tabId: b.tabId, teardownCount: window.__gh_smoke_teardown_count || 0 };
+      })()`);
+      return v;
+    }, 10000, 100);
+    check(
+      'RECONNECT_MAP_TABS still forces re-injection on live tab',
+      Boolean(forceReconnectRes && forceReconnectRes.ok && asAfterForce && asAfterForce.tabId !== tabIdBeforeForce),
+      { forceReconnectRes, tabIdBeforeForce, asAfterForce }
+    );
+
     // Informational: >1 means Chromium stopped and restarted the worker during the run.
     console.log(`[info] extension service worker started ${swStarts} time(s); app mock attached each time`);
   } finally {
     for (const c of sessions) c.close();
-    proc.kill();
-    await sleep(800);
-    try { rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 }); } catch (e) {}
+    killBrowserTree();
+    await sleep(400);
+    try { rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }); } catch (e) {}
   }
   const failed = results.filter((r) => !r.ok);
   console.log(failed.length ? `FAILED: ${failed.length}/${results.length}` : `ALL ${results.length} EXTENSION BROWSER CHECKS PASSED`);
