@@ -2790,7 +2790,7 @@ pub fn make_test_state_with_db(
     cli_lan_port: Option<u16>,
     custom_maps_db: Option<Arc<MultimapDb>>,
 ) -> Arc<AppState> {
-    make_test_state_full(root, cli_port, cli_lan_port, custom_maps_db, None)
+    make_test_state_full(root, cli_port, cli_lan_port, custom_maps_db, None, None)
 }
 
 #[cfg(test)]
@@ -2798,7 +2798,17 @@ pub fn make_test_state_with_capturer(
     root: &std::path::Path,
     capturer: Arc<dyn FrameCapturer>,
 ) -> Arc<AppState> {
-    make_test_state_full(root, None, None, None, Some(capturer))
+    make_test_state_full(root, None, None, None, Some(capturer), None)
+}
+
+/// Test state whose `guide_fetcher` is supplied by the test (e.g. with mocked `fetch_json` /
+/// `fetch_bytes` hooks), so Guide-card flows run without network access.
+#[cfg(test)]
+pub fn make_test_state_with_guide_fetcher(
+    root: &std::path::Path,
+    guide_fetcher: PinGuideFetcher,
+) -> Arc<AppState> {
+    make_test_state_full(root, None, None, None, None, Some(guide_fetcher))
 }
 
 #[cfg(test)]
@@ -2808,6 +2818,7 @@ fn make_test_state_full(
     cli_lan_port: Option<u16>,
     custom_maps_db: Option<Arc<MultimapDb>>,
     custom_capturer: Option<Arc<dyn FrameCapturer>>,
+    custom_guide_fetcher: Option<PinGuideFetcher>,
 ) -> Arc<AppState> {
     use gh_core::paths::RuntimeMode;
     use gh_net::sync_server::SyncServerConfig;
@@ -2952,7 +2963,8 @@ fn make_test_state_full(
         tray: Mutex::new(None),
         hotkey_mgr: Arc::new(UnifiedHotkeyManager::new(false, None)),
         conflict_advisor: Arc::new(HotkeyConflictAdvisor::new()),
-        guide_fetcher: PinGuideFetcher::new(Arc::new(get_language)),
+        guide_fetcher: custom_guide_fetcher
+            .unwrap_or_else(|| PinGuideFetcher::new(Arc::new(get_language))),
         label_catalog: HoYoLABLabelCatalog::new(),
         maps_db,
         affine_registry: PerMapAffineRegistry::new(),

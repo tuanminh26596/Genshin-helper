@@ -1885,6 +1885,163 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp_root);
     }
 
+    /// End-to-end over the real sync server: the user follows a locked HoYoLAB pin, closes the
+    /// HoYoLAB tab and opens AppSample while the app keeps running. The old target and lock must
+    /// go, the HUD must pick an AppSample pin, and its Guide card must come from AppSample's inline
+    /// image (no HoYoLAB lookup for the namespaced id) and name AppSample as the source.
+    #[tokio::test]
+    async fn switching_web_map_tabs_moves_target_and_guide_to_the_new_provider() {
+        use gh_net::pin_guide::{PinGuideConfig, PinGuideFetcher};
+        use std::sync::Mutex as StdMutex;
+        use std::time::{Duration, Instant};
+
+        const AS_IMG: &str = "https://game-cdn.appsample.com/gim/item-imgs/15130.jpg";
+        let seq_id = CB_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp_root = std::env::temp_dir().join(format!(
+            "gh_app_cb_tab_switch_guide_{}_{seq_id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_root);
+        std::fs::create_dir_all(&tmp_root).unwrap();
+
+        // Guide fetcher with mocked network: HoYoLAB point-info JSON and image bytes are recorded.
+        let json_urls: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let byte_urls: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let png = {
+            let mut buf = std::io::Cursor::new(Vec::new());
+            image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 120, 40, 255]))
+                .write_to(&mut buf, image::ImageFormat::Png)
+                .unwrap();
+            buf.into_inner()
+        };
+        let fetcher = PinGuideFetcher::with_config(PinGuideConfig {
+            fetch_json: Some({
+                let urls = Arc::clone(&json_urls);
+                Arc::new(move |url: &str| {
+                    urls.lock().unwrap().push(url.to_owned());
+                    Ok(json!({"retcode": 0, "data": {"info": {"content": "HoYoLAB tip", "img": ""}}}))
+                })
+            }),
+            fetch_bytes: Some({
+                let urls = Arc::clone(&byte_urls);
+                Arc::new(move |url: &str| {
+                    urls.lock().unwrap().push(url.to_owned());
+                    Ok(png.clone())
+                })
+            }),
+            ..Default::default()
+        });
+
+        let state = crate::state::make_test_state_with_guide_fetcher(&tmp_root, fetcher);
+        let cb = Arc::new(AppServerCallbacks::new(Arc::clone(&state)));
+        state
+            .server
+            .set_callbacks(Some(Arc::clone(&cb) as Arc<dyn ServerCallbacks>));
+        let port = state.server.start().await.expect("start sync server");
+        let post = |path: &'static str, body: Value| async move {
+            tokio::task::spawn_blocking(move || {
+                http_request(port, "POST", path, Some(&body.to_string()))
+            })
+            .await
+            .unwrap()
+        };
+        // Same per-tick step the tracking loop runs: compute guidance, then refresh the Guide card.
+        let tick_target = |state: &Arc<AppState>| {
+            let g = state.nav_controller.lock().unwrap().compute_guidance(
+                100.0, 200.5, Some(0.0), 2, None, false, "TRACKING", "",
+            );
+            state.ensure_guide(g.target.as_ref());
+            g.target
+        };
+        // Hang guard only; returns as soon as the async guide worker has filled the cache.
+        let wait_guide = |state: &Arc<AppState>, pin_id: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(g) = state.guide_fetcher.get_cached(pin_id, None) {
+                    return g;
+                }
+                assert!(Instant::now() < deadline, "guide for {pin_id} never arrived");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+
+        // 1. HoYoLAB tab is the owner; the user locks a HoYoLAB pin and opens its guide.
+        let (code, _) = post(
+            "/nearby_pins",
+            json!({
+                "tab_id": "hl_tab", "provider_id": "hoyolab", "tab_visible": true,
+                "tab_focused": true, "user_initiated": true, "map_id": 2,
+                "pins": [{"id": "107596", "name": "Chest", "lat": 100.0, "lng": 200.0, "map_id": 2}]
+            }),
+        )
+        .await;
+        assert_eq!(code, 200);
+        cb.on_nav_command(&json!({
+            "action": "lock_target",
+            "pin": {"id": "107596", "name": "Chest", "lat": 100.0, "lng": 200.0, "map_id": 2}
+        }))
+        .expect("lock HoYoLAB pin");
+        let t1 = tick_target(&state).expect("HoYoLAB target");
+        assert_eq!(t1.id, "107596");
+        assert_eq!(wait_guide(&state, "107596").description, "HoYoLAB tip");
+        let hoyolab_calls = json_urls.lock().unwrap().len();
+        assert!(hoyolab_calls > 0, "HoYoLAB pin guide comes from HoYoLAB");
+
+        // 2. The user closes the HoYoLAB tab and opens AppSample, which reports its nearby pins.
+        let (code, _) = post(
+            "/tab_visibility",
+            json!({"tab_id": "hl_tab", "visible": false, "closing": true, "provider_id": "hoyolab"}),
+        )
+        .await;
+        assert_eq!(code, 200);
+        let (code, _) = post(
+            "/nearby_pins",
+            json!({
+                "tab_id": "as_tab", "provider_id": "appsample", "tab_visible": true,
+                "tab_focused": true, "user_initiated": true, "map_id": 2,
+                "pins": [
+                    {"id": "appsample:15130", "name": "Book", "lat": 100.0, "lng": 200.3,
+                     "map_id": 2, "image_url": AS_IMG, "description": ""},
+                    {"id": "appsample:301", "name": "Anemoculus", "lat": 100.0, "lng": 202.0,
+                     "map_id": 2, "image_url": "", "description": ""}
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(code, 200);
+        assert_eq!(state.server.active_provider(), "appsample");
+        {
+            let nav = state.nav_controller.lock().unwrap();
+            assert!(nav.locked_target_pin().is_none(), "old HoYoLAB lock must be cleared");
+            assert!(nav.get_pin("107596").is_none(), "HoYoLAB pin must not survive the switch");
+        }
+
+        // 3. Next tick: the target and its Guide card come from AppSample.
+        let t2 = tick_target(&state).expect("AppSample target");
+        assert_eq!(t2.id, "appsample:15130");
+        assert_eq!(t2.image_url, AS_IMG);
+        let g2 = wait_guide(&state, "appsample:15130");
+        assert!(g2.ok, "inline AppSample guide must load: {g2:?}");
+        assert_eq!(g2.image_url, AS_IMG);
+        assert_eq!(
+            json_urls.lock().unwrap().len(),
+            hoyolab_calls,
+            "a namespaced AppSample pin must never trigger a HoYoLAB lookup: {:?}",
+            json_urls.lock().unwrap()
+        );
+        assert!(byte_urls.lock().unwrap().iter().any(|u| u == AS_IMG));
+        assert_eq!(gh_hud::nav_hud::guide_source_name(&t2.id), "AppSample");
+
+        state.server.set_callbacks(None);
+        state.server.stop().await;
+        state.nav_hud.close();
+        state.hud_toast.close();
+        state.guide_fetcher.stop();
+        state.audio.close();
+        state.capturer.close();
+        let _ = std::fs::remove_dir_all(&tmp_root);
+    }
+
     #[allow(dead_code)]
     fn _ensure_diag_import(_: &DiagnosticManager) {}
 }
