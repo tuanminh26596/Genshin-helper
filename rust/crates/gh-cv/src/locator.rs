@@ -583,20 +583,26 @@ struct TrackingState {
     last_map_id: Option<i32>,
 }
 
-pub struct MapLocator {
-    db: Arc<MultimapDb>,
+struct LocatorSharedAssets {
     map_order: Vec<i32>,
     area_names_map: BTreeMap<i32, String>,
     area_bboxes: HashMap<(i32, Option<i32>), [f64; 4]>,
     edge_indices: HashMap<i32, MapSpatialIndex>,
     underground_groups: Vec<PointGroupEntry>,
     cave_masks: HashMap<String, CaveBitMask>,
-    terrain_data: BTreeMap<i32, Arc<TerrainRaster>>,
     terrain_npz_path: Option<PathBuf>,
     lazy_terrain_map_ids: HashSet<i32>,
+    ui_anchors: HashMap<String, Array3<u8>>,
+    initial_floor_label_index: HashMap<(i32, String), String>,
+    submap_terrain_cache: Mutex<HashMap<i32, Arc<TerrainRaster>>>,
+}
+
+pub struct MapLocator {
+    db: Arc<MultimapDb>,
+    shared: Arc<LocatorSharedAssets>,
+    terrain_data: BTreeMap<i32, Arc<TerrainRaster>>,
     lazy_terrain_slot: Mutex<Option<(i32, Arc<TerrainRaster>)>>,
     lazy_terrain_disabled: bool,
-    ui_anchors: HashMap<String, Array3<u8>>,
     elev_tpl_cache: Mutex<HashMap<usize, [Array3<u8>; 4]>>,
     floor_label_index: Mutex<HashMap<(i32, String), String>>,
     ocr: Option<Arc<dyn OcrProvider>>,
@@ -1141,20 +1147,40 @@ impl MapLocator {
 
         Self {
             db: Arc::new(db),
-            map_order,
-            area_names_map,
-            area_bboxes,
-            edge_indices,
-            underground_groups,
-            cave_masks,
+            shared: Arc::new(LocatorSharedAssets {
+                map_order,
+                area_names_map,
+                area_bboxes,
+                edge_indices,
+                underground_groups,
+                cave_masks,
+                terrain_npz_path,
+                lazy_terrain_map_ids,
+                ui_anchors,
+                initial_floor_label_index: floor_label_index.clone(),
+                submap_terrain_cache: Mutex::new(HashMap::new()),
+            }),
             terrain_data,
-            terrain_npz_path,
-            lazy_terrain_map_ids,
             lazy_terrain_slot: Mutex::new(None),
             lazy_terrain_disabled: false,
-            ui_anchors,
             elev_tpl_cache: Mutex::new(HashMap::new()),
             floor_label_index: Mutex::new(floor_label_index),
+            ocr,
+            tracking: Mutex::new(TrackingState::default()),
+        }
+    }
+
+    /// Creates an isolated per-session [`MapLocator`] sharing read-only datasets (`Arc`)
+    /// with fresh per-session tracking state, caches, and optional OCR provider.
+    pub fn clone_for_session(&self, ocr: Option<Arc<dyn OcrProvider>>) -> Self {
+        Self {
+            db: Arc::clone(&self.db),
+            shared: Arc::clone(&self.shared),
+            terrain_data: self.terrain_data.clone(),
+            lazy_terrain_slot: Mutex::new(None),
+            lazy_terrain_disabled: self.lazy_terrain_disabled,
+            elev_tpl_cache: Mutex::new(HashMap::new()),
+            floor_label_index: Mutex::new(self.shared.initial_floor_label_index.clone()),
             ocr,
             tracking: Mutex::new(TrackingState::default()),
         }
@@ -1182,7 +1208,7 @@ impl MapLocator {
 
     pub fn has_terrain_for_map(&self, map_id: i32) -> bool {
         self.terrain_data.contains_key(&map_id)
-            || (!self.lazy_terrain_disabled && self.lazy_terrain_map_ids.contains(&map_id))
+            || (!self.lazy_terrain_disabled && self.shared.lazy_terrain_map_ids.contains(&map_id))
     }
 
     pub fn terrain_map_count(&self) -> usize {
@@ -1190,7 +1216,7 @@ impl MapLocator {
             self.terrain_data.len()
         } else {
             let mut count = self.terrain_data.len();
-            for mid in &self.lazy_terrain_map_ids {
+            for mid in &self.shared.lazy_terrain_map_ids {
                 if !self.terrain_data.contains_key(mid) {
                     count += 1;
                 }
@@ -1203,7 +1229,7 @@ impl MapLocator {
         if let Some(raster) = self.terrain_data.get(&map_id) {
             return Some(Arc::clone(raster));
         }
-        if self.lazy_terrain_disabled || !self.lazy_terrain_map_ids.contains(&map_id) {
+        if self.lazy_terrain_disabled || !self.shared.lazy_terrain_map_ids.contains(&map_id) {
             return None;
         }
         if let Ok(guard) = self.lazy_terrain_slot.lock()
@@ -1212,11 +1238,22 @@ impl MapLocator {
         {
             return Some(Arc::clone(raster));
         }
-        let npz_path = self.terrain_npz_path.as_ref()?;
+        if let Ok(guard) = self.shared.submap_terrain_cache.lock()
+            && let Some(raster) = guard.get(&map_id)
+        {
+            if let Ok(mut slot) = self.lazy_terrain_slot.lock() {
+                *slot = Some((map_id, Arc::clone(raster)));
+            }
+            return Some(Arc::clone(raster));
+        }
+        let npz_path = self.shared.terrain_npz_path.as_ref()?;
         if !npz_path.is_file() {
             return None;
         }
         let raster = load_single_terrain_raster_from_file(npz_path, map_id)?;
+        if let Ok(mut shared_guard) = self.shared.submap_terrain_cache.lock() {
+            shared_guard.entry(map_id).or_insert_with(|| Arc::clone(&raster));
+        }
         if let Ok(mut guard) = self.lazy_terrain_slot.lock() {
             *guard = Some((map_id, Arc::clone(&raster)));
         }
@@ -1232,15 +1269,15 @@ impl MapLocator {
     }
 
     pub fn area_names_map(&self) -> &BTreeMap<i32, String> {
-        &self.area_names_map
+        &self.shared.area_names_map
     }
 
     pub fn cave_masks(&self) -> &HashMap<String, CaveBitMask> {
-        &self.cave_masks
+        &self.shared.cave_masks
     }
 
     pub fn ui_anchors(&self) -> &HashMap<String, Array3<u8>> {
-        &self.ui_anchors
+        &self.shared.ui_anchors
     }
 
     pub fn has_ocr(&self) -> bool {
@@ -1323,11 +1360,11 @@ impl MapLocator {
         floor_name: Option<&str>,
         is_underground: bool,
     ) -> f64 {
-        if !is_underground || self.underground_groups.is_empty() {
+        if !is_underground || self.shared.underground_groups.is_empty() {
             return 0.0;
         }
         let clean_floor = floor_name.unwrap_or("").trim().to_ascii_uppercase();
-        for g in &self.underground_groups {
+        for g in &self.shared.underground_groups {
             for fl in &g.floors {
                 let Some(ov) = &fl.overlay else {
                     continue;
@@ -1598,10 +1635,10 @@ impl MapLocator {
     }
 
     fn get_elev_templates(&self, scale_ui: f64) -> Option<[Array3<u8>; 4]> {
-        let ma = self.ui_anchors.get("tpl_ma")?;
-        let mi = self.ui_anchors.get("tpl_mi")?;
-        let la = self.ui_anchors.get("tpl_la")?;
-        let li = self.ui_anchors.get("tpl_li")?;
+        let ma = self.shared.ui_anchors.get("tpl_ma")?;
+        let mi = self.shared.ui_anchors.get("tpl_mi")?;
+        let la = self.shared.ui_anchors.get("tpl_la")?;
+        let li = self.shared.ui_anchors.get("tpl_li")?;
         let sz = ((24.0 * scale_ui).round_ties_even() as isize).max(12) as usize;
         if let Ok(guard) = self.elev_tpl_cache.lock()
             && let Some(hit) = guard.get(&sz)
@@ -2984,7 +3021,7 @@ impl MapLocator {
         if n_cands < 2 || allowed_wp_indices.len() < 2 {
             return None;
         }
-        let edge_idx = self.edge_indices.get(&map_id)?;
+        let edge_idx = self.shared.edge_indices.get(&map_id)?;
         if edge_idx.angles.is_empty() {
             return None;
         }
@@ -3636,9 +3673,10 @@ impl MapLocator {
             (lp.0 - 1600.0, lp.0 + 1600.0, lp.1 - 1600.0, lp.1 + 1600.0)
         } else {
             let bb = self
+                .shared
                 .area_bboxes
                 .get(&(map_id, target_area_id))
-                .or_else(|| self.area_bboxes.get(&(map_id, None)))?;
+                .or_else(|| self.shared.area_bboxes.get(&(map_id, None)))?;
             (bb[0] - 700.0, bb[1] + 700.0, bb[2] - 700.0, bb[3] + 700.0)
         };
 
@@ -3772,7 +3810,8 @@ impl MapLocator {
         {
             m.point_groups.iter().collect()
         } else {
-            self.underground_groups
+            self.shared
+                .underground_groups
                 .iter()
                 .filter(|g| g.map_id == map_id || g.map_id == 0)
                 .collect()
@@ -3842,7 +3881,7 @@ impl MapLocator {
                 };
                 let (min_lng, max_lng, min_lat, max_lat) = ov.bounds();
                 let mask_key = format!("{map_id}_{}_{}", g.id, fl.id);
-                let alpha = self.cave_masks.get(&mask_key);
+                let alpha = self.shared.cave_masks.get(&mask_key);
 
                 let span_x = ov.r_x - ov.l_x;
                 let span_y = ov.r_y - ov.l_y;
@@ -4300,7 +4339,7 @@ impl MapLocator {
             && target_map_id.is_none()
             && target_area_id.is_none()
         {
-            for &mid in &self.map_order {
+            for &mid in &self.shared.map_order {
                 if mid == 2 {
                     continue;
                 }
@@ -4501,7 +4540,8 @@ impl MapLocator {
                 }
                 if let Some(aid) = area_id {
                     area_name = Some(
-                        self.area_names_map
+                        self.shared
+                            .area_names_map
                             .get(&aid)
                             .cloned()
                             .unwrap_or_else(|| format!("Area {aid}")),
@@ -6872,6 +6912,48 @@ mod tests {
             t_vec[0],
             t_vec[1]
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn clone_for_session_shares_readonly_datasets_and_isolates_tracking() {
+        let base = make_temp_dir("clone_sess");
+        let mm_path = base.join("multimap.json");
+        std::fs::write(
+            &mm_path,
+            r#"{"version":"4.0.0","maps":{"2":{"id":2,"name":"Teyvat","waypoints":[]}}}"#,
+        )
+        .unwrap();
+        let template = MapLocator::with_paths(
+            LocatorPaths {
+                db_path: Some(mm_path),
+                terrain_npz_path: Some(base.join("absent_t.npz")),
+                cave_masks_npz_path: Some(base.join("absent_c.npz")),
+                ui_anchors_npz_path: Some(base.join("absent_u.npz")),
+                legacy_underground_db_path: Some(base.join("absent_ug.json")),
+            },
+            None,
+        );
+        let sess_a = template.clone_for_session(Some(Arc::new(FixedOcrProvider("Fontaine"))));
+        let sess_b = template.clone_for_session(None);
+
+        assert!(Arc::ptr_eq(&sess_a.multimap_db_arc(), &template.multimap_db_arc()));
+        assert!(Arc::ptr_eq(&sess_b.multimap_db_arc(), &template.multimap_db_arc()));
+        assert!(Arc::ptr_eq(&sess_a.shared, &sess_b.shared));
+        assert!(sess_a.has_ocr());
+        assert!(!sess_b.has_ocr());
+
+        {
+            let mut g = sess_a.tracking.lock().unwrap();
+            g.last_known_pos = Some((123.0, 456.0));
+            g.last_map_id = Some(2);
+        }
+        assert_eq!(sess_a.last_known_pos(), Some((123.0, 456.0)));
+        assert_eq!(sess_a.last_map_id(), Some(2));
+        assert_eq!(sess_b.last_known_pos(), None);
+        assert_eq!(sess_b.last_map_id(), None);
+        assert_eq!(template.last_known_pos(), None);
 
         let _ = std::fs::remove_dir_all(&base);
     }

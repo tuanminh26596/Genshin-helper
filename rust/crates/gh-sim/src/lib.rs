@@ -6,6 +6,7 @@ pub mod compositor;
 pub mod frames;
 pub mod import_diag;
 pub mod qa;
+pub mod qa_cache;
 pub mod replay;
 pub mod scenario;
 pub mod timeline;

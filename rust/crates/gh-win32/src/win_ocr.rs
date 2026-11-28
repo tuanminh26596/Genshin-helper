@@ -7,14 +7,26 @@ use gh_core::traits::OcrProvider;
 use gh_core::{CoreError, CoreResult};
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use windows::Globalization::Language;
 use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Security::Cryptography::CryptographicBuffer;
 use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
+use windows::Win32::System::Com::CoIncrementMTAUsage;
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 use windows::core::HSTRING;
+
+static PROCESS_MTA_ANCHOR: OnceLock<()> = OnceLock::new();
+
+fn anchor_process_mta() {
+    PROCESS_MTA_ANCHOR.get_or_init(|| {
+        // SAFETY: Process-lifetime MTA usage increment (`CO_MTA_USAGE_COOKIE` intentionally kept for
+        // process exit). `windows-rs`'s global `FactoryCache` holds `'static` activation-factory
+        // pointers that become dangling if worker-thread `RoUninitialize()` drops MTA refcount to 0.
+        let _ = unsafe { CoIncrementMTAUsage() };
+    });
+}
 
 struct WinRtApartmentGuard {
     should_uninit: bool,
@@ -53,6 +65,7 @@ thread_local! {
 
 /// Ensures WinRT is initialized on the calling thread with an RAII `RoUninitialize` guard.
 pub fn ensure_winrt_initialized() -> CoreResult<()> {
+    anchor_process_mta();
     WINRT_APARTMENT.with(|cell| {
         if cell.borrow().is_none() {
             let guard = WinRtApartmentGuard::init()?;
@@ -758,5 +771,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn scoped_worker_threads_do_not_invalidate_winrt_factory_cache() {
+        // Initialize WinRT ONLY inside scoped worker threads first, let those threads exit
+        // (dropping their thread-local RoUninitialize guards), and then create/use WinRT OCR
+        // on the main thread (nextest isolates each test into its own process).
+        let blank = FrameBuf::new_zeroed(64, 32, PixelFormat::Bgr8);
+        let mut any_available = false;
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..2 {
+                handles.push(scope.spawn(|| {
+                    if let Ok(svc) = WindowsOcrService::try_new() {
+                        let _ = svc.recognize_text(blank.as_view()).unwrap();
+                        return true;
+                    }
+                    false
+                }));
+            }
+            for h in handles {
+                any_available |= h.join().expect("OCR worker panicked");
+            }
+        });
+        if !any_available {
+            return;
+        }
+        let main_svc = WindowsOcrService::try_new().expect("main-thread WinRT OCR after worker exit");
+        assert_eq!(main_svc.recognize_text(blank.as_view()).unwrap(), "");
     }
 }

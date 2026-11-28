@@ -127,6 +127,8 @@ function Parse-ExtraArgs {
     param([object[]]$RawArgs = @())
 
     $qaOnlyList = New-Object System.Collections.Generic.List[string]
+    $qaJobs = 0
+    $qaNoCache = $false
     $i = 0
     while ($i -lt $RawArgs.Count) {
         $token = [string]$RawArgs[$i]
@@ -165,11 +167,40 @@ function Parse-ExtraArgs {
             $i += 2
             continue
         }
+        if ($token -match '^(?i)-QaJobs:(.+)$') {
+            $parsedJobs = 0
+            if (-not [int]::TryParse($Matches[1].Trim(), [ref]$parsedJobs) -or $parsedJobs -lt 1) {
+                throw "Invalid value for -QaJobs: $($Matches[1]) (expected positive integer)"
+            }
+            $qaJobs = $parsedJobs
+            $i++
+            continue
+        }
+        if ($token -ieq '-QaJobs') {
+            if (($i + 1) -ge $RawArgs.Count) {
+                throw 'Missing value for parameter -QaJobs.'
+            }
+            $parsedJobs = 0
+            $rawVal = [string]$RawArgs[$i + 1]
+            if (-not [int]::TryParse($rawVal.Trim(), [ref]$parsedJobs) -or $parsedJobs -lt 1) {
+                throw "Invalid value for -QaJobs: $rawVal (expected positive integer)"
+            }
+            $qaJobs = $parsedJobs
+            $i += 2
+            continue
+        }
+        if ($token -ieq '-QaNoCache') {
+            $qaNoCache = $true
+            $i++
+            continue
+        }
         throw "Unknown argument: $token"
     }
 
     return [PSCustomObject]@{
-        QaOnly = @($qaOnlyList.ToArray())
+        QaOnly    = @($qaOnlyList.ToArray())
+        QaJobs    = $qaJobs
+        QaNoCache = $qaNoCache
     }
 }
 
@@ -292,17 +323,32 @@ function Select-CheckPlan {
             $_ -like 'tests/blackbox_contracts/*'
         }
     )
+    # Files replay never executes: the binary entry point and the config watcher (main.rs only),
+    # the minimap recorder (replay leaves AppState::minimap_recorder None), the cross-map
+    # importer, and the translator (toast text only; nextest covers it). diagnostics.rs,
+    # log_buffer.rs and updater.rs stay in: replay builds a DiagnosticManager, reads diagnostic
+    # bundles, replays Alt+F12 and constructs AppUpdater. Keep every other file enabled.
+    $qaExcludedPaths = @(
+        'rust/crates/gh-app/src/config_watcher.rs'
+        'rust/crates/gh-app/src/main.rs'
+        'rust/crates/gh-app/src/minimap_recorder.rs'
+        'rust/crates/gh-core/src/cross_map_import.rs'
+        'rust/crates/gh-core/src/i18n.rs'
+    )
     $qaMatches = @(
         $paths | Where-Object {
-            $_ -like 'rust/crates/gh-cv/*' -or
-            $_ -like 'rust/crates/gh-core/*' -or
-            $_ -like 'rust/crates/gh-app/*' -or
-            $_ -like 'rust/crates/gh-sim/*' -or
-            $_ -like 'rust/crates/gh-net/src/hd_assets*' -or
-            $_ -eq 'assets/zoom_thumb_template.png' -or
-            $_ -eq 'tests/qa_baseline.json' -or
-            $_ -eq 'tests/verified_gt.json' -or
-            $_ -like 'tests/scenarios/*'
+            ($_ -notin $qaExcludedPaths) -and (
+                $_ -like 'rust/crates/gh-cv/*' -or
+                $_ -like 'rust/crates/gh-core/*' -or
+                $_ -like 'rust/crates/gh-app/*' -or
+                $_ -like 'rust/crates/gh-sim/*' -or
+                $_ -like 'rust/crates/gh-net/src/hd_assets*' -or
+                $_ -eq 'rust/crates/gh-win32/src/win_ocr.rs' -or
+                $_ -eq 'assets/zoom_thumb_template.png' -or
+                $_ -eq 'tests/qa_baseline.json' -or
+                $_ -eq 'tests/verified_gt.json' -or
+                $_ -like 'tests/scenarios/*'
+            )
         }
     )
     $webBenchRecommendMatches = @(
@@ -999,6 +1045,8 @@ function Build-RealExecutors {
         [object]$EnvInfo,
         [string]$MergeBase,
         [string[]]$QaOnly = @(),
+        [int]$QaJobs = 0,
+        [switch]$QaNoCache,
         [switch]$AllowBaselineChange
     )
 
@@ -1199,6 +1247,13 @@ function Build-RealExecutors {
                 $qaArgs.Add('--only')
                 $qaArgs.Add($sess)
             }
+            if ($QaJobs -gt 0) {
+                $qaArgs.Add('--jobs')
+                $qaArgs.Add([string]$QaJobs)
+            }
+            if ($QaNoCache) {
+                $qaArgs.Add('--no-cache')
+            }
             $bin = Invoke-LockedBuildAndCopy -RepoRoot $repoRoot -Label 'qa' -RelativeExes @('cv-bench\gh-sim.exe') `
                 -BuildArgs @('build', '-q', '--manifest-path', $manifestPath, '--profile', 'cv-bench', '-p', 'gh-sim')
             if ($bin.ExitCode -ne 0) {
@@ -1363,6 +1418,96 @@ function Invoke-SelfTest {
             RecWb    = $true
         }
         @{
+            Name     = 'rust/crates/gh-app/src/state.rs (kept in qa) -> clippy, nextest, blackbox, qa'
+            Paths    = @('rust/crates/gh-app/src/state.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'blackbox', 'qa')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-app/src/tracking_stack.rs (kept in qa) -> clippy, nextest, blackbox, qa'
+            Paths    = @('rust/crates/gh-app/src/tracking_stack.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'blackbox', 'qa')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-app/src/mmap_view.rs (kept in qa) -> clippy, nextest, blackbox, qa'
+            Paths    = @('rust/crates/gh-app/src/mmap_view.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'blackbox', 'qa')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-app/src/session_recorder.rs (kept in qa) -> clippy, nextest, blackbox, qa'
+            Paths    = @('rust/crates/gh-app/src/session_recorder.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'blackbox', 'qa')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-app/src/diagnostics.rs (kept in qa: on the replay path) -> clippy, nextest, blackbox, qa'
+            Paths    = @('rust/crates/gh-app/src/diagnostics.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'blackbox', 'qa')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-app/src/config_watcher.rs (qa-excluded) -> clippy, nextest, blackbox (no qa)'
+            Paths    = @('rust/crates/gh-app/src/config_watcher.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'blackbox')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-app/src/log_buffer.rs (kept in qa: on the replay path) -> clippy, nextest, blackbox, qa'
+            Paths    = @('rust/crates/gh-app/src/log_buffer.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'blackbox', 'qa')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-app/src/main.rs (qa-excluded) -> clippy, nextest, blackbox (no qa)'
+            Paths    = @('rust/crates/gh-app/src/main.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'blackbox')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-app/src/minimap_recorder.rs (qa-excluded) -> clippy, nextest, blackbox (no qa)'
+            Paths    = @('rust/crates/gh-app/src/minimap_recorder.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'blackbox')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-app/src/updater.rs (kept in qa: on the replay path) -> clippy, nextest, blackbox, qa'
+            Paths    = @('rust/crates/gh-app/src/updater.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'blackbox', 'qa')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-core/src/cross_map_import.rs (qa-excluded) -> clippy, nextest (no qa)'
+            Paths    = @('rust/crates/gh-core/src/cross_map_import.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-core/src/i18n.rs (qa-excluded locale-only) -> clippy, nextest (no qa)'
+            Paths    = @('rust/crates/gh-core/src/i18n.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'assets/locales/vi.json (locale-only) -> ext-i18n, clippy, nextest (no qa)'
+            Paths    = @('assets/locales/vi.json')
+            Expected = @('guards', 'audit', 'ext-i18n', 'clippy', 'nextest')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-core/src/nav_controller.rs (kept in qa) -> clippy, nextest, qa'
+            Paths    = @('rust/crates/gh-core/src/nav_controller.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'qa')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'rust/crates/gh-win32/src/win_ocr.rs (replay reads map names by OCR) -> clippy, nextest, qa'
+            Paths    = @('rust/crates/gh-win32/src/win_ocr.rs')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'qa')
+            RecWb    = $false
+        }
+        @{
             Name     = 'tests/test_blackbox_contracts.py -> blackbox'
             Paths    = @('tests/test_blackbox_contracts.py')
             Expected = @('guards', 'audit', 'blackbox')
@@ -1483,9 +1628,13 @@ function Invoke-SelfTest {
     $explicitPlGot = (@($explicitPlPlan.Plan | Where-Object { $_.Selected } | ForEach-Object { $_.Name }) -join ',')
     Assert-True ($explicitPlGot -eq 'guards,multimap-unit,provider-fixtures,provider-live') "explicit -Checks preserves multimap/provider order: got=[$explicitPlGot]"
 
-    # Extra args parser for repeatable -QaOnly
-    $parsedExtra = Parse-ExtraArgs -RawArgs @('-QaOnly', 'sess_A', '-QaOnly', 'sess_B,sess_C', '-QaOnly:sess_D')
+    # Extra args parser for repeatable -QaOnly, -QaJobs, -QaNoCache
+    $parsedExtra = Parse-ExtraArgs -RawArgs @('-QaOnly', 'sess_A', '-QaOnly', 'sess_B,sess_C', '-QaOnly:sess_D', '-QaJobs', '4', '-QaNoCache')
     Assert-True (($parsedExtra.QaOnly -join ',') -eq 'sess_A,sess_B,sess_C,sess_D') "Parse-ExtraArgs repeatable -QaOnly: got=[$($parsedExtra.QaOnly -join ',')]"
+    Assert-True ($parsedExtra.QaJobs -eq 4) "Parse-ExtraArgs -QaJobs: got=$($parsedExtra.QaJobs)"
+    Assert-True ($parsedExtra.QaNoCache -eq $true) "Parse-ExtraArgs -QaNoCache: got=$($parsedExtra.QaNoCache)"
+    $parsedExtraColon = Parse-ExtraArgs -RawArgs @('-QaJobs:2')
+    Assert-True ($parsedExtraColon.QaJobs -eq 2 -and (-not $parsedExtraColon.QaNoCache)) "Parse-ExtraArgs -QaJobs:2: got jobs=$($parsedExtraColon.QaJobs) nocache=$($parsedExtraColon.QaNoCache)"
 
     # 2. Guards evaluation tests
     $gClean = Evaluate-Guards -RustTargetExists $false -BaseIgnoreCount 26 -CurrentIgnoreCount 26 -ChangedBaselineFiles @()
@@ -1622,6 +1771,8 @@ function Invoke-SelfTest {
 try {
     $extra = Parse-ExtraArgs -RawArgs $args
     $qaOnlyList = @($extra.QaOnly)
+    $qaJobs = [int]$extra.QaJobs
+    $qaNoCache = [bool]$extra.QaNoCache
     $explicitChecks = @(Normalize-CheckNames -RawChecks $Checks)
 } catch {
     [Console]::Error.WriteLine("[check.ps1] ERROR: $($_.Exception.Message)")
@@ -1708,6 +1859,8 @@ try {
         -EnvInfo $envInfo `
         -MergeBase $mergeBase `
         -QaOnly $qaOnlyList `
+        -QaJobs $qaJobs `
+        -QaNoCache:$qaNoCache `
         -AllowBaselineChange:$AllowBaselineChange
 
     $notices = if ($null -ne $recommendLine) { @($recommendLine) } else { @() }

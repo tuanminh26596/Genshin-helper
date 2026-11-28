@@ -224,6 +224,21 @@ fn collect_generic_gpu_adapters() -> Vec<String> {
     filter_gpu_adapter_names(raw)
 }
 
+/// Queries total and currently available physical system RAM in MiB via `GlobalMemoryStatusEx`.
+pub fn query_system_memory_mb() -> Option<(u64, u64)> {
+    let mut mem = MEMORYSTATUSEX {
+        dwLength: size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `mem.dwLength` is initialized to `size_of::<MEMORYSTATUSEX>()`.
+    if unsafe { GlobalMemoryStatusEx(&mut mem) }.is_ok() {
+        const MIB: u64 = 1024 * 1024;
+        Some((mem.ullTotalPhys / MIB, mem.ullAvailPhys / MIB))
+    } else {
+        None
+    }
+}
+
 /// Collects non-PII Windows OS version/build, logical CPU count, rounded RAM GB, and generic GPU names.
 pub fn collect_os_env_info() -> OsEnvInfo {
     let nt_key = w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
@@ -661,5 +676,12 @@ mod tests {
         assert_eq!(dpi_to_scale_pct(120), 125);
         assert_eq!(dpi_to_scale_pct(144), 150);
         assert_eq!(dpi_to_scale_pct(192), 200);
+    }
+
+    #[test]
+    fn query_system_memory_mb_reports_valid_bounds() {
+        let (total, avail) = query_system_memory_mb().expect("GlobalMemoryStatusEx");
+        assert!(total >= 512, "unexpected total_mb={total}");
+        assert!(avail <= total, "avail_mb={avail} > total_mb={total}");
     }
 }

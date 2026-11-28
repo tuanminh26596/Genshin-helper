@@ -5,25 +5,37 @@
 //! `tests/qa_baseline.json`). Metrics against legacy `meta.jsonl` are printed and
 //! recorded for reference only — never used for pass/fail grading.
 
+use crate::qa_cache::{
+    SessionInputFingerprint, build_run_env_fingerprint, build_session_input_fingerprint,
+    compute_session_engine_unchanged, default_qa_cache_dir, load_cached_scenario,
+    load_cached_session, scenario_cache_key, session_cache_key, store_cached_scenario,
+    store_cached_session,
+};
 use crate::replay::{
-    DEFAULT_DRIFT_THRESHOLD_W, ObservedFrame, RecordingFidelityReport, ReplayOptions, ReplayReport,
-    angle_diff_deg, percentile, round3, run_replay_with_hook,
+    DEFAULT_DRIFT_THRESHOLD_W, ObservedFrame, RecordingFidelityReport, ReplayFullOutput,
+    ReplayOptions, ReplayReport, ReplaySharedContext, TempSandboxDir, angle_diff_deg, percentile,
+    resolve_current_git_commit_and_root, resolve_replay_data_dir, round3,
+    run_replay_with_context, run_replay_with_hook,
 };
 use crate::scenario::{
-    DEFAULT_SCENARIOS_DIR, ScenarioResult, ScenarioSummary, format_scenario_line,
-    load_scenarios_from_dir, run_scenario,
+    DEFAULT_SCENARIOS_DIR, ScenarioFile, ScenarioResult, ScenarioSummary, format_scenario_line,
+    load_scenarios_from_dir, run_scenario, run_scenario_with_context,
 };
 use crate::timeline::InputReplayReport;
 use crate::truth_oracle::{TruthSummary, evaluate_truth_oracle, format_truth_col};
+use crate::verified_gt::VerifiedGtFile;
 use gh_app::BUILD_GIT_COMMIT;
+use gh_app::tracking_stack::SharedTrackingAssets;
 use gh_core::atomic_io::{write_bytes_atomic, write_json_atomic};
-use gh_core::provenance::ReplayProvenance;
+use gh_core::provenance::{DatasetFingerprint, ReplayProvenance, fingerprint_data_dir};
 use gh_core::sha256::sha256_file;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub const QA_BASELINE_SCHEMA_VERSION: u32 = 1;
@@ -233,6 +245,14 @@ pub struct QaOptions {
     pub out_dir: Option<PathBuf>,
     pub bless: bool,
     pub overrides: QaThresholdOverrides,
+    /// Worker pool size (`None` = auto from CPU/RAM, `Some(1)` = original serial path).
+    pub jobs: Option<usize>,
+    /// Disable input-keyed disk result cache for this run.
+    pub no_cache: bool,
+    /// Optional override directory for the QA disk cache.
+    pub cache_dir: Option<PathBuf>,
+    /// Optional directory where per-session `<session>.jsonl` `ObservedFrame` poses are written.
+    pub dump_poses_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -1391,8 +1411,425 @@ pub fn format_qa_row(r: &QaSessionResult) -> String {
     )
 }
 
+/// Computes bounded worker count from logical CPU count, available/total RAM (MiB), and work items.
+pub fn compute_auto_jobs(
+    logical_cpus: usize,
+    avail_ram_mb: Option<u64>,
+    total_ram_mb: Option<u64>,
+    work_items: usize,
+) -> usize {
+    let cpus = logical_cpus.max(1);
+    let cpu_bound = (cpus / 3).clamp(1, 12);
+    let ram_budget_mb = match (avail_ram_mb, total_ram_mb) {
+        (Some(avail), Some(total)) => avail.min((total * 3) / 4),
+        (Some(avail), None) => avail,
+        (None, Some(total)) => (total * 3) / 4,
+        (None, None) => 8192,
+    };
+    let mem_bound = (ram_budget_mb.saturating_sub(2048) / 768).max(1) as usize;
+    cpu_bound.min(mem_bound).clamp(1, work_items.max(1))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_session_result(
+    sdir: &Path,
+    session_name: String,
+    codec: String,
+    color_safe: bool,
+    replay_out: ReplayFullOutput,
+    opts: &QaOptions,
+    eff_thresholds: &QaThresholds,
+    baseline_session: Option<&QaBaselineSession>,
+) -> Result<(QaSessionResult, Option<QaBaselineSession>), String> {
+    let report = replay_out.report;
+    let poses = replay_out.observed;
+    if let Some(ref dump_dir) = opts.dump_poses_dir {
+        std::fs::create_dir_all(dump_dir)
+            .map_err(|e| format!("failed to create --dump-poses-dir {}: {e}", dump_dir.display()))?;
+        let dump_path = dump_dir.join(format!("{session_name}.jsonl"));
+        write_blessed_poses_atomic(&dump_path, &poses)?;
+    }
+
+    let session_truth = Some(evaluate_truth_oracle(
+        &poses,
+        &report.accuracy,
+        &replay_out.truth_meta,
+    ));
+    let meta_ref = meta_ref_from_report(&report);
+    let replay_heading_stability = compute_observed_heading_stability(&poses);
+    let meta_path = sdir.join("meta.jsonl");
+    let live_meta_heading_stability = load_live_meta_heading_stability(&meta_path);
+    let live_mmap_latency = load_live_mmap_latency(&meta_path);
+    let session_prov = report.provenance.clone();
+    let session_fidelity = report.recording_fidelity.clone();
+    let session_input_replay = Some(report.input_replay.clone());
+    let prov_cur_commit = session_prov
+        .current_commit
+        .as_deref()
+        .unwrap_or(BUILD_GIT_COMMIT);
+    let mut prov_notes = provenance_notes(Some(&session_prov), prov_cur_commit);
+    if report.input_replay.nav_carried_over_mismatches > 0 {
+        prov_notes.push(format!(
+            "nav carried-over pre-web: {} frames (legacy recording without initial_state)",
+            report.input_replay.nav_carried_over_mismatches
+        ));
+    }
+    let blessed_path = sdir.join(BLESSED_POSES_FILENAME);
+
+    if opts.bless {
+        let sha256 = write_blessed_poses_atomic(&blessed_path, &poses)?;
+        let tracking_frames = poses
+            .iter()
+            .filter(|p| {
+                p.world_x.is_some_and(f64::is_finite) && p.world_y.is_some_and(f64::is_finite)
+            })
+            .count();
+        let entry = QaBaselineSession {
+            blessed_poses_sha256: sha256,
+            frames: poses.len(),
+            codec: codec.clone(),
+            color_safe,
+            tracking_frames,
+            map_m_synced_count: report.post_tick.map_m_synced_count,
+            mmap_view_frames: report.post_tick.mmap_view_frames,
+            mmap_view_acquired: report.post_tick.mmap_view_acquired,
+            mmap_view_drawer_open: report.post_tick.mmap_view_drawer_open,
+            meta_ref_p95_pos_delta_w: meta_ref.p95_pos_delta_w,
+            meta_ref_max_pos_delta_w: meta_ref.max_pos_delta_w,
+            meta_ref_over_threshold: meta_ref.over_threshold_frames,
+        };
+
+        let self_cmp =
+            compare_poses_against_blessed(&poses, &poses, eff_thresholds.pos_threshold_w);
+        let mut reasons = Vec::new();
+        if report.offline_assets.hd_downloads > 0 {
+            reasons.push(format!(
+                "offline leak: hd_downloads={}",
+                report.offline_assets.hd_downloads
+            ));
+        }
+        let passed = reasons.is_empty();
+        let notes = prov_notes;
+        let res = QaSessionResult {
+            session_name,
+            passed,
+            status: if passed {
+                "BLESSED".to_owned()
+            } else {
+                "KHÔNG ĐẠT".to_owned()
+            },
+            reason: if passed {
+                if notes.is_empty() {
+                    "blessed ok".to_owned()
+                } else {
+                    format!("blessed ok ({})", notes.join("; "))
+                }
+            } else {
+                reasons.join("; ")
+            },
+            reasons,
+            notes,
+            frames: report.performance.frames_processed,
+            codec,
+            color_safe,
+            wall_elapsed_s: report.performance.wall_elapsed_s,
+            effective_fps: report.performance.effective_fps,
+            hd_downloads: report.offline_assets.hd_downloads,
+            map_m_synced_count: report.post_tick.map_m_synced_count,
+            baseline_map_m_synced_count: Some(report.post_tick.map_m_synced_count),
+            mmap_view_frames: report.post_tick.mmap_view_frames,
+            mmap_view_acquired: report.post_tick.mmap_view_acquired,
+            baseline_mmap_view_acquired: Some(report.post_tick.mmap_view_acquired),
+            mmap_view_drawer_open: report.post_tick.mmap_view_drawer_open,
+            blessed_sha256_ok: true,
+            vs_blessed: Some(self_cmp),
+            vs_meta_ref: meta_ref,
+            heading_stability: SessionHeadingStability {
+                replay: replay_heading_stability,
+                blessed: Some(replay_heading_stability),
+                live_meta: live_meta_heading_stability,
+            },
+            live_mmap_latency,
+            provenance: Some(session_prov),
+            recording_fidelity: session_fidelity,
+            input_replay: session_input_replay,
+            truth: session_truth,
+        };
+        return Ok((res, Some(entry)));
+    }
+
+    let res = match baseline_session {
+        None => QaSessionResult {
+            session_name,
+            passed: false,
+            status: "KHÔNG ĐẠT".to_owned(),
+            reason: "thiếu phiên trong tests/qa_baseline.json".to_owned(),
+            reasons: vec!["thiếu phiên trong tests/qa_baseline.json".to_owned()],
+            notes: prov_notes,
+            frames: report.performance.frames_processed,
+            codec,
+            color_safe,
+            wall_elapsed_s: report.performance.wall_elapsed_s,
+            effective_fps: report.performance.effective_fps,
+            hd_downloads: report.offline_assets.hd_downloads,
+            map_m_synced_count: report.post_tick.map_m_synced_count,
+            baseline_map_m_synced_count: None,
+            mmap_view_frames: report.post_tick.mmap_view_frames,
+            mmap_view_acquired: report.post_tick.mmap_view_acquired,
+            baseline_mmap_view_acquired: None,
+            mmap_view_drawer_open: report.post_tick.mmap_view_drawer_open,
+            blessed_sha256_ok: false,
+            vs_blessed: None,
+            vs_meta_ref: meta_ref,
+            heading_stability: SessionHeadingStability {
+                replay: replay_heading_stability,
+                blessed: None,
+                live_meta: live_meta_heading_stability,
+            },
+            live_mmap_latency,
+            provenance: Some(session_prov),
+            recording_fidelity: session_fidelity,
+            input_replay: session_input_replay,
+            truth: session_truth,
+        },
+        Some(base_sess) => {
+            let mut reasons = Vec::new();
+            let mut notes = Vec::new();
+            let mut blessed_sha256_ok = false;
+            let mut vs_blessed = None;
+            let mut blessed_heading_stability = None;
+
+            if !blessed_path.is_file() {
+                reasons.push(format!("thiếu file {BLESSED_POSES_FILENAME}"));
+            } else {
+                match sha256_file(&blessed_path) {
+                    Err(e) => reasons.push(format!("lỗi đọc sha256 blessed: {e}")),
+                    Ok(actual_sha) => {
+                        if !actual_sha.eq_ignore_ascii_case(&base_sess.blessed_poses_sha256) {
+                            reasons.push(format!(
+                                "sha256 {BLESSED_POSES_FILENAME} không khớp baseline"
+                            ));
+                        } else {
+                            blessed_sha256_ok = true;
+                        }
+                    }
+                }
+                match load_blessed_poses_with_heading_info(&blessed_path) {
+                    Err(e) => reasons.push(format!("lỗi đọc {BLESSED_POSES_FILENAME}: {e}")),
+                    Ok((blessed_poses, has_heading_fields)) => {
+                        let cmp = compare_poses_against_blessed(
+                            &blessed_poses,
+                            &poses,
+                            eff_thresholds.pos_threshold_w,
+                        );
+                        let eval_reasons = evaluate_session_against_baseline(
+                            base_sess,
+                            &cmp,
+                            report.post_tick.map_m_synced_count,
+                            report.post_tick.mmap_view_acquired,
+                            report.offline_assets.hd_downloads,
+                            eff_thresholds,
+                            &opts.overrides,
+                        );
+                        reasons.extend(eval_reasons);
+                        if has_heading_fields {
+                            blessed_heading_stability =
+                                Some(compute_observed_heading_stability(&blessed_poses));
+                        }
+                        let hdg_gate = evaluate_heading_stability_gate(
+                            &replay_heading_stability,
+                            blessed_heading_stability.as_ref(),
+                        );
+                        reasons.extend(hdg_gate.fail_reasons);
+                        notes.extend(hdg_gate.notes);
+                        vs_blessed = Some(cmp);
+                    }
+                }
+            }
+
+            notes.extend(prov_notes);
+            let passed = reasons.is_empty();
+            QaSessionResult {
+                session_name,
+                passed,
+                status: if passed {
+                    "ĐẠT".to_owned()
+                } else {
+                    "KHÔNG ĐẠT".to_owned()
+                },
+                reason: if passed {
+                    if notes.is_empty() {
+                        "ok".to_owned()
+                    } else {
+                        format!("ok ({})", notes.join("; "))
+                    }
+                } else {
+                    reasons.join("; ")
+                },
+                reasons,
+                notes,
+                frames: report.performance.frames_processed,
+                codec,
+                color_safe,
+                wall_elapsed_s: report.performance.wall_elapsed_s,
+                effective_fps: report.performance.effective_fps,
+                hd_downloads: report.offline_assets.hd_downloads,
+                map_m_synced_count: report.post_tick.map_m_synced_count,
+                baseline_map_m_synced_count: Some(base_sess.map_m_synced_count),
+                mmap_view_frames: report.post_tick.mmap_view_frames,
+                mmap_view_acquired: report.post_tick.mmap_view_acquired,
+                baseline_mmap_view_acquired: Some(base_sess.mmap_view_acquired),
+                mmap_view_drawer_open: report.post_tick.mmap_view_drawer_open,
+                blessed_sha256_ok,
+                vs_blessed,
+                vs_meta_ref: meta_ref,
+                heading_stability: SessionHeadingStability {
+                    replay: replay_heading_stability,
+                    blessed: blessed_heading_stability,
+                    live_meta: live_meta_heading_stability,
+                },
+                live_mmap_latency,
+                provenance: Some(session_prov),
+                recording_fidelity: session_fidelity,
+                input_replay: session_input_replay,
+                truth: session_truth,
+            }
+        }
+    };
+    Ok((res, None))
+}
+
+struct OutputCoordinator {
+    sessions: Vec<Option<QaSessionResult>>,
+    next_session: usize,
+    scenarios: Vec<Option<ScenarioResult>>,
+    next_scenario: usize,
+    bless_mode: bool,
+    blessed_entries: BTreeMap<String, QaBaselineSession>,
+}
+
+impl OutputCoordinator {
+    fn new(session_count: usize, scenario_count: usize, bless_mode: bool) -> Self {
+        Self {
+            sessions: vec![None; session_count],
+            next_session: 0,
+            scenarios: vec![None; scenario_count],
+            next_scenario: 0,
+            bless_mode,
+            blessed_entries: BTreeMap::new(),
+        }
+    }
+
+    fn push_session(&mut self, idx: usize, res: QaSessionResult, entry: Option<QaBaselineSession>) {
+        if let Some(e) = entry {
+            self.blessed_entries.insert(res.session_name.clone(), e);
+        }
+        self.sessions[idx] = Some(res);
+        self.flush();
+    }
+
+    fn push_scenario(&mut self, idx: usize, res: ScenarioResult) {
+        self.scenarios[idx] = Some(res);
+        self.flush();
+    }
+
+    fn flush(&mut self) {
+        while self.next_session < self.sessions.len() {
+            let Some(ref r) = self.sessions[self.next_session] else {
+                break;
+            };
+            println!("{}", format_qa_row(r));
+            let _ = std::io::stdout().flush();
+            self.next_session += 1;
+        }
+        if !self.bless_mode && self.next_session == self.sessions.len() {
+            while self.next_scenario < self.scenarios.len() {
+                let Some(ref sr) = self.scenarios[self.next_scenario] else {
+                    break;
+                };
+                println!("{}", format_scenario_line(sr));
+                let _ = std::io::stdout().flush();
+                self.next_scenario += 1;
+            }
+        }
+    }
+}
+
+fn count_meta_lines(meta_path: &Path) -> usize {
+    let Ok(f) = std::fs::File::open(meta_path) else {
+        return 0;
+    };
+    BufReader::new(f)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|l| !l.trim().is_empty())
+        .count()
+}
+
+fn session_video_mb(sdir: &Path) -> usize {
+    for name in ["video.mkv", "video.mp4"] {
+        let p = sdir.join(name);
+        if let Ok(meta) = std::fs::metadata(&p) {
+            return (meta.len() / (1024 * 1024)) as usize;
+        }
+    }
+    0
+}
+
+type DatasetKey = (BTreeMap<String, Option<String>>, Option<String>);
+
+fn dataset_key_for_dir(data_dir: &Path) -> (DatasetKey, DatasetFingerprint) {
+    let fp = fingerprint_data_dir(data_dir);
+    let ug_path = data_dir.join("underground_db.json");
+    let ug_hash = if ug_path.is_file() {
+        sha256_file(&ug_path).ok()
+    } else {
+        None
+    };
+    ((fp.0.clone(), ug_hash), fp)
+}
+
+enum QaWorkItem<'a> {
+    Session {
+        idx: usize,
+        weight: usize,
+        sdir: &'a PathBuf,
+        session_name: String,
+        codec: String,
+        color_safe: bool,
+        cache_key: Option<String>,
+        ctx: Arc<ReplaySharedContext>,
+    },
+    Scenario {
+        idx: usize,
+        weight: usize,
+        scenario: &'a ScenarioFile,
+        sdir: PathBuf,
+        cache_key: Option<String>,
+        ctx: Arc<ReplaySharedContext>,
+    },
+}
+
+impl QaWorkItem<'_> {
+    fn weight(&self) -> usize {
+        match self {
+            Self::Session { weight, .. } | Self::Scenario { weight, .. } => *weight,
+        }
+    }
+
+    fn sort_key(&self) -> (std::cmp::Reverse<usize>, u8, usize) {
+        match self {
+            Self::Session { weight, idx, .. } => (std::cmp::Reverse(*weight), 0, *idx),
+            Self::Scenario { weight, idx, .. } => (std::cmp::Reverse(*weight), 1, *idx),
+        }
+    }
+}
+
 /// Runs `gh-sim qa` (verification mode or `--bless` mode) across discovered sessions.
 pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
+    if opts.jobs == Some(0) {
+        return Err("--jobs must be >= 1".to_owned());
+    }
     let session_dirs = discover_sessions(&opts.sessions_dir, &opts.only)?;
 
     let mut baseline = if opts.bless {
@@ -1424,318 +1861,166 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
             None => load_scenarios_from_dir(Path::new(DEFAULT_SCENARIOS_DIR), false)?,
         }
     };
-    let total_t0 = Instant::now();
+    let session_dirs_by_name: BTreeMap<String, PathBuf> = session_dirs
+        .iter()
+        .filter_map(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|name| (name.to_owned(), p.clone()))
+        })
+        .collect();
+    let selected_scenarios: Vec<&ScenarioFile> = if opts.bless {
+        Vec::new()
+    } else {
+        loaded_scenarios
+            .iter()
+            .filter(|sc| session_dirs_by_name.contains_key(&sc.session))
+            .collect()
+    };
 
+    let total_work = session_dirs.len() + selected_scenarios.len();
+    let cache_enabled = !opts.no_cache && !opts.bless && opts.dump_poses_dir.is_none();
+    let cache_dir = opts
+        .cache_dir
+        .clone()
+        .unwrap_or_else(default_qa_cache_dir);
+
+    let (current_commit, repo_root) = resolve_current_git_commit_and_root(BUILD_GIT_COMMIT);
+    let env_fp = if cache_enabled {
+        build_run_env_fingerprint(
+            opts.ffmpeg_path.as_deref(),
+            &opts.gt_file,
+            &opts.baseline_path,
+            &eff_thresholds,
+            &opts.overrides,
+            &current_commit,
+        )
+    } else {
+        None
+    };
+
+    let total_t0 = Instant::now();
     let header = format_qa_header();
     let sep = "-".repeat(header.len().min(200));
     println!("{header}");
     println!("{sep}");
     let _ = std::io::stdout().flush();
 
-    let mut results = Vec::with_capacity(session_dirs.len());
+    let mut cache_hits = 0usize;
+    let mut effective_jobs = 1usize;
+    let results: Vec<QaSessionResult>;
+    let scenario_results: Vec<ScenarioResult>;
 
-    for sdir in &session_dirs {
-        let session_name = sdir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("session")
-            .to_owned();
-        let (codec, color_safe) = read_session_codec_info(sdir);
+    if opts.jobs == Some(1) {
+        // Explicit serial path (`--jobs 1`): matches original unshared execution.
+        let mut ser_results = Vec::with_capacity(session_dirs.len());
+        let mut ds_fp_cache = HashMap::new();
+        let mut sess_fp_cache: HashMap<PathBuf, Option<SessionInputFingerprint>> = HashMap::new();
 
-        let replay_opts = ReplayOptions {
-            source_dir: sdir.clone(),
-            data_dir: opts.data_dir.clone(),
-            gt_file: opts.gt_file.clone(),
-            tiles_dir: None,
-            ug_dir: None,
-            paimon_cache_path: None,
-            ffmpeg_path: opts.ffmpeg_path.clone(),
-            max_frames: None,
-            drift_threshold_w: eff_thresholds.pos_threshold_w,
-            verify_mmap_view: true,
-            render_out: None,
-            out_report: None,
-        };
-
-        let replay_out = run_replay_with_hook(&replay_opts, None)?;
-        let report = replay_out.report;
-        let poses = replay_out.observed;
-        let session_truth = Some(evaluate_truth_oracle(
-            &poses,
-            &report.accuracy,
-            &replay_out.truth_meta,
-        ));
-        let meta_ref = meta_ref_from_report(&report);
-        let replay_heading_stability = compute_observed_heading_stability(&poses);
-        let meta_path = sdir.join("meta.jsonl");
-        let live_meta_heading_stability = load_live_meta_heading_stability(&meta_path);
-        let live_mmap_latency = load_live_mmap_latency(&meta_path);
-        let session_prov = report.provenance.clone();
-        let session_fidelity = report.recording_fidelity.clone();
-        let session_input_replay = Some(report.input_replay.clone());
-        let prov_cur_commit = session_prov
-            .current_commit
-            .as_deref()
-            .unwrap_or(BUILD_GIT_COMMIT);
-        let mut prov_notes = provenance_notes(Some(&session_prov), prov_cur_commit);
-        if report.input_replay.nav_carried_over_mismatches > 0 {
-            prov_notes.push(format!(
-                "nav carried-over pre-web: {} frames (legacy recording without initial_state)",
-                report.input_replay.nav_carried_over_mismatches
-            ));
-        }
-        let blessed_path = sdir.join(BLESSED_POSES_FILENAME);
-
-        let result = if opts.bless {
-            let sha256 = write_blessed_poses_atomic(&blessed_path, &poses)?;
-            let tracking_frames = poses
-                .iter()
-                .filter(|p| {
-                    p.world_x.is_some_and(f64::is_finite) && p.world_y.is_some_and(f64::is_finite)
-                })
-                .count();
-            let entry = QaBaselineSession {
-                blessed_poses_sha256: sha256,
-                frames: poses.len(),
-                codec: codec.clone(),
-                color_safe,
-                tracking_frames,
-                map_m_synced_count: report.post_tick.map_m_synced_count,
-                mmap_view_frames: report.post_tick.mmap_view_frames,
-                mmap_view_acquired: report.post_tick.mmap_view_acquired,
-                mmap_view_drawer_open: report.post_tick.mmap_view_drawer_open,
-                meta_ref_p95_pos_delta_w: meta_ref.p95_pos_delta_w,
-                meta_ref_max_pos_delta_w: meta_ref.max_pos_delta_w,
-                meta_ref_over_threshold: meta_ref.over_threshold_frames,
+        for sdir in &session_dirs {
+            let session_name = sdir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("session")
+                .to_owned();
+            let sess_fp = if env_fp.is_some() {
+                let fp = build_session_input_fingerprint(sdir, &opts.data_dir, &mut ds_fp_cache);
+                sess_fp_cache.insert(sdir.clone(), fp.clone());
+                fp
+            } else {
+                None
             };
-            baseline.sessions.insert(session_name.clone(), entry);
-
-            let self_cmp = compare_poses_against_blessed(&poses, &poses, eff_thresholds.pos_threshold_w);
-            let mut reasons = Vec::new();
-            if report.offline_assets.hd_downloads > 0 {
-                reasons.push(format!(
-                    "offline leak: hd_downloads={}",
-                    report.offline_assets.hd_downloads
-                ));
+            let sess_key = match (&env_fp, &sess_fp) {
+                (Some(env), Some(sfp)) => {
+                    let eng = compute_session_engine_unchanged(
+                        sdir,
+                        &opts.data_dir,
+                        &current_commit,
+                        repo_root.as_deref(),
+                    );
+                    Some(session_cache_key(env, sfp, eng))
+                }
+                _ => None,
+            };
+            if let Some(ref key) = sess_key
+                && let Some(cached) = load_cached_session(&cache_dir, key)
+            {
+                cache_hits += 1;
+                println!("{}", format_qa_row(&cached));
+                let _ = std::io::stdout().flush();
+                ser_results.push(cached);
+                continue;
             }
-            let passed = reasons.is_empty();
-            let notes = prov_notes;
-            QaSessionResult {
-                session_name,
-                passed,
-                status: if passed {
-                    "BLESSED".to_owned()
-                } else {
-                    "KHÔNG ĐẠT".to_owned()
-                },
-                reason: if passed {
-                    if notes.is_empty() {
-                        "blessed ok".to_owned()
-                    } else {
-                        format!("blessed ok ({})", notes.join("; "))
-                    }
-                } else {
-                    reasons.join("; ")
-                },
-                reasons,
-                notes,
-                frames: report.performance.frames_processed,
+
+            let (codec, color_safe) = read_session_codec_info(sdir);
+            let replay_opts = ReplayOptions {
+                source_dir: sdir.clone(),
+                data_dir: opts.data_dir.clone(),
+                gt_file: opts.gt_file.clone(),
+                tiles_dir: None,
+                ug_dir: None,
+                paimon_cache_path: None,
+                ffmpeg_path: opts.ffmpeg_path.clone(),
+                max_frames: None,
+                drift_threshold_w: eff_thresholds.pos_threshold_w,
+                verify_mmap_view: true,
+                render_out: None,
+                out_report: None,
+            };
+            let replay_out = run_replay_with_hook(&replay_opts, None)?;
+            let base_entry = baseline.sessions.get(&session_name).cloned();
+            let (result, blessed_entry) = finalize_session_result(
+                sdir,
+                session_name.clone(),
                 codec,
                 color_safe,
-                wall_elapsed_s: report.performance.wall_elapsed_s,
-                effective_fps: report.performance.effective_fps,
-                hd_downloads: report.offline_assets.hd_downloads,
-                map_m_synced_count: report.post_tick.map_m_synced_count,
-                baseline_map_m_synced_count: Some(report.post_tick.map_m_synced_count),
-                mmap_view_frames: report.post_tick.mmap_view_frames,
-                mmap_view_acquired: report.post_tick.mmap_view_acquired,
-                baseline_mmap_view_acquired: Some(report.post_tick.mmap_view_acquired),
-                mmap_view_drawer_open: report.post_tick.mmap_view_drawer_open,
-                blessed_sha256_ok: true,
-                vs_blessed: Some(self_cmp),
-                vs_meta_ref: meta_ref,
-                heading_stability: SessionHeadingStability {
-                    replay: replay_heading_stability,
-                    blessed: Some(replay_heading_stability),
-                    live_meta: live_meta_heading_stability,
-                },
-                live_mmap_latency,
-                provenance: Some(session_prov),
-                recording_fidelity: session_fidelity,
-                input_replay: session_input_replay,
-                truth: session_truth,
+                replay_out,
+                opts,
+                &eff_thresholds,
+                base_entry.as_ref(),
+            )?;
+            if let Some(entry) = blessed_entry {
+                baseline.sessions.insert(session_name, entry);
             }
-        } else {
-            match baseline.sessions.get(&session_name) {
-                None => QaSessionResult {
-                    session_name,
-                    passed: false,
-                    status: "KHÔNG ĐẠT".to_owned(),
-                    reason: "thiếu phiên trong tests/qa_baseline.json".to_owned(),
-                    reasons: vec!["thiếu phiên trong tests/qa_baseline.json".to_owned()],
-                    notes: prov_notes,
-                    frames: report.performance.frames_processed,
-                    codec,
-                    color_safe,
-                    wall_elapsed_s: report.performance.wall_elapsed_s,
-                    effective_fps: report.performance.effective_fps,
-                    hd_downloads: report.offline_assets.hd_downloads,
-                    map_m_synced_count: report.post_tick.map_m_synced_count,
-                    baseline_map_m_synced_count: None,
-                    mmap_view_frames: report.post_tick.mmap_view_frames,
-                    mmap_view_acquired: report.post_tick.mmap_view_acquired,
-                    baseline_mmap_view_acquired: None,
-                    mmap_view_drawer_open: report.post_tick.mmap_view_drawer_open,
-                    blessed_sha256_ok: false,
-                    vs_blessed: None,
-                    vs_meta_ref: meta_ref,
-                    heading_stability: SessionHeadingStability {
-                        replay: replay_heading_stability,
-                        blessed: None,
-                        live_meta: live_meta_heading_stability,
-                    },
-                    live_mmap_latency,
-                    provenance: Some(session_prov),
-                    recording_fidelity: session_fidelity,
-                    input_replay: session_input_replay,
-                    truth: session_truth,
-                },
-                Some(base_sess) => {
-                    let mut reasons = Vec::new();
-                    let mut notes = Vec::new();
-                    let mut blessed_sha256_ok = false;
-                    let mut vs_blessed = None;
-                    let mut blessed_heading_stability = None;
-
-                    if !blessed_path.is_file() {
-                        reasons.push(format!("thiếu file {BLESSED_POSES_FILENAME}"));
-                    } else {
-                        match sha256_file(&blessed_path) {
-                            Err(e) => reasons.push(format!("lỗi đọc sha256 blessed: {e}")),
-                            Ok(actual_sha) => {
-                                if !actual_sha.eq_ignore_ascii_case(&base_sess.blessed_poses_sha256)
-                                {
-                                    reasons.push(format!(
-                                        "sha256 {BLESSED_POSES_FILENAME} không khớp baseline"
-                                    ));
-                                } else {
-                                    blessed_sha256_ok = true;
-                                }
-                            }
-                        }
-                        match load_blessed_poses_with_heading_info(&blessed_path) {
-                            Err(e) => reasons.push(format!("lỗi đọc {BLESSED_POSES_FILENAME}: {e}")),
-                            Ok((blessed_poses, has_heading_fields)) => {
-                                let cmp = compare_poses_against_blessed(
-                                    &blessed_poses,
-                                    &poses,
-                                    eff_thresholds.pos_threshold_w,
-                                );
-                                let eval_reasons = evaluate_session_against_baseline(
-                                    base_sess,
-                                    &cmp,
-                                    report.post_tick.map_m_synced_count,
-                                    report.post_tick.mmap_view_acquired,
-                                    report.offline_assets.hd_downloads,
-                                    &eff_thresholds,
-                                    &opts.overrides,
-                                );
-                                reasons.extend(eval_reasons);
-                                if has_heading_fields {
-                                    blessed_heading_stability =
-                                        Some(compute_observed_heading_stability(&blessed_poses));
-                                }
-                                let hdg_gate = evaluate_heading_stability_gate(
-                                    &replay_heading_stability,
-                                    blessed_heading_stability.as_ref(),
-                                );
-                                reasons.extend(hdg_gate.fail_reasons);
-                                notes.extend(hdg_gate.notes);
-                                vs_blessed = Some(cmp);
-                            }
-                        }
-                    }
-
-                    notes.extend(prov_notes);
-                    let passed = reasons.is_empty();
-                    QaSessionResult {
-                        session_name,
-                        passed,
-                        status: if passed {
-                            "ĐẠT".to_owned()
-                        } else {
-                            "KHÔNG ĐẠT".to_owned()
-                        },
-                        reason: if passed {
-                            if notes.is_empty() {
-                                "ok".to_owned()
-                            } else {
-                                format!("ok ({})", notes.join("; "))
-                            }
-                        } else {
-                            reasons.join("; ")
-                        },
-                        reasons,
-                        notes,
-                        frames: report.performance.frames_processed,
-                        codec,
-                        color_safe,
-                        wall_elapsed_s: report.performance.wall_elapsed_s,
-                        effective_fps: report.performance.effective_fps,
-                        hd_downloads: report.offline_assets.hd_downloads,
-                        map_m_synced_count: report.post_tick.map_m_synced_count,
-                        baseline_map_m_synced_count: Some(base_sess.map_m_synced_count),
-                        mmap_view_frames: report.post_tick.mmap_view_frames,
-                        mmap_view_acquired: report.post_tick.mmap_view_acquired,
-                        baseline_mmap_view_acquired: Some(base_sess.mmap_view_acquired),
-                        mmap_view_drawer_open: report.post_tick.mmap_view_drawer_open,
-                        blessed_sha256_ok,
-                        vs_blessed,
-                        vs_meta_ref: meta_ref,
-                        heading_stability: SessionHeadingStability {
-                            replay: replay_heading_stability,
-                            blessed: blessed_heading_stability,
-                            live_meta: live_meta_heading_stability,
-                        },
-                        live_mmap_latency,
-                        provenance: Some(session_prov),
-                        recording_fidelity: session_fidelity,
-                        input_replay: session_input_replay,
-                        truth: session_truth,
-                    }
-                }
+            if let Some(ref key) = sess_key {
+                store_cached_session(&cache_dir, key, &result);
             }
-        };
+            println!("{}", format_qa_row(&result));
+            let _ = std::io::stdout().flush();
+            ser_results.push(result);
+        }
 
-        println!("{}", format_qa_row(&result));
-        let _ = std::io::stdout().flush();
-        results.push(result);
-    }
+        if opts.bless {
+            baseline.save_atomic(&opts.baseline_path)?;
+        }
 
-    if opts.bless {
-        baseline.save_atomic(&opts.baseline_path)?;
-    }
-
-    let passed_sessions = results.iter().filter(|r| r.passed).count();
-    let total_sessions = results.len();
-    let failed_sessions = total_sessions.saturating_sub(passed_sessions);
-
-    let mut scenario_results = Vec::new();
-    if !opts.bless {
-        let session_dirs_by_name: BTreeMap<String, PathBuf> = session_dirs
-            .iter()
-            .filter_map(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|name| (name.to_owned(), p.clone()))
-            })
-            .collect();
-        let selected_scenarios: Vec<_> = loaded_scenarios
-            .iter()
-            .filter(|sc| session_dirs_by_name.contains_key(&sc.session))
-            .collect();
-        for sc in selected_scenarios {
+        let mut ser_scenarios = Vec::with_capacity(selected_scenarios.len());
+        for sc in &selected_scenarios {
             let sdir = &session_dirs_by_name[&sc.session];
+            let sess_fp = if env_fp.is_some() {
+                if let Some(cached) = sess_fp_cache.get(sdir) {
+                    cached.clone()
+                } else {
+                    let fp = build_session_input_fingerprint(sdir, &opts.data_dir, &mut ds_fp_cache);
+                    sess_fp_cache.insert(sdir.clone(), fp.clone());
+                    fp
+                }
+            } else {
+                None
+            };
+            let sc_key = match (&env_fp, &sess_fp) {
+                (Some(env), Some(sfp)) => scenario_cache_key(env, sfp, sc),
+                _ => None,
+            };
+            if let Some(ref key) = sc_key
+                && let Some(cached) = load_cached_scenario(&cache_dir, key)
+            {
+                cache_hits += 1;
+                println!("{}", format_scenario_line(&cached));
+                let _ = std::io::stdout().flush();
+                ser_scenarios.push(cached);
+                continue;
+            }
             let sc_res = run_scenario(
                 sc,
                 sdir,
@@ -1743,11 +2028,340 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                 &opts.gt_file,
                 opts.ffmpeg_path.as_deref(),
             )?;
+            if let Some(ref key) = sc_key {
+                store_cached_scenario(&cache_dir, key, &sc_res);
+            }
             println!("{}", format_scenario_line(&sc_res));
             let _ = std::io::stdout().flush();
-            scenario_results.push(sc_res);
+            ser_scenarios.push(sc_res);
         }
+        results = ser_results;
+        scenario_results = ser_scenarios;
+    } else {
+        // Parallel worker pool + shared read-only datasets + deterministic output coordinator.
+        let mut coord = OutputCoordinator::new(
+            session_dirs.len(),
+            selected_scenarios.len(),
+            opts.bless,
+        );
+        let mut ds_fp_cache = HashMap::new();
+        let mut sess_fp_cache: HashMap<PathBuf, Option<SessionInputFingerprint>> = HashMap::new();
+        let mut pending_sessions = Vec::new();
+        let mut pending_scenarios = Vec::new();
+
+        for (idx, sdir) in session_dirs.iter().enumerate() {
+            let session_name = sdir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("session")
+                .to_owned();
+            let sess_fp = if env_fp.is_some() {
+                let fp = build_session_input_fingerprint(sdir, &opts.data_dir, &mut ds_fp_cache);
+                sess_fp_cache.insert(sdir.clone(), fp.clone());
+                fp
+            } else {
+                None
+            };
+            let sess_key = match (&env_fp, &sess_fp) {
+                (Some(env), Some(sfp)) => {
+                    let eng = compute_session_engine_unchanged(
+                        sdir,
+                        &opts.data_dir,
+                        &current_commit,
+                        repo_root.as_deref(),
+                    );
+                    Some(session_cache_key(env, sfp, eng))
+                }
+                _ => None,
+            };
+            if let Some(ref key) = sess_key
+                && let Some(cached) = load_cached_session(&cache_dir, key)
+            {
+                cache_hits += 1;
+                coord.push_session(idx, cached, None);
+                continue;
+            }
+            pending_sessions.push((idx, sdir, session_name, sess_key));
+        }
+
+        for (idx, &sc) in selected_scenarios.iter().enumerate() {
+            let sdir = session_dirs_by_name[&sc.session].clone();
+            let sess_fp = if env_fp.is_some() {
+                if let Some(cached) = sess_fp_cache.get(&sdir) {
+                    cached.clone()
+                } else {
+                    let fp = build_session_input_fingerprint(&sdir, &opts.data_dir, &mut ds_fp_cache);
+                    sess_fp_cache.insert(sdir.clone(), fp.clone());
+                    fp
+                }
+            } else {
+                None
+            };
+            let sc_key = match (&env_fp, &sess_fp) {
+                (Some(env), Some(sfp)) => scenario_cache_key(env, sfp, sc),
+                _ => None,
+            };
+            if let Some(ref key) = sc_key
+                && let Some(cached) = load_cached_scenario(&cache_dir, key)
+            {
+                cache_hits += 1;
+                coord.push_scenario(idx, cached);
+                continue;
+            }
+            pending_scenarios.push((idx, sc, sdir, sc_key));
+        }
+
+        let uncached_count = pending_sessions.len() + pending_scenarios.len();
+        if uncached_count > 0 {
+            let shared_sandbox = TempSandboxDir::new("gh_sim_qa_shared")?;
+            let verified_gt = Arc::new(VerifiedGtFile::load_or_default(&opts.gt_file)?);
+            let engine_unchanged_cache = Arc::new(Mutex::new(HashMap::new()));
+            let mut ctx_by_key: BTreeMap<DatasetKey, Arc<ReplaySharedContext>> = BTreeMap::new();
+            let mut ctx_for_dir = |sdir: &Path| -> Arc<ReplaySharedContext> {
+                let (eff_data_dir, _) = resolve_replay_data_dir(sdir, &opts.data_dir);
+                let (ds_key, ds_fp) = dataset_key_for_dir(&eff_data_dir);
+                if let Some(existing) = ctx_by_key.get(&ds_key) {
+                    return Arc::clone(existing);
+                }
+                let idx_num = ctx_by_key.len();
+                let idx_dir = shared_sandbox.0.join(format!("idx_{idx_num}"));
+                let _ = std::fs::create_dir_all(&idx_dir);
+                let tracking_assets = Arc::new(SharedTrackingAssets::load_for_data_dir(
+                    &eff_data_dir,
+                    Some(idx_dir.join("teyvat_global_index_v3.npz")),
+                    true,
+                ));
+                let ctx = Arc::new(ReplaySharedContext {
+                    tracking_assets,
+                    verified_gt: Arc::clone(&verified_gt),
+                    current_commit: current_commit.clone(),
+                    repo_root: repo_root.clone(),
+                    dataset_fingerprint: ds_fp,
+                    engine_unchanged_cache: Arc::clone(&engine_unchanged_cache),
+                    ffmpeg_threads: None,
+                });
+                ctx_by_key.insert(ds_key, Arc::clone(&ctx));
+                ctx
+            };
+
+            let mut weight_cache: HashMap<PathBuf, (usize, usize)> = HashMap::new();
+            let mut get_session_stats = |sdir: &Path| -> (usize, usize) {
+                if let Some(&v) = weight_cache.get(sdir) {
+                    return v;
+                }
+                let meta_lines = count_meta_lines(&sdir.join("meta.jsonl"));
+                let vid_mb = session_video_mb(sdir);
+                weight_cache.insert(sdir.to_path_buf(), (meta_lines, vid_mb));
+                (meta_lines, vid_mb)
+            };
+
+            let mut work_items: Vec<QaWorkItem<'_>> = Vec::with_capacity(uncached_count);
+            for (idx, sdir, session_name, cache_key) in pending_sessions {
+                let (meta_lines, vid_mb) = get_session_stats(sdir);
+                let weight = meta_lines.saturating_mul(10).saturating_add(vid_mb.saturating_mul(5));
+                let (codec, color_safe) = read_session_codec_info(sdir);
+                let ctx = ctx_for_dir(sdir);
+                work_items.push(QaWorkItem::Session {
+                    idx,
+                    weight,
+                    sdir,
+                    session_name,
+                    codec,
+                    color_safe,
+                    cache_key,
+                    ctx,
+                });
+            }
+            for (idx, sc, sdir, cache_key) in pending_scenarios {
+                let (_, vid_mb) = get_session_stats(&sdir);
+                let weight = sc
+                    .last_needed_frame()
+                    .saturating_mul(10)
+                    .saturating_add(vid_mb);
+                let ctx = ctx_for_dir(&sdir);
+                work_items.push(QaWorkItem::Scenario {
+                    idx,
+                    weight,
+                    scenario: sc,
+                    sdir,
+                    cache_key,
+                    ctx,
+                });
+            }
+            work_items.sort_by_key(|w| (w.sort_key(), w.weight()));
+
+            effective_jobs = match opts.jobs {
+                Some(n) => n.min(work_items.len().max(1)),
+                None => {
+                    let cpus = std::thread::available_parallelism()
+                        .map(std::num::NonZeroUsize::get)
+                        .unwrap_or(1);
+                    let (total_mb, avail_mb) = gh_win32::sys_info::query_system_memory_mb()
+                        .map(|(t, a)| (Some(t), Some(a)))
+                        .unwrap_or((None, None));
+                    compute_auto_jobs(cpus, avail_mb, total_mb, work_items.len())
+                }
+            };
+
+            let queue = Mutex::new(VecDeque::from(work_items));
+            let coord_mutex = Mutex::new(coord);
+            let abort = AtomicBool::new(false);
+            let first_err: Mutex<Option<String>> = Mutex::new(None);
+            let baseline_sessions = &baseline.sessions;
+            let cache_dir_ref = cache_enabled.then_some(cache_dir.as_path());
+
+            std::thread::scope(|scope| {
+                for _worker_id in 0..effective_jobs {
+                    scope.spawn(|| {
+                        loop {
+                            if abort.load(Ordering::Acquire) {
+                                break;
+                            }
+                            let next = {
+                                let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+                                q.pop_front()
+                            };
+                            let Some(item) = next else {
+                                break;
+                            };
+                            match item {
+                                QaWorkItem::Session {
+                                    idx,
+                                    sdir,
+                                    session_name,
+                                    codec,
+                                    color_safe,
+                                    cache_key,
+                                    ctx,
+                                    ..
+                                } => {
+                                    let replay_opts = ReplayOptions {
+                                        source_dir: sdir.clone(),
+                                        data_dir: opts.data_dir.clone(),
+                                        gt_file: opts.gt_file.clone(),
+                                        tiles_dir: None,
+                                        ug_dir: None,
+                                        paimon_cache_path: None,
+                                        ffmpeg_path: opts.ffmpeg_path.clone(),
+                                        max_frames: None,
+                                        drift_threshold_w: eff_thresholds.pos_threshold_w,
+                                        verify_mmap_view: true,
+                                        render_out: None,
+                                        out_report: None,
+                                    };
+                                    let outcome =
+                                        run_replay_with_context(&replay_opts, None, Some(&ctx))
+                                            .and_then(|replay_out| {
+                                                let base_sess =
+                                                    baseline_sessions.get(&session_name);
+                                                finalize_session_result(
+                                                    sdir,
+                                                    session_name,
+                                                    codec,
+                                                    color_safe,
+                                                    replay_out,
+                                                    opts,
+                                                    &eff_thresholds,
+                                                    base_sess,
+                                                )
+                                            });
+                                    match outcome {
+                                        Ok((res, blessed_entry)) => {
+                                            if let (Some(cdir), Some(key)) =
+                                                (cache_dir_ref, cache_key.as_deref())
+                                            {
+                                                store_cached_session(cdir, key, &res);
+                                            }
+                                            let mut c = coord_mutex
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            c.push_session(idx, res, blessed_entry);
+                                        }
+                                        Err(e) => {
+                                            abort.store(true, Ordering::Release);
+                                            let mut fe = first_err
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            if fe.is_none() {
+                                                *fe = Some(e);
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                                QaWorkItem::Scenario {
+                                    idx,
+                                    scenario,
+                                    sdir,
+                                    cache_key,
+                                    ctx,
+                                    ..
+                                } => {
+                                    let outcome = run_scenario_with_context(
+                                        scenario,
+                                        &sdir,
+                                        &opts.data_dir,
+                                        &opts.gt_file,
+                                        opts.ffmpeg_path.as_deref(),
+                                        Some(&ctx),
+                                    );
+                                    match outcome {
+                                        Ok(sc_res) => {
+                                            if let (Some(cdir), Some(key)) =
+                                                (cache_dir_ref, cache_key.as_deref())
+                                            {
+                                                store_cached_scenario(cdir, key, &sc_res);
+                                            }
+                                            let mut c = coord_mutex
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            c.push_scenario(idx, sc_res);
+                                        }
+                                        Err(e) => {
+                                            abort.store(true, Ordering::Release);
+                                            let mut fe = first_err
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            if fe.is_none() {
+                                                *fe = Some(e);
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+
+            if let Some(err) = first_err.into_inner().unwrap_or(None) {
+                return Err(err);
+            }
+            coord = coord_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
+        }
+
+        if opts.bless {
+            for (k, v) in coord.blessed_entries {
+                baseline.sessions.insert(k, v);
+            }
+            baseline.save_atomic(&opts.baseline_path)?;
+        }
+        results = coord
+            .sessions
+            .into_iter()
+            .map(|o| o.expect("session result populated"))
+            .collect();
+        scenario_results = coord
+            .scenarios
+            .into_iter()
+            .map(|o| o.expect("scenario result populated"))
+            .collect();
     }
+
+    let passed_sessions = results.iter().filter(|r| r.passed).count();
+    let total_sessions = results.len();
+    let failed_sessions = total_sessions.saturating_sub(passed_sessions);
     let scenario_summary = ScenarioSummary::from_results(&scenario_results);
     let total_wall_elapsed_s = round3(total_t0.elapsed().as_secs_f64());
     let all_passed = failed_sessions == 0 && scenario_summary.fail == 0;
@@ -1757,7 +2371,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
         println!("{}", scenario_summary.format_line());
     }
     println!(
-        "Tổng: {passed_sessions}/{total_sessions} {} | thời gian: {total_wall_elapsed_s:.1}s | baseline: {}",
+        "Tổng: {passed_sessions}/{total_sessions} {} | thời gian: {total_wall_elapsed_s:.1}s | jobs: {effective_jobs} | cache: {cache_hits}/{total_work} | baseline: {}",
         if opts.bless { "BLESSED" } else { "ĐẠT" },
         opts.baseline_path.display()
     );
@@ -2047,6 +2661,10 @@ mod tests {
             out_dir: Some(out_dir.clone()),
             bless: true,
             overrides: QaThresholdOverrides::default(),
+            jobs: Some(1),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: None,
         })
         .unwrap();
         assert!(bless_rep.passed);
@@ -2083,6 +2701,10 @@ mod tests {
             out_dir: Some(out_dir.clone()),
             bless: false,
             overrides: QaThresholdOverrides::default(),
+            jobs: Some(1),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: None,
         })
         .unwrap();
         assert!(qa_rep.passed);
@@ -2109,6 +2731,10 @@ mod tests {
             out_dir: None,
             bless: false,
             overrides: QaThresholdOverrides::default(),
+            jobs: Some(1),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: None,
         })
         .unwrap();
         assert!(!tamper_rep.passed);
@@ -2439,6 +3065,10 @@ mod tests {
                 max_map_mismatches: Some(999),
                 ..Default::default()
             },
+            jobs: Some(1),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: None,
         })
         .unwrap_err();
         assert!(err.contains("--max-map-mismatches"), "got: {err}");
@@ -3094,6 +3724,10 @@ mod tests {
             out_dir: None,
             bless: true,
             overrides: QaThresholdOverrides::default(),
+            jobs: Some(1),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: None,
         })
         .unwrap();
 
@@ -3108,6 +3742,10 @@ mod tests {
             out_dir: None,
             bless: false,
             overrides: QaThresholdOverrides::default(),
+            jobs: Some(1),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: None,
         })
         .unwrap();
         assert!(qa_rep.passed, "provenance mismatch must NEVER fail QA");
@@ -3360,6 +3998,10 @@ mod tests {
             out_dir: None,
             bless: true,
             overrides: QaThresholdOverrides::default(),
+            jobs: Some(1),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: None,
         })
         .unwrap();
         assert!(bless.passed);
@@ -3463,6 +4105,10 @@ mod tests {
             out_dir: Some(out_dir.clone()),
             bless: false,
             overrides: QaThresholdOverrides::default(),
+            jobs: Some(1),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: None,
         })
         .unwrap();
 
@@ -3556,6 +4202,10 @@ mod tests {
             out_dir: None,
             bless: false,
             overrides: QaThresholdOverrides::default(),
+            jobs: Some(1),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: None,
         })
         .unwrap();
 
@@ -3618,6 +4268,10 @@ mod tests {
             out_dir: None,
             bless: false,
             overrides: QaThresholdOverrides::default(),
+            jobs: Some(1),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: None,
         })
         .unwrap();
 
@@ -3641,8 +4295,209 @@ mod tests {
             out_dir: None,
             bless: false,
             overrides: QaThresholdOverrides::default(),
+            jobs: Some(1),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: None,
         })
         .unwrap_err();
         assert!(err.contains("scenarios directory does not exist"), "got: {err}");
+    }
+
+    #[test]
+    fn compute_auto_jobs_respects_cpu_ram_and_work_caps() {
+        assert_eq!(compute_auto_jobs(24, Some(48_000), Some(65_000), 28), 8);
+        assert_eq!(compute_auto_jobs(16, Some(32_000), Some(32_000), 28), 5);
+        assert_eq!(compute_auto_jobs(8, Some(16_000), Some(16_000), 28), 2);
+        assert_eq!(compute_auto_jobs(4, Some(16_000), Some(16_000), 28), 1);
+        assert_eq!(compute_auto_jobs(64, Some(128_000), Some(128_000), 28), 12);
+        // Low RAM caps workers below cpu_bound
+        assert_eq!(compute_auto_jobs(24, Some(4_096), Some(8_192), 28), 2);
+        assert_eq!(compute_auto_jobs(24, Some(2_048), Some(4_096), 28), 1);
+        // Few work items cap workers
+        assert_eq!(compute_auto_jobs(24, Some(48_000), Some(65_000), 3), 3);
+    }
+
+    #[test]
+    fn parallel_qa_matches_serial_report_order_and_poses() {
+        let tmp = TempDir::new("gh_sim_qa_par_vs_ser");
+        let data_dir = tmp.0.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        write_json_atomic(
+            &data_dir.join("multimap_v4.json"),
+            &json!({"version": "4.0.0", "maps": {}}),
+        )
+        .unwrap();
+
+        let sessions_dir = tmp.0.join("qa_sessions");
+        let img = image::RgbaImage::from_pixel(434, 348, image::Rgba([20, 40, 60, 255]));
+        for (name, frames) in [("sess_alpha", 3usize), ("sess_beta", 5usize), ("sess_gamma", 2usize)] {
+            let sdir = sessions_dir.join(name);
+            std::fs::create_dir_all(sdir.join("frames")).unwrap();
+            let mut meta = String::new();
+            for i in 1..=frames {
+                img.save(sdir.join("frames").join(format!("{i:06}.png")))
+                    .unwrap();
+                let ts = 10.0 + (i - 1) as f64 * 0.05;
+                meta.push_str(&format!(
+                    "{{\"i\":{i},\"ts\":{ts:.2},\"frame_w\":2560,\"frame_h\":1440,\"state\":\"UNLOCALIZED\"}}\n"
+                ));
+            }
+            std::fs::write(sdir.join("meta.jsonl"), meta).unwrap();
+        }
+
+        let scenarios_dir = tmp.0.join("scenarios");
+        std::fs::create_dir_all(&scenarios_dir).unwrap();
+        std::fs::write(
+            scenarios_dir.join("01_beta.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "name": "beta_hud_toggle",
+                "session": "sess_beta",
+                "description": "hud toggle in parallel qa",
+                "inputs": [{"frame": 2, "hotkey": "nav_toggle"}],
+                "expect": [{"frame": 2, "ui": {"nav_hud_enabled": false}}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let baseline_path = tmp.0.join("qa_baseline.json");
+        let gt_file = tmp.0.join("verified_gt.json");
+        let bless = run_qa(&QaOptions {
+            sessions_dir: sessions_dir.clone(),
+            data_dir: data_dir.clone(),
+            ffmpeg_path: None,
+            baseline_path: baseline_path.clone(),
+            gt_file: gt_file.clone(),
+            scenarios_dir: None,
+            only: vec![],
+            out_dir: None,
+            bless: true,
+            overrides: QaThresholdOverrides::default(),
+            jobs: Some(2),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: None,
+        })
+        .unwrap();
+        assert!(bless.passed);
+
+        let dump_ser = tmp.0.join("poses_ser");
+        let dump_par = tmp.0.join("poses_par");
+        let rep_ser = run_qa(&QaOptions {
+            sessions_dir: sessions_dir.clone(),
+            data_dir: data_dir.clone(),
+            ffmpeg_path: None,
+            baseline_path: baseline_path.clone(),
+            gt_file: gt_file.clone(),
+            scenarios_dir: Some(scenarios_dir.clone()),
+            only: vec![],
+            out_dir: None,
+            bless: false,
+            overrides: QaThresholdOverrides::default(),
+            jobs: Some(1),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: Some(dump_ser.clone()),
+        })
+        .unwrap();
+
+        let rep_par = run_qa(&QaOptions {
+            sessions_dir: sessions_dir.clone(),
+            data_dir: data_dir.clone(),
+            ffmpeg_path: None,
+            baseline_path: baseline_path.clone(),
+            gt_file: gt_file.clone(),
+            scenarios_dir: Some(scenarios_dir.clone()),
+            only: vec![],
+            out_dir: None,
+            bless: false,
+            overrides: QaThresholdOverrides::default(),
+            jobs: Some(3),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: Some(dump_par.clone()),
+        })
+        .unwrap();
+
+        assert!(rep_ser.passed && rep_par.passed);
+        assert_eq!(rep_ser.sessions.len(), 3);
+        assert_eq!(rep_par.sessions.len(), 3);
+        assert_eq!(rep_ser.scenario_summary, rep_par.scenario_summary);
+        for (a, b) in rep_ser.sessions.iter().zip(rep_par.sessions.iter()) {
+            assert_eq!(a.session_name, b.session_name);
+            assert_eq!(a.passed, b.passed);
+            assert_eq!(a.status, b.status);
+            assert_eq!(a.reason, b.reason);
+            assert_eq!(a.vs_blessed, b.vs_blessed);
+            assert_eq!(a.vs_meta_ref, b.vs_meta_ref);
+            assert_eq!(a.heading_stability, b.heading_stability);
+            assert_eq!(a.truth, b.truth);
+            let p_ser = std::fs::read(dump_ser.join(format!("{}.jsonl", a.session_name))).unwrap();
+            let p_par = std::fs::read(dump_par.join(format!("{}.jsonl", a.session_name))).unwrap();
+            assert_eq!(p_ser, p_par, "pose diff on {}", a.session_name);
+        }
+        assert_eq!(rep_ser.scenarios[0].outcome, rep_par.scenarios[0].outcome);
+        assert_eq!(rep_ser.scenarios[0].checks, rep_par.scenarios[0].checks);
+
+        // Cache hit on subsequent run
+        let cache_dir = tmp.0.join("cache");
+        let rep_warm1 = run_qa(&QaOptions {
+            sessions_dir: sessions_dir.clone(),
+            data_dir: data_dir.clone(),
+            ffmpeg_path: None,
+            baseline_path: baseline_path.clone(),
+            gt_file: gt_file.clone(),
+            scenarios_dir: Some(scenarios_dir.clone()),
+            only: vec![],
+            out_dir: None,
+            bless: false,
+            overrides: QaThresholdOverrides::default(),
+            jobs: Some(2),
+            no_cache: false,
+            cache_dir: Some(cache_dir.clone()),
+            dump_poses_dir: None,
+        })
+        .unwrap();
+        let rep_warm2 = run_qa(&QaOptions {
+            sessions_dir,
+            data_dir,
+            ffmpeg_path: None,
+            baseline_path,
+            gt_file,
+            scenarios_dir: Some(scenarios_dir),
+            only: vec![],
+            out_dir: None,
+            bless: false,
+            overrides: QaThresholdOverrides::default(),
+            jobs: Some(2),
+            no_cache: false,
+            cache_dir: Some(cache_dir),
+            dump_poses_dir: None,
+        })
+        .unwrap();
+        assert_eq!(rep_warm1.sessions[0].reason, rep_warm2.sessions[0].reason);
+        assert_eq!(rep_warm1.scenarios[0], rep_warm2.scenarios[0]);
+
+        // --jobs 0 must error
+        let err = run_qa(&QaOptions {
+            sessions_dir: tmp.0.join("qa_sessions"),
+            data_dir: tmp.0.join("data"),
+            ffmpeg_path: None,
+            baseline_path: tmp.0.join("qa_baseline.json"),
+            gt_file: tmp.0.join("verified_gt.json"),
+            scenarios_dir: None,
+            only: vec![],
+            out_dir: None,
+            bless: false,
+            overrides: QaThresholdOverrides::default(),
+            jobs: Some(0),
+            no_cache: true,
+            cache_dir: None,
+            dump_poses_dir: None,
+        })
+        .unwrap_err();
+        assert!(err.contains("--jobs must be >= 1"), "got: {err}");
     }
 }
