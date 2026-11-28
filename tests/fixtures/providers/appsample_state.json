@@ -5,10 +5,11 @@
   "sanitized": true,
   "live_schema_notes": {
     "catalog_all_equals_allMarkers": true,
-    "marker_keys": ["id", "type", "mapId", "level", "position", "icon", "layer"],
+    "marker_keys": ["id", "type", "mapId", "level", "position", "icon", "layer", "img"],
     "has_sid_on_markers": false,
     "surface_markers_have_positive_level": true,
-    "underground_field": "layer.{groupId,floorId,entrances}"
+    "underground_field": "layer.{groupId,floorId,entrances}",
+    "guide_image": "catalog.markerImageUrl(m) = config.markerImageUrl with {id} when m.img and m.level >= rules.imageMinLevel (4999 of 89309 markers). Template, min level and marker 15130 added from a live guest read on 2026-11-28."
   },
   "map": {
     "center": { "lat": 0, "lng": 0.4 },
@@ -39,6 +40,8 @@
     }
   },
   "iconUrlTemplate": "https://game-cdn.appsample.com/gim/markers/{type}.png?v=3",
+  "imageUrlTemplate": "https://game-cdn.appsample.com/gim/item-imgs/{id}.jpg",
+  "imageMinLevel": 3,
   "markers": [
     {
       "id": "2608",
@@ -206,6 +209,15 @@
         "entrances": ["86513"]
       },
       "icon": "o111-layer"
+    },
+    {
+      "id": "15130",
+      "type": "o185",
+      "mapId": 2,
+      "level": 3,
+      "position": { "x": 0.42691, "y": -0.31293 },
+      "img": true,
+      "icon": "o185-pin"
     }
   ]
 }

@@ -247,6 +247,19 @@ impl HudPalette {
 // Angle Smoothers & Deadband Math
 // ---------------------------------------------------------------------------
 
+/// Name of the map site a pin's guide comes from, for the Guide card's loading / empty / error text.
+/// Third-party pins are namespaced (`appsample:<id>`, `kongying:<id>`) and carry their own inline
+/// guide; everything else is a HoYoLAB pin fetched by `PinGuideFetcher`.
+pub fn guide_source_name(pin_id: &str) -> &'static str {
+    if pin_id.starts_with("appsample:") {
+        "AppSample"
+    } else if pin_id.starts_with("kongying:") {
+        "Kongying"
+    } else {
+        "HoYoLAB"
+    }
+}
+
 #[inline]
 pub(crate) fn wrap_deg_signed(deg: f64) -> f64 {
     ((deg + 180.0).rem_euclid(360.0)) - 180.0
@@ -3507,14 +3520,15 @@ impl NavHudRenderer {
         let eff_guide_zoomed = show_guide && opts.guide_zoomed;
         if show_guide && let Some(t) = target {
             if t.description.is_empty() && guide_media.is_none() {
+                let source = [("source", guide_source_name(&t.id))];
                 if opts.guide_status == "error" {
-                    guide_placeholder = t_lang("hud.guide.image_failed", Some(&eff_lang), &[]);
+                    guide_placeholder = t_lang("hud.guide.image_failed", Some(&eff_lang), &source);
                 } else if opts.guide_status == "loading"
                     || (!t.image_url.is_empty() && opts.guide_status.is_empty())
                 {
-                    guide_placeholder = t_lang("hud.guide.loading", Some(&eff_lang), &[]);
+                    guide_placeholder = t_lang("hud.guide.loading", Some(&eff_lang), &source);
                 } else {
-                    guide_placeholder = t_lang("hud.guide.empty", Some(&eff_lang), &[]);
+                    guide_placeholder = t_lang("hud.guide.empty", Some(&eff_lang), &source);
                 }
             }
             if !opts.guide_hotkey_label.is_empty() {
@@ -7105,6 +7119,54 @@ mod tests {
             assert_ne!(pm_err.data(), pm_load.data());
             assert_ne!(pm_err.data(), pm_empty.data());
         }
+    }
+
+    #[test]
+    fn guide_text_names_the_pin_source_for_third_party_pins() {
+        assert_eq!(guide_source_name("107596"), "HoYoLAB");
+        assert_eq!(guide_source_name("appsample:15130"), "AppSample");
+        assert_eq!(guide_source_name("kongying:560"), "Kongying");
+        for lang in ["vi", "en"] {
+            for key in ["hud.guide.empty", "hud.guide.loading", "hud.guide.image_failed"] {
+                let s = gh_core::i18n::t_lang(key, Some(lang), &[("source", "AppSample")]);
+                assert!(
+                    s.contains("AppSample") && !s.contains("HoYoLAB") && !s.contains("{source}"),
+                    "{lang} {key}: {s}"
+                );
+            }
+        }
+
+        // Wiring: the same empty Guide card must read differently for a HoYoLAB and an AppSample pin.
+        let mut r = NavHudRenderer::new();
+        let mut render_for = |id: &str| {
+            let g = NavGuidance {
+                state: NavState::Tracking,
+                target: Some(NavPin {
+                    id: id.into(),
+                    name: "Ghim".into(),
+                    map_id: 2,
+                    ..Default::default()
+                }),
+                distance_m: 35.0,
+                target_distance_m: Some(35.0),
+                ..Default::default()
+            };
+            r.render(
+                &g,
+                &NavRenderOptions {
+                    lang: Some("vi"),
+                    guide_open: true,
+                    guide_status: "empty",
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .data()
+            .to_vec()
+        };
+        let hoyolab = render_for("107596");
+        let appsample = render_for("appsample:15130");
+        assert_ne!(hoyolab, appsample, "empty Guide card text must name the pin's source");
     }
 
     #[test]

@@ -318,7 +318,17 @@ function buildAppSampleHtml(fixture) {
         get all() { return this.allMarkers; },
         get: (id) => indexMap.get(String(id)) || null,
         markerIconUrl: (m) => fx.iconUrlTemplate.replace('{type}', String(m.type || '')),
-        config: { maps: { teyvat: { id: 2 } } }
+        // Same rule as the live catalog.markerImageUrl: an image only when m.img and level >= imageMinLevel.
+        markerImageUrl(m) {
+          const { markerImageUrl: t, rules: r } = this.config;
+          if (m.img && t && !(m.level < r.imageMinLevel)) return t.replace('{id}', m.id);
+          return undefined;
+        },
+        config: {
+          maps: { teyvat: { id: 2 } },
+          markerImageUrl: fx.imageUrlTemplate,
+          rules: { imageMinLevel: fx.imageMinLevel }
+        }
       };
       const overlayCalls = [];
       const adapter = {
@@ -763,6 +773,25 @@ async function main() {
       'appsample_live_surface_vs_underground_classification',
       asUgAccurate,
       `surface301=${JSON.stringify(asPinsRes.surfacePin301Ug)} ug20413=${JSON.stringify(asPinsRes.ugPin20413Ug)} (expected floor_id="10")`
+    );
+
+    // Guide content: AppSample pins with a catalog image must carry it as image_url, so the app's
+    // Guide card can show it (pins without one stay empty).
+    const asGuideRes = await page.eval(`(() => {
+      window.__ghFixtureHandles.store.__setTypes(['o3', 'o5', 'o6', 'o111', 'o185']);
+      const pins = window.__GH_BRIDGE__.queryNearbyUncollectedPins();
+      const withImg = pins.find((p) => p.id === 'appsample:15130');
+      const noImg = pins.find((p) => p.id === 'appsample:301');
+      window.__ghFixtureHandles.store.__setTypes(['o3', 'o5', 'o6', 'o111']);
+      return {
+        withImg: withImg ? withImg.image_url : null,
+        noImg: noImg ? noImg.image_url : null
+      };
+    })()`);
+    record(
+      'appsample_guide_image_from_catalog',
+      asGuideRes.withImg === 'https://game-cdn.appsample.com/gim/item-imgs/15130.jpg' && asGuideRes.noImg === '',
+      `15130=${JSON.stringify(asGuideRes.withImg)} 301=${JSON.stringify(asGuideRes.noImg)}`
     );
 
     // (e) Target lock clearing on AppSample

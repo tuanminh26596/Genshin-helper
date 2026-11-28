@@ -18,7 +18,7 @@
   const CT = window.GHCoordTransform;
   const GH_TAB_ID = `gh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const SCRIPT_VERSION = '5.7.0';
-  const SCRIPT_BUILD = 'multi-provider-v2';
+  const SCRIPT_BUILD = 'multi-provider-v3';
 
   // =========================================================================
   // 1. Open Provider Registry & Built-in Tier 1 Adapters
@@ -495,6 +495,14 @@
             iconUrl = String(ctx.catalog.markerIconUrl(m) || '');
           }
         } catch (e) {}
+        // Guide image: AppSample's own rule (m.img and level >= rules.imageMinLevel) lives in
+        // catalog.markerImageUrl; ~5.6% of markers have one (game-cdn.appsample.com/gim/item-imgs).
+        let imageUrl = '';
+        try {
+          if (ctx.catalog && typeof ctx.catalog.markerImageUrl === 'function') {
+            imageUrl = String(ctx.catalog.markerImageUrl(m) || '');
+          }
+        } catch (e) {}
         // Underground markers carry layer.{groupId, floorId}. m.level is the marker's zoom level
         // (4..6 on live surface markers), not a floor, so it must not mark a pin underground.
         const ugFloor = (m.layer && typeof m.layer === 'object' && Number(m.layer.floorId) > 0)
@@ -513,7 +521,7 @@
           floor_id: ugFloor > 0 ? String(ugFloor) : null,
           floor_name: ugFloor > 0 ? 'B1' : '',
           description: typeof m.description === 'string' ? m.description.trim() : '',
-          image_url: '',
+          image_url: imageUrl.startsWith('https://') ? imageUrl : '',
           marked: foundSet.has(rawId)
         });
       }

@@ -8,7 +8,7 @@
       "provider": "appsample",
       "file": "appsample_state.json",
       "source_url": "https://genshin-impact-map.appsample.com/",
-      "notes": "Real guest React fiber appCtx shape after markersComplete=true; surface pins carry positive zoom `level` (4/5/6) with no `sid`, while underground pins carry `layer.{groupId,floorId,entrances}`."
+      "notes": "Real guest React fiber appCtx shape after markersComplete=true; surface pins carry positive zoom `level` (4/5/6) with no `sid`, while underground pins carry `layer.{groupId,floorId,entrances}`. Guide images: marker 15130 (img=true) plus imageUrlTemplate/imageMinLevel were added from a live guest read on 2026-11-28 (catalog.markerImageUrl)."
     },
     {
       "id": "kongying_state",
