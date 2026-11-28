@@ -17,11 +17,12 @@
 // Usage:
 //   node tests/provider_live_smoke.mjs
 // Optional env:
-//   GH_CHROME=<chrome.exe>           Chromium executable override (else Playwright Chromium)
-//   GH_SMOKE_WATCHDOG_MS=<ms>        Hard watchdog timeout (default 300000)
+//   GH_CHROME=<chrome.exe>              Chromium executable override (else Playwright Chromium)
+//   GH_SMOKE_WATCHDOG_MS=<ms>           Hard watchdog timeout (default 300000)
+//   GH_PROVIDER_RUNTIME_PATH=<path.js>  Override extension/provider_runtime.js (for seeded-fault checks)
 // Exit code: 0 if no unexpected failures, 1 on unexpected failure/error, 2 if Chromium not found.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -150,6 +151,180 @@ class Cdp {
   }
 }
 
+function sanitizeUrlForLog(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const keys = [...u.searchParams.keys()].sort();
+    return `${u.origin}${u.pathname}${keys.length ? `?keys=${keys.join(',')}` : ''}`;
+  } catch {
+    return String(rawUrl || '').slice(0, 160);
+  }
+}
+
+function sanitizeLogText(text) {
+  return String(text || '')
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 [REDACTED]')
+    .replace(/\b(access_token|refresh_token|cookie|token|authorization)=([^&\s;]+)/gi, '$1=[REDACTED]')
+    .slice(0, 240);
+}
+
+function isKongyingAppOrApiRequest(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.toLowerCase();
+    if (!['v3.yuanshen.site', 'yuanshen.site', 'cloud.yuanshen.site', 'assets.yuanshen.site'].includes(host)) {
+      return false;
+    }
+    if (/\.(png|jpg|jpeg|webp|woff2?|css|svg|ico)(\?|$)/i.test(u.pathname)) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function attachPageDiagnostics(page) {
+  const diag = {
+    t0: Date.now(),
+    requests: new Map(),
+    consoleErrors: [],
+    priorAttemptSummaries: [],
+    resetWindow(note = '') {
+      const nowOffset = Date.now() - this.t0;
+      const reqList = [...this.requests.values()].filter((r) => isKongyingAppOrApiRequest(r.url));
+      const pending = reqList
+        .filter((r) => r.tEnd === null)
+        .map((r) => `${r.method} ${r.url} (${nowOffset - r.t0}ms)`)
+        .slice(0, 4);
+      const failed = reqList
+        .filter((r) => r.err || (r.status !== null && r.status >= 400))
+        .map((r) => `${r.method} ${r.url} (${r.err || r.status})`)
+        .slice(0, 4);
+      this.priorAttemptSummaries.push({
+        note,
+        elapsedMs: nowOffset,
+        reqCount: reqList.length,
+        pending,
+        failed,
+        consoleErrCount: this.consoleErrors.length
+      });
+      this.requests.clear();
+      this.consoleErrors.length = 0;
+      this.t0 = Date.now();
+    }
+  };
+  page.handlers.push((m) => {
+    const dt = Date.now() - diag.t0;
+    if (m.method === 'Network.requestWillBeSent') {
+      const { requestId, request } = m.params;
+      if (!request || !request.url || request.url.startsWith('data:') || request.url.startsWith('blob:')) return;
+      diag.requests.set(requestId, {
+        url: sanitizeUrlForLog(request.url),
+        method: request.method || 'GET',
+        t0: dt,
+        status: null,
+        err: null,
+        tResp: null,
+        tEnd: null,
+        bytes: 0
+      });
+    } else if (m.method === 'Network.responseReceived') {
+      const r = diag.requests.get(m.params.requestId);
+      if (r && m.params.response) {
+        r.status = m.params.response.status;
+        r.tResp = dt;
+      }
+    } else if (m.method === 'Network.loadingFinished') {
+      const r = diag.requests.get(m.params.requestId);
+      if (r) {
+        r.tEnd = dt;
+        r.bytes = m.params.encodedDataLength || 0;
+      }
+    } else if (m.method === 'Network.loadingFailed') {
+      const r = diag.requests.get(m.params.requestId);
+      if (r) {
+        r.err = m.params.errorText || 'failed';
+        r.tEnd = dt;
+      }
+    } else if (m.method === 'Runtime.consoleAPICalled' && (m.params.type === 'error' || m.params.type === 'warning')) {
+      if (diag.consoleErrors.length < 30) {
+        const txt = (m.params.args || []).map((a) => a.value ?? a.description ?? '').join(' ');
+        diag.consoleErrors.push(`[${dt}ms ${m.params.type}] ${sanitizeLogText(txt)}`);
+      }
+    } else if (m.method === 'Runtime.exceptionThrown') {
+      if (diag.consoleErrors.length < 30) {
+        const ex = m.params.exceptionDetails || {};
+        const txt = (ex.exception && ex.exception.description) || ex.text || 'exception';
+        diag.consoleErrors.push(`[${dt}ms EXC] ${sanitizeLogText(txt)}`);
+      }
+    }
+  });
+  await page.send('Page.enable');
+  await page.send('Network.enable');
+  return diag;
+}
+
+function classifyKongyingSiteIssue(diag, { pendingThresholdMs = 8000 } = {}) {
+  if (!diag) return { unavailable: false, summary: '', issues: [] };
+  const nowOffset = Date.now() - diag.t0;
+  const relevant = [...diag.requests.values()].filter((r) => isKongyingAppOrApiRequest(r.url));
+  const issues = [];
+  if (relevant.length === 0) {
+    issues.push('no Kongying HTTP requests observed');
+  }
+  const docReq = relevant.find((r) => r.url === 'https://v3.yuanshen.site/' || r.url === 'https://v3.yuanshen.site');
+  if (docReq && docReq.tEnd === null && !docReq.err) {
+    issues.push(`document GET ${docReq.url} never completed (${nowOffset - docReq.t0}ms)`);
+  }
+  const oauthReqs = relevant.filter((r) => r.url.includes('/oauth/token'));
+  if (oauthReqs.length > 0 && !oauthReqs.some((r) => r.method === 'POST' && r.status === 200 && r.tEnd !== null)) {
+    issues.push(`guest /oauth/token did not succeed (${nowOffset - oauthReqs[0].t0}ms)`);
+  }
+  for (const r of relevant) {
+    if (r.err) {
+      issues.push(`${r.method} ${r.url} err=${r.err}`);
+    } else if (r.status !== null && (r.status >= 500 || r.status === 429 || r.status === 401 || r.status === 403)) {
+      issues.push(`${r.method} ${r.url} status=${r.status}`);
+    } else if (r.tEnd === null && (nowOffset - r.t0) >= pendingThresholdMs) {
+      issues.push(`${r.method} ${r.url} pending=${nowOffset - r.t0}ms`);
+    }
+  }
+  const deduped = [...new Set(issues)];
+  return {
+    unavailable: deduped.length > 0,
+    summary: deduped.slice(0, 4).join('; '),
+    issues: deduped
+  };
+}
+
+const KONGYING_FIND_ITEM_SELECTOR_JS = `function findItemSelector(vm) {
+  if (!vm || !vm.$) return null;
+  const seen = new Set();
+  const walk = (vnode) => {
+    if (!vnode || typeof vnode !== 'object' || seen.has(vnode)) return null;
+    seen.add(vnode);
+    if (vnode.component) {
+      const comp = vnode.component;
+      if (comp.type && comp.type.name === 'ItemSelector' && comp.proxy) return comp.proxy;
+      const hit = walk(comp.subTree);
+      if (hit) return hit;
+    }
+    if (Array.isArray(vnode.children)) {
+      for (const ch of vnode.children) {
+        const hit = walk(ch);
+        if (hit) return hit;
+      }
+    }
+    if (vnode.ssFallback) {
+      const hit = walk(vnode.ssFallback);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  return walk(vm.$.subTree);
+}`;
+
 // Helper expression snippets run inside the target page
 function providerMapAccessorJs(provider) {
   if (provider === 'hoyolab') {
@@ -240,12 +415,26 @@ async function main() {
 
   const vectorsDoc = JSON.parse(readFileSync(VECTORS_PATH, 'utf8'));
   const profile = mkdtempSync(join(tmpdir(), 'gh_provider_live_'));
+  let tempExtDir = null;
+  let extPathToLoad = EXT_DIR;
+  if (process.env.GH_PROVIDER_RUNTIME_PATH) {
+    const overridePath = resolve(process.env.GH_PROVIDER_RUNTIME_PATH);
+    if (!existsSync(overridePath)) {
+      throw new Error(`GH_PROVIDER_RUNTIME_PATH not found: ${overridePath}`);
+    }
+    tempExtDir = mkdtempSync(join(tmpdir(), 'gh_provider_live_ext_'));
+    cpSync(EXT_DIR, tempExtDir, { recursive: true });
+    writeFileSync(join(tempExtDir, 'provider_runtime.js'), readFileSync(overridePath));
+    extPathToLoad = tempExtDir;
+    console.log(`[INFO] Using GH_PROVIDER_RUNTIME_PATH override: ${overridePath.split(/[\\/]/).pop()}`);
+  }
+
   const proc = spawn(chrome, [
     '--headless=new',
     '--remote-debugging-port=0',
     `--user-data-dir=${profile}`,
-    `--disable-extensions-except=${EXT_DIR}`,
-    `--load-extension=${EXT_DIR}`,
+    `--disable-extensions-except=${extPathToLoad}`,
+    `--load-extension=${extPathToLoad}`,
     '--no-first-run',
     '--no-default-browser-check',
     '--window-size=1920,1080',
@@ -264,11 +453,13 @@ async function main() {
     }
     await Promise.race([procExited, sleep(2000)]);
     await sleep(300);
-    if (existsSync(profile)) {
-      try {
-        rmSync(profile, { recursive: true, force: true, maxRetries: 15, retryDelay: 250 });
-      } catch (e) {
-        console.warn(`[WARN] could not remove temp profile ${profile}: ${e && e.code ? e.code : e}`);
+    for (const dir of [profile, tempExtDir]) {
+      if (dir && existsSync(dir)) {
+        try {
+          rmSync(dir, { recursive: true, force: true, maxRetries: 15, retryDelay: 250 });
+        } catch (e) {
+          console.warn(`[WARN] could not remove temp dir ${dir}: ${e && e.code ? e.code : e}`);
+        }
       }
     }
   };
@@ -280,10 +471,13 @@ async function main() {
     } else if (!proc.killed && proc.exitCode === null) {
       proc.kill();
     }
-    try {
-      rmSync(profile, { recursive: true, force: true });
-    } catch (e) {
-      console.warn(`[WARN] abort cleanup failed for ${profile}: ${e && e.code ? e.code : e}`);
+    for (const dir of [profile, tempExtDir]) {
+      if (!dir) continue;
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch (e) {
+        console.warn(`[WARN] abort cleanup failed for ${dir}: ${e && e.code ? e.code : e}`);
+      }
     }
   };
 
@@ -316,6 +510,7 @@ async function main() {
     const sw = new Cdp(swTarget.webSocketDebuggerUrl);
     sessions.push(sw);
     await sw.ready;
+    await sw.send('Runtime.enable');
 
     // Mock desktop server state & event queue inside the SW Fetch handler
     const recorded = {
@@ -469,6 +664,19 @@ async function main() {
       fulfillJson(m.params.requestId, { ok: true, is_owner: true });
     });
     await sw.send('Fetch.enable', { patterns: [{ urlPattern: `${APP_ORIGIN}/*` }] });
+    // Let MV3 onInstalled/onStartup reinjectOpenMapTabs({ forceAll: true }) settle while only
+    // about:blank is open so it cannot re-inject scripts into AppSample mid-test and reset GH_TAB_ID.
+    await sw.eval(`(async () => {
+      if (typeof chrome !== 'undefined' && chrome.alarms && typeof chrome.alarms.get === 'function') {
+        await new Promise((r) => chrome.alarms.get('gh-keepalive-poll', () => r()));
+      }
+      if (typeof reinjectOpenMapTabs === 'function') {
+        await reinjectOpenMapTabs({ forceAll: false });
+      }
+      await new Promise((r) => setTimeout(r, 300));
+    })()`).catch((err) => {
+      console.warn('[WARN] SW settle eval failed:', err && err.message ? err.message : err);
+    });
 
     const openTab = async (url) => {
       const target = await http(`/json/new?${encodeURI(url)}`, 'PUT');
@@ -477,6 +685,127 @@ async function main() {
       await p.ready;
       await p.send('Runtime.enable');
       return { page: p, targetId: target.id };
+    };
+
+    const openTabWithDiagnostics = async (url) => {
+      const target = await http('/json/new?about:blank', 'PUT');
+      const p = new Cdp(target.webSocketDebuggerUrl);
+      sessions.push(p);
+      await p.ready;
+      await p.send('Runtime.enable');
+      const diag = await attachPageDiagnostics(p);
+      await p.send('Page.navigate', { url });
+      return { page: p, targetId: target.id, diag };
+    };
+
+    const dumpKongyingDiagnostics = async (page, diag, extra = {}) => {
+      let pageState = null;
+      try {
+        pageState = await page.eval(`(() => {
+          ${KONGYING_FIND_ITEM_SELECTOR_JS}
+          const b = window.__GH_BRIDGE__;
+          const ctx = b ? b.getContext() : null;
+          const vm = ctx ? ctx.vm : null;
+          const ms = ctx ? ctx.mainStore : null;
+          const isel = vm ? findItemSelector(vm) : null;
+          let totalLayers = 0;
+          let dataLayers = 0;
+          let leafletTeleportLayers = 0;
+          let leafletPinLayers = 0;
+          if (ctx && ctx.map && ctx.map._layers) {
+            const seen = new Set();
+            const visit = (l) => {
+              if (!l || seen.has(l)) return;
+              seen.add(l);
+              totalLayers++;
+              const d = l.options && l.options.data;
+              if (d && d.id !== undefined) {
+                dataLayers++;
+                const title = String(d.markerTitle || '').trim();
+                const isTp = Boolean(l.options && l.options.icon && l.options.icon.options && l.options.icon.options.teleport) ||
+                  /^(传送锚点|七天神像|秘境|征讨领域|浪船锚点|奖励秘境)$/.test(title);
+                if (isTp) leafletTeleportLayers++;
+                else leafletPinLayers++;
+              }
+              if (typeof l.getLayers === 'function') {
+                try { for (const c of l.getLayers()) visit(c); } catch {}
+              } else if (typeof l.eachLayer === 'function') {
+                try { l.eachLayer(visit); } catch {}
+              }
+            };
+            for (const l of Object.values(ctx.map._layers)) visit(l);
+          }
+          const headers = Array.from(document.querySelectorAll('.item_selector_item .item_header'));
+          const visHeaders = headers.filter((el) => el.offsetWidth > 0 && el.offsetHeight > 0).length;
+          const visOptions = Array.from(document.querySelectorAll('.item_selector_item .item_body .item_option'))
+            .filter((el) => el.offsetWidth > 0 && el.offsetHeight > 0).length;
+          const qNotifs = Array.from(document.querySelectorAll('.q-notification__message'))
+            .map((el) => String(el.textContent || '').trim().slice(0, 120))
+            .filter(Boolean);
+          return {
+            readyState: document.readyState,
+            hasBridge: Boolean(b),
+            hasCtx: Boolean(ctx),
+            areaCount: ms && Array.isArray(ms.area_list) ? ms.area_list.length : -1,
+            selectedArea: ms ? ms.selected_area : null,
+            selectedChildArea: ms && ms.selected_child_area ? {
+              id: ms.selected_child_area.id,
+              code: ms.selected_child_area.code,
+              name: ms.selected_child_area.name
+            } : null,
+            teleportListLen: ms && Array.isArray(ms.teleport_list) ? ms.teleport_list.length : -1,
+            selectedItemCount: ms && Array.isArray(ms.selected_item_list) ? ms.selected_item_list.length : -1,
+            vm: vm ? {
+              teleport_state: Boolean(vm.teleport_state),
+              loading: Boolean(vm.loading),
+              underground_show: Boolean(vm.underground_show),
+              underground_opacity: Boolean(vm.underground_opacity),
+              iconListLen: Array.isArray(vm.icon_list) ? vm.icon_list.length : -1,
+              teleportMapKeys: vm.teleport_map && typeof vm.teleport_map.keys === 'function' ? [...vm.teleport_map.keys()] : [],
+              teleportGroupLayers: vm.teleport_group && typeof vm.teleport_group.getLayers === 'function' ? vm.teleport_group.getLayers().length : -1,
+              bxGroupLayers: vm.BXGroup && typeof vm.BXGroup.getLayers === 'function' ? vm.BXGroup.getLayers().length : -1
+            } : null,
+            isel: isel ? {
+              item_loading: Boolean(isel.item_loading),
+              typeListLen: Array.isArray(isel.type_list) ? isel.type_list.length : -1,
+              itemCountTotal: Array.isArray(isel.item_list)
+                ? isel.item_list.reduce((acc, arr) => acc + (Array.isArray(arr) ? arr.length : 0), 0)
+                : -1
+            } : null,
+            leaflet: { totalLayers, dataLayers, leafletTeleportLayers, leafletPinLayers },
+            bridgePins: b && typeof b.queryNearbyUncollectedPins === 'function' ? b.queryNearbyUncollectedPins().length : -1,
+            dom: { headers: headers.length, visHeaders, visOptions, qNotifs }
+          };
+        })()`);
+      } catch (e) {
+        pageState = { evalError: sanitizeLogText(e && e.message ? e.message : e) };
+      }
+      const kyCals = recorded.calibrate_provider.filter((r) => r && r.provider === 'kongying');
+      const lastCal = kyCals.length ? kyCals[kyCals.length - 1] : null;
+      const extStats = {
+        recordedCalibrateCount: kyCals.length,
+        lastCalibrateAnchors: lastCal && Array.isArray(lastCal.anchors) ? lastCal.anchors.length : 0
+      };
+      console.log(`  [DIAG][kongying] state=${JSON.stringify(pageState)} ext=${JSON.stringify(extStats)} extra=${JSON.stringify(extra)}`);
+      if (diag) {
+        if (diag.priorAttemptSummaries.length) {
+          console.log(`  [DIAG][kongying] priorAttempts=${JSON.stringify(diag.priorAttemptSummaries)}`);
+        }
+        const nowOffset = Date.now() - diag.t0;
+        const reqs = [...diag.requests.values()].filter((r) => isKongyingAppOrApiRequest(r.url));
+        console.log(`  [DIAG][kongying] network (${reqs.length} app/api requests, window=${nowOffset}ms):`);
+        for (const r of reqs) {
+          const dur = r.tEnd !== null ? `+${r.tEnd - r.t0}ms` : `PENDING(${nowOffset - r.t0}ms)`;
+          console.log(`    [${r.t0}ms ${dur}] ${r.method} ${r.status ?? r.err ?? 'OPEN'} ${r.url} (${r.bytes}B)`);
+        }
+        if (diag.consoleErrors.length) {
+          console.log(`  [DIAG][kongying] console (${diag.consoleErrors.length}):`);
+          for (const line of diag.consoleErrors) {
+            console.log(`    ${line}`);
+          }
+        }
+      }
+      return { pageState, extStats };
     };
 
     const closeTab = async (tab) => {
@@ -768,6 +1097,14 @@ async function main() {
         Math.abs(asSyncState.center.lng - asVec.expected_leaflet.lng) < 0.01 &&
         asSyncState.mErrPx <= 8
       );
+      if (!asSyncOk) {
+        const asDiag = await asTab.page.eval(`(() => ({
+          curTabId: window.__GH_BRIDGE__ ? window.__GH_BRIDGE__.tabId : null,
+          hasWrap: Boolean(document.querySelector('.gh-player-marker-wrap')),
+          url: location.href
+        }))()`).catch(() => null);
+        console.log(`  [DIAG][appsample_sync] sameTabId=${asDiag?.curTabId === asBoot?.tabId} swAckSeq=${swAckSeq} latestSeq=${latestSeq} ${JSON.stringify(asDiag)}`);
+      }
       record(
         'appsample_live_sync_position',
         asSyncOk,
@@ -802,6 +1139,14 @@ async function main() {
         /sign in/i.test(String(asFb.detail || '')) &&
         asToast && asToast.visible && /sign in/i.test(String(asToast.text || ''))
       );
+      if (!asGuestMarkOk) {
+        const asDiag = await asTab.page.eval(`(() => ({
+          curTabId: window.__GH_BRIDGE__ ? window.__GH_BRIDGE__.tabId : null,
+          hasWrap: Boolean(document.querySelector('.gh-player-marker-wrap')),
+          url: location.href
+        }))()`).catch(() => null);
+        console.log(`  [DIAG][appsample_mark] sameTabId=${asDiag?.curTabId === asBoot?.tabId} swAckSeq=${swAckSeq} latestSeq=${latestSeq} ${JSON.stringify(asDiag)}`);
+      }
       record(
         'appsample_live_guest_mark_auth_error',
         asGuestMarkOk,
@@ -830,180 +1175,462 @@ async function main() {
     // PROVIDER 2: Kongying v3 (https://v3.yuanshen.site/)
     // =========================================================================
     console.log('\n[2/3] Kongying v3 live checks');
-    const kyTab = await openTab(KONGYING_URL);
+    const kyTab = await openTabWithDiagnostics(KONGYING_URL);
+    const kyDiag = kyTab.diag;
+    let kyDumped = false;
+    const ensureKyDumped = async (extra = {}) => {
+      const d = await dumpKongyingDiagnostics(kyTab.page, kyDiag, extra);
+      kyDumped = true;
+      return d;
+    };
     try {
-      const kyBoot = await waitUntil(async () => {
-        return kyTab.page.eval(`(() => {
-          const b = window.__GH_BRIDGE__;
-          if (!b) return null;
-          const ctx = b.getContext();
-          if (!ctx || !ctx.mainStore || !Array.isArray(ctx.mainStore.area_list) || ctx.mainStore.area_list.length === 0) return null;
-          return {
-            providerId: b.providerId,
-            tabId: b.tabId,
-            hasRegister: typeof window.__GH_REGISTER_MAP_PROVIDER__ === 'function',
-            mapId: b.getCurrentMapId()
-          };
-        })()`);
-      }, 60000, 500);
-      record(
-        'kongying_live_boot_and_context',
-        Boolean(kyBoot && kyBoot.providerId === 'kongying' && kyBoot.hasRegister && kyBoot.mapId === 2),
-        JSON.stringify(kyBoot)
-      );
-
-      // Enable teleports + select one collectible category in live Kongying UI so anchors & pins load
-      await sleep(1500);
-      await kyTab.page.eval(`(async () => {
-        const ctx = window.__GH_BRIDGE__.getContext();
-        if (ctx && ctx.vm && typeof ctx.vm.teleport_switch === 'function') {
-          try {
-            ctx.vm.teleport_switch();
-          } catch (e) {
-            console.warn('[provider_live_smoke] teleport_switch failed:', String(e));
-          }
-        }
-        const headers = Array.from(document.querySelectorAll('.item_selector_item .item_header'));
-        if (headers[0]) headers[0].click();
-        await new Promise((r) => setTimeout(r, 900));
-        const leaves = Array.from(document.querySelectorAll('.item_selector_item .item_content > div, .item_selector_item img'))
-          .filter((el) => el.offsetWidth > 0 && el.offsetHeight > 0);
-        for (const el of leaves.slice(0, 3)) {
-          try {
-            el.click();
-          } catch (e) {
-            console.warn('[provider_live_smoke] selector leaf click failed:', String(e));
-          }
-        }
+      const probeKongyingBoot = () => kyTab.page.eval(`(() => {
+        ${KONGYING_FIND_ITEM_SELECTOR_JS}
+        const b = window.__GH_BRIDGE__;
+        if (!b) return null;
+        const ctx = b.getContext();
+        if (!ctx || !ctx.vm || !ctx.mainStore || !ctx.map) return null;
+        const ms = ctx.mainStore;
+        const vm = ctx.vm;
+        const areaOk = Array.isArray(ms.area_list) && ms.area_list.length > 0 && Boolean(ms.selected_child_area && ms.selected_child_area.id);
+        const tpOk = Array.isArray(ms.teleport_list) && ms.teleport_list.length > 0;
+        const iconOk = Array.isArray(vm.icon_list) && vm.icon_list.length > 0;
+        const mapInitOk = Boolean(vm.BXGroup && vm.teleport_map);
+        const isel = findItemSelector(vm);
+        const iselVueOk = Boolean(isel && !isel.item_loading && Array.isArray(isel.type_list) && isel.type_list.length > 0);
+        const visHeaders = Array.from(document.querySelectorAll('.item_selector_item .item_header'))
+          .filter((el) => el.offsetWidth > 0 && el.offsetHeight > 0).length;
+        const domSpinner = Boolean(document.querySelector('.item_selector .q-inner-loading'));
+        const iselOk = iselVueOk || (!isel && visHeaders >= 2 && !domSpinner);
+        if (!areaOk || !tpOk || !iconOk || !mapInitOk || !iselOk) return null;
+        return {
+          providerId: b.providerId,
+          tabId: b.tabId,
+          hasRegister: typeof window.__GH_REGISTER_MAP_PROVIDER__ === 'function',
+          mapId: b.getCurrentMapId(),
+          areaCount: ms.area_list.length,
+          teleportListLen: ms.teleport_list.length,
+          iconListLen: vm.icon_list.length,
+          hasItemSelectorProxy: Boolean(isel)
+        };
       })()`);
 
-      const kyMarkersLoaded = await waitUntil(async () => {
-        const n = await kyTab.page.eval(`window.__GH_BRIDGE__.queryNearbyUncollectedPins().length`);
-        return n > 0 ? n : null;
-      }, 20000, 400);
+      let itemListRefreshTried = false;
+      const runKongyingBootAttempt = async (maxMs, { allowEarlyOauthAbort = false } = {}) => {
+        const tAttempt0 = Date.now();
+        let attemptItemRefreshTried = false;
+        while (Date.now() - tAttempt0 < maxMs) {
+          let res = null;
+          try { res = await probeKongyingBoot(); } catch { res = null; }
+          if (res) return res;
 
-      await kyTab.page.eval(`window.__GH_BRIDGE__ && window.__GH_BRIDGE__.calibrateNow()`);
-      const kyCal = await waitUntil(() => recorded.calibrate_provider.find((r) => r && r.provider === 'kongying'), 10000, 200);
-      record(
-        'kongying_live_calibrate_provider',
-        Boolean(kyCal && kyCal.provider === 'kongying' && kyCal.map_id === 2 && kyCal.swap_lat_lng === true && Array.isArray(kyCal.anchors) && kyCal.anchors.length >= 3),
-        kyCal ? `provider=${kyCal.provider} map_id=${kyCal.map_id} swap=${kyCal.swap_lat_lng} anchors=${kyCal.anchors.length} pins=${kyMarkersLoaded}` : `missing (pins=${kyMarkersLoaded})`
-      );
+          const elapsed = Date.now() - tAttempt0;
+          if (elapsed >= 18000) {
+            if (allowEarlyOauthAbort) {
+              const nowOffset = Date.now() - kyDiag.t0;
+              const deadOauth = [...kyDiag.requests.values()].some((r) =>
+                r.url.includes('/oauth/token') &&
+                r.status === null &&
+                r.tEnd === null &&
+                (nowOffset - r.t0) >= 15000
+              );
+              if (deadOauth) return null;
+            }
+            if (!attemptItemRefreshTried) {
+              const refreshed = await kyTab.page.eval(`(async () => {
+                ${KONGYING_FIND_ITEM_SELECTOR_JS}
+                const ctx = window.__GH_BRIDGE__ && window.__GH_BRIDGE__.getContext();
+                if (!ctx || !ctx.vm || !ctx.mainStore) return false;
+                const ms = ctx.mainStore;
+                const isel = findItemSelector(ctx.vm);
+                const areaId = ms.selected_child_area && ms.selected_child_area.id;
+                const tpLen = Array.isArray(ms.teleport_list) ? ms.teleport_list.length : 0;
+                if (Array.isArray(ms.area_list) && ms.area_list.length > 0 && areaId && Array.isArray(ctx.vm.icon_list) && ctx.vm.icon_list.length > 0 && tpLen === 0 && isel && typeof isel.get_itemlist === 'function') {
+                  await isel.get_itemlist(areaId);
+                  return true;
+                }
+                return false;
+              })()`).catch(() => false);
+              if (refreshed) {
+                attemptItemRefreshTried = true;
+                itemListRefreshTried = true;
+              }
+            }
+          }
+          await sleep(300);
+        }
+        return null;
+      };
 
-      // SYNC_POSITION_ONLY check against transform_vectors.json (kongying_m2_q4: cx=1000, cy=-500)
-      const kyVec = vectorsDoc.vectors.find((v) => v.id === 'kongying_m2_q4');
-      await pushAndWaitDelivered({
-        type: 'SYNC_POSITION_ONLY',
-        map_id: 2,
-        lat: kyVec.canonical.y,
-        lng: kyVec.canonical.x,
-        heading: 0,
-        camera_heading: 0,
-        zoom_ratio_t: 0.6,
-        has_world_coords: true,
-        is_underground: false
-      }, 100);
-      let kySyncState = null;
-      await waitUntil(async () => {
-        const s = await kyTab.page.eval(`(() => {
-          const ctx = window.__GH_BRIDGE__.getContext();
-          const c = ctx.map.getCenter();
-          const ll = window.GHCoordTransform.canonicalToLeaflet(window.__GH_BRIDGE__.getTransform(), ${kyVec.canonical.y}, ${kyVec.canonical.x});
-          const pExp = ctx.map.latLngToContainerPoint(ll);
-          const wrap = document.querySelector('.gh-player-marker-wrap');
-          const cRect = ctx.map.getContainer().getBoundingClientRect();
-          const wRect = wrap ? wrap.getBoundingClientRect() : null;
-          const mErrPx = wRect ? Math.hypot((wRect.left + wRect.width / 2 - cRect.left) - pExp.x, (wRect.top + wRect.height / 2 - cRect.top) - pExp.y) : 999;
-          return {
-            center: { lat: c.lat, lng: c.lng },
-            expected: { lat: ll[0], lng: ll[1] },
-            zoom: ctx.map.getZoom(),
-            animating: Boolean(ctx.map._animatingZoom),
-            mErrPx
-          };
-        })()`);
-        if (s) kySyncState = s;
-        return Boolean(
-          s &&
-          !s.animating &&
-          Math.abs(s.center.lat - kyVec.expected_leaflet.lat) < 50 &&
-          Math.abs(s.center.lng - kyVec.expected_leaflet.lng) < 50 &&
-          s.mErrPx <= 8
-        );
-      }, 5000, 150);
-      const kySyncOk = Boolean(
-        kySyncState &&
-        Math.abs(kySyncState.center.lat - kyVec.expected_leaflet.lat) < 50 &&
-        Math.abs(kySyncState.center.lng - kyVec.expected_leaflet.lng) < 50 &&
-        kySyncState.mErrPx <= 8
-      );
-      record(
-        'kongying_live_sync_position',
-        kySyncOk,
-        kySyncState
-          ? `center=(${kySyncState.center.lat.toFixed(1)},${kySyncState.center.lng.toFixed(1)}) exp=(${kyVec.expected_leaflet.lat.toFixed(1)},${kyVec.expected_leaflet.lng.toFixed(1)}) markerErrPx=${kySyncState.mErrPx.toFixed(2)} zoom=${kySyncState.zoom} animating=${kySyncState.animating}`
-          : 'no sync state'
-      );
+      let kyBoot = await runKongyingBootAttempt(45000, { allowEarlyOauthAbort: true });
 
-      // Guest mark + unmark check on Kongying v3
-      const kyPinInfo = await kyTab.page.eval(`(() => {
-        const pins = window.__GH_BRIDGE__.queryNearbyUncollectedPins();
-        if (!pins.length) return null;
-        return { id: pins[0].id, rawId: pins[0].rawId };
-      })()`);
-      let kyMarkOk = false;
-      let kyMarkDetail = 'no pins available';
-      if (kyPinInfo) {
-        const fbStart = recorded.action_feedback.length;
-        pushServerEvent({
-          type: 'NAV_MARK_PIN',
-          pin_id: kyPinInfo.id,
-          action: 'mark',
-          target_provider: 'kongying',
-          owner_tab_id: kyBoot.tabId
-        });
-        const fbMark = await waitUntil(() => recorded.action_feedback.slice(fbStart).find((x) => x && x.pin_id === kyPinInfo.id && x.action === 'mark'), 10000, 150);
-        const afterMarkHas = await kyTab.page.eval(`(() => {
-          const arr = JSON.parse(localStorage.getItem('marked_layers') || '[]').map(String);
-          return arr.includes(${JSON.stringify(kyPinInfo.rawId)});
-        })()`);
-
-        const fbStart2 = recorded.action_feedback.length;
-        pushServerEvent({
-          type: 'NAV_MARK_PIN',
-          pin_id: kyPinInfo.id,
-          action: 'unmark',
-          target_provider: 'kongying',
-          owner_tab_id: kyBoot.tabId
-        });
-        const fbUnmark = await waitUntil(() => recorded.action_feedback.slice(fbStart2).find((x) => x && x.pin_id === kyPinInfo.id && x.action === 'unmark'), 10000, 150);
-        const afterUnmarkHas = await kyTab.page.eval(`(() => {
-          const arr = JSON.parse(localStorage.getItem('marked_layers') || '[]').map(String);
-          return arr.includes(${JSON.stringify(kyPinInfo.rawId)});
-        })()`);
-
-        kyMarkOk = Boolean(afterMarkHas && !afterUnmarkHas && fbMark?.status === 'ok' && fbUnmark?.status === 'ok');
-        kyMarkDetail = `pin=${kyPinInfo.id} afterMark=${afterMarkHas} afterUnmark=${afterUnmarkHas} fbMark=${fbMark?.status} fbUnmark=${fbUnmark?.status}`;
+      let bootReloaded = false;
+      if (!kyBoot) {
+        const stallCheck = classifyKongyingSiteIssue(kyDiag, { pendingThresholdMs: 8000 });
+        if (stallCheck.unavailable) {
+          bootReloaded = true;
+          console.log(`  [INFO] kongying boot stalled (${stallCheck.summary}); reloading once to recover`);
+          kyDiag.resetWindow('boot_stall_reload');
+          await kyTab.page.send('Page.reload', { ignoreCache: false });
+          kyBoot = await runKongyingBootAttempt(55000, { allowEarlyOauthAbort: false });
+        }
       }
-      record('kongying_live_guest_mark_unmark', kyMarkOk, kyMarkDetail);
 
-      // GATING: 8-heading walk on Kongying v3
-      const kyWalk = await runEightHeadingWalk(kyTab.page, 'kongying', -500, 1000);
-      const kyWalkSummary = `maxArrowErr=${kyWalk.maxArrowErr.toFixed(1)}deg maxConeErr=${kyWalk.maxConeErr.toFixed(1)}deg maxPosErr=${kyWalk.maxPosErr.toFixed(2)}px fov=${kyWalk.allFov}`;
-      if (kyWalk.posOk && !kyWalk.orientOk) {
-        record(
-          'kongying_8heading_walk',
-          false,
-          `${kyWalkSummary} samples=${JSON.stringify(kyWalk.perHeading)}`,
-          'Kongying v3 live map screen motion orientation differs from arrow/cone CSS heading while position is accurate'
-        );
+      const kyBootOk = Boolean(kyBoot && kyBoot.providerId === 'kongying' && kyBoot.hasRegister && kyBoot.mapId === 2);
+      if (!kyBootOk) {
+        const siteIssue = classifyKongyingSiteIssue(kyDiag, { pendingThresholdMs: 8000 });
+        await ensureKyDumped({ phase: 'boot', bootReloaded, itemListRefreshTried, kyBoot });
+        const bootReason = siteIssue.unavailable ? `site_unavailable: ${siteIssue.summary}` : JSON.stringify(kyBoot);
+        const depReason = siteIssue.unavailable ? `site_unavailable: ${siteIssue.summary}` : 'boot failed (no context)';
+        record('kongying_live_boot_and_context', false, bootReason);
+        record('kongying_live_calibrate_provider', false, depReason);
+        record('kongying_live_sync_position', false, depReason);
+        record('kongying_live_guest_mark_unmark', false, depReason);
+        record('kongying_8heading_walk', false, depReason);
       } else {
-        record('kongying_8heading_walk', kyWalk.posOk && kyWalk.orientOk, kyWalkSummary);
-      }
+        record('kongying_live_boot_and_context', true, JSON.stringify(kyBoot));
 
-      // INFORMATIONAL: ~200-frame QA replay on Kongying v3
-      if (qaFrames) {
-        qaResults.kongying = await runQaReplay(kyTab.page, 'kongying', qaFrames);
+        // Enable teleports only after teleport_list & map state are ready, so teleport_map never caches an empty LayerGroup
+        const countTeleportLayersJs = `(() => {
+          const ctx = window.__GH_BRIDGE__ && window.__GH_BRIDGE__.getContext();
+          if (!ctx || !ctx.map || !ctx.map._layers) return { tpLayers: 0, tpGroup: -1, loading: false };
+          let tpLayers = 0;
+          const seen = new Set();
+          const visit = (l) => {
+            if (!l || seen.has(l)) return;
+            seen.add(l);
+            const d = l.options && l.options.data;
+            if (d && typeof d.position === 'string') {
+              const title = String(d.markerTitle || '').trim();
+              const isTp = Boolean(l.options && l.options.icon && l.options.icon.options && l.options.icon.options.teleport) ||
+                /^(传送锚点|七天神像|秘境|征讨领域|浪船锚点|奖励秘境)$/.test(title);
+              if (isTp) tpLayers++;
+            }
+            if (typeof l.getLayers === 'function') {
+              try { for (const c of l.getLayers()) visit(c); } catch {}
+            } else if (typeof l.eachLayer === 'function') {
+              try { l.eachLayer(visit); } catch {}
+            }
+          };
+          for (const l of Object.values(ctx.map._layers)) visit(l);
+          return {
+            tpLayers,
+            tpGroup: ctx.vm && ctx.vm.teleport_group && typeof ctx.vm.teleport_group.getLayers === 'function' ? ctx.vm.teleport_group.getLayers().length : -1,
+            loading: Boolean(ctx.vm && ctx.vm.loading)
+          };
+        })()`;
+
+        await kyTab.page.eval(`(() => {
+          const ctx = window.__GH_BRIDGE__.getContext();
+          const areaName = ctx.mainStore && ctx.mainStore.selected_child_area ? String(ctx.mainStore.selected_child_area.name || '') : '';
+          if (areaName && ctx.vm && ctx.vm.teleport_map && typeof ctx.vm.teleport_map.has === 'function' && ctx.vm.teleport_map.has(areaName)) {
+            const cached = ctx.vm.teleport_map.get(areaName);
+            if (!cached || typeof cached.getLayers !== 'function' || cached.getLayers().length === 0) {
+              ctx.vm.teleport_map.delete(areaName);
+            }
+          }
+          if (ctx.vm && !ctx.vm.teleport_state && typeof ctx.vm.teleport_switch === 'function') {
+            ctx.vm.teleport_switch();
+          }
+        })()`);
+
+        let tpReady = await waitUntil(async () => {
+          const st = await kyTab.page.eval(countTeleportLayersJs);
+          return st && st.tpLayers >= 3 ? st : null;
+        }, 20000, 300);
+
+        let teleportRetryUsed = false;
+        if (!tpReady) {
+          teleportRetryUsed = true;
+          await kyTab.page.eval(`(() => {
+            const ctx = window.__GH_BRIDGE__.getContext();
+            const areaName = ctx.mainStore && ctx.mainStore.selected_child_area ? String(ctx.mainStore.selected_child_area.name || '') : '';
+            if (areaName && ctx.vm && ctx.vm.teleport_map) {
+              ctx.vm.teleport_map.delete(areaName);
+            }
+            if (ctx.vm && typeof ctx.vm.teleport_layer_init === 'function') {
+              ctx.vm.teleport_state = true;
+              ctx.vm.teleport_layer_init();
+            }
+          })()`);
+          tpReady = await waitUntil(async () => {
+            const st = await kyTab.page.eval(countTeleportLayersJs);
+            return st && st.tpLayers >= 3 ? st : null;
+          }, 15000, 300);
+        }
+
+        // Select collectible categories via Vue ItemSelector API (with exact DOM .item_body .item_option fallback)
+        const selectKongyingCollectibles = async (attemptIdx, excludeIds) => {
+          const vueRes = await kyTab.page.eval(`(async () => {
+            ${KONGYING_FIND_ITEM_SELECTOR_JS}
+            const ctx = window.__GH_BRIDGE__.getContext();
+            const ms = ctx.mainStore;
+            const isel = findItemSelector(ctx.vm);
+            if (!isel) return { foundProxy: false };
+            const countAllItems = () => {
+              if (!Array.isArray(isel.item_list)) return 0;
+              let n = 0;
+              for (const arr of isel.item_list) {
+                if (Array.isArray(arr)) n += arr.length;
+              }
+              return n;
+            };
+            let refetchedItems = false;
+            if (countAllItems() === 0 && typeof isel.get_itemlist === 'function' && ms.selected_child_area && ms.selected_child_area.id) {
+              refetchedItems = true;
+              await isel.get_itemlist(ms.selected_child_area.id);
+            }
+            const excludeSet = new Set(${JSON.stringify(excludeIds)});
+            const selectedSet = new Set((ms.selected_item_list || []).map((x) => x && x.id).filter((id) => id !== undefined));
+            const all = [];
+            if (Array.isArray(isel.item_list)) {
+              for (const arr of isel.item_list) {
+                if (!Array.isArray(arr)) continue;
+                for (const it of arr) {
+                  if (!it || it.id === undefined || Number(it.count || 0) <= 0) continue;
+                  if (excludeSet.has(it.id) || selectedSet.has(it.id)) continue;
+                  all.push(it);
+                }
+              }
+            }
+            const moderate = all.filter((it) => it.count >= 5 && it.count <= 150).sort((a, b) => a.count - b.count);
+            const fallback = [...all].sort((a, b) => a.count - b.count);
+            const picked = (moderate.length ? moderate : fallback).slice(0, 2);
+            for (let i = 0; i < picked.length; i++) {
+              isel.insert_selected_item(picked[i]);
+              if (i + 1 < picked.length) {
+                await new Promise((r) => setTimeout(r, 60));
+              }
+            }
+            return {
+              foundProxy: true,
+              method: 'vue_item_selector',
+              refetchedItems,
+              candidateCount: all.length,
+              pickedIds: picked.map((x) => x.id),
+              picked: picked.map((x) => ({ id: x.id, name: x.name, count: x.count }))
+            };
+          })()`);
+          if (vueRes && vueRes.foundProxy && vueRes.pickedIds && vueRes.pickedIds.length > 0) {
+            return vueRes;
+          }
+
+          // DOM fallback if ItemSelector proxy is absent or empty
+          const expandInfo = await kyTab.page.eval(`(() => {
+            const items = Array.from(document.querySelectorAll('.item_selector_item'))
+              .filter((item) => {
+                const hdr = item.querySelector('.item_header');
+                return hdr && hdr.offsetWidth > 0 && hdr.offsetHeight > 0;
+              });
+            if (!items.length) return { headerCount: 0 };
+            const target = items[${attemptIdx} % items.length];
+            const alreadyOpen = target.querySelectorAll('.item_body .item_option').length > 0;
+            if (!alreadyOpen) {
+              const hdr = target.querySelector('.item_header');
+              if (hdr) hdr.click();
+            }
+            return { headerCount: items.length, targetIndex: ${attemptIdx} % items.length, alreadyOpen };
+          })()`);
+          const optionsReady = await waitUntil(() => kyTab.page.eval(`(() => {
+            const opts = Array.from(document.querySelectorAll('.item_selector_item .item_body .item_option'))
+              .filter((el) => el.offsetWidth > 0 && el.offsetHeight > 0);
+            return opts.length > 0 ? opts.length : null;
+          })()`), 5000, 150);
+          const clickedOpts = await kyTab.page.eval(`(async () => {
+            const opts = Array.from(document.querySelectorAll('.item_selector_item .item_body .item_option:not(.on)'))
+              .filter((el) => el.offsetWidth > 0 && el.offsetHeight > 0);
+            const clicked = [];
+            for (const el of opts.slice(0, 2)) {
+              clicked.push((el.textContent || '').trim().slice(0, 40));
+              el.click();
+              await new Promise((r) => setTimeout(r, 60));
+            }
+            return clicked;
+          })()`);
+          return {
+            foundProxy: Boolean(vueRes && vueRes.foundProxy),
+            method: 'dom_fallback',
+            expandInfo,
+            optionsReady,
+            clickedOpts,
+            pickedIds: []
+          };
+        };
+
+        const selectionReports = [];
+        const sel1 = await selectKongyingCollectibles(0, []);
+        selectionReports.push(sel1);
+        let kyMarkersLoaded = await waitUntil(async () => {
+          const n = await kyTab.page.eval(`window.__GH_BRIDGE__.queryNearbyUncollectedPins().length`);
+          return n > 0 ? n : null;
+        }, 20000, 300);
+
+        if (!kyMarkersLoaded) {
+          const sel2 = await selectKongyingCollectibles(1, sel1.pickedIds || []);
+          selectionReports.push(sel2);
+          kyMarkersLoaded = await waitUntil(async () => {
+            const n = await kyTab.page.eval(`window.__GH_BRIDGE__.queryNearbyUncollectedPins().length`);
+            return n > 0 ? n : null;
+          }, 20000, 300);
+        }
+
+        await kyTab.page.eval(`window.__GH_BRIDGE__ && window.__GH_BRIDGE__.calibrateNow()`);
+        const kyCal = await waitUntil(
+          () => [...recorded.calibrate_provider].reverse().find((r) => r && r.provider === 'kongying'),
+          10000,
+          200
+        );
+        const kyCalOk = Boolean(kyCal && kyCal.provider === 'kongying' && kyCal.map_id === 2 && kyCal.swap_lat_lng === true && Array.isArray(kyCal.anchors) && kyCal.anchors.length >= 3);
+        let kyCalDetail = kyCal
+          ? `provider=${kyCal.provider} map_id=${kyCal.map_id} swap=${kyCal.swap_lat_lng} anchors=${kyCal.anchors.length} pins=${kyMarkersLoaded}`
+          : `missing (pins=${kyMarkersLoaded})`;
+        if (!kyCalOk) {
+          const diagRes = await ensureKyDumped({
+            phase: 'calibrate_provider',
+            teleportRetryUsed,
+            tpReady,
+            selectionReports,
+            kyMarkersLoaded
+          });
+          const leafletTp = diagRes.pageState && diagRes.pageState.leaflet ? diagRes.pageState.leaflet.leafletTeleportLayers : 0;
+          const siteIssue = classifyKongyingSiteIssue(kyDiag, { pendingThresholdMs: 8000 });
+          if (leafletTp < 3 && siteIssue.unavailable) {
+            kyCalDetail = `site_unavailable: ${siteIssue.summary} (${kyCalDetail})`;
+          }
+        }
+        record('kongying_live_calibrate_provider', kyCalOk, kyCalDetail);
+
+        // SYNC_POSITION_ONLY check against transform_vectors.json (kongying_m2_q4: cx=1000, cy=-500)
+        const kyVec = vectorsDoc.vectors.find((v) => v.id === 'kongying_m2_q4');
+        await pushAndWaitDelivered({
+          type: 'SYNC_POSITION_ONLY',
+          map_id: 2,
+          lat: kyVec.canonical.y,
+          lng: kyVec.canonical.x,
+          heading: 0,
+          camera_heading: 0,
+          zoom_ratio_t: 0.6,
+          has_world_coords: true,
+          is_underground: false
+        }, 100);
+        let kySyncState = null;
+        await waitUntil(async () => {
+          const s = await kyTab.page.eval(`(() => {
+            const ctx = window.__GH_BRIDGE__.getContext();
+            const c = ctx.map.getCenter();
+            const ll = window.GHCoordTransform.canonicalToLeaflet(window.__GH_BRIDGE__.getTransform(), ${kyVec.canonical.y}, ${kyVec.canonical.x});
+            const pExp = ctx.map.latLngToContainerPoint(ll);
+            const wrap = document.querySelector('.gh-player-marker-wrap');
+            const cRect = ctx.map.getContainer().getBoundingClientRect();
+            const wRect = wrap ? wrap.getBoundingClientRect() : null;
+            const mErrPx = wRect ? Math.hypot((wRect.left + wRect.width / 2 - cRect.left) - pExp.x, (wRect.top + wRect.height / 2 - cRect.top) - pExp.y) : 999;
+            return {
+              center: { lat: c.lat, lng: c.lng },
+              expected: { lat: ll[0], lng: ll[1] },
+              zoom: ctx.map.getZoom(),
+              animating: Boolean(ctx.map._animatingZoom),
+              mErrPx
+            };
+          })()`);
+          if (s) kySyncState = s;
+          return Boolean(
+            s &&
+            !s.animating &&
+            Math.abs(s.center.lat - kyVec.expected_leaflet.lat) < 50 &&
+            Math.abs(s.center.lng - kyVec.expected_leaflet.lng) < 50 &&
+            s.mErrPx <= 8
+          );
+        }, 5000, 150);
+        const kySyncOk = Boolean(
+          kySyncState &&
+          Math.abs(kySyncState.center.lat - kyVec.expected_leaflet.lat) < 50 &&
+          Math.abs(kySyncState.center.lng - kyVec.expected_leaflet.lng) < 50 &&
+          kySyncState.mErrPx <= 8
+        );
+        if (!kySyncOk && !kyDumped) {
+          await ensureKyDumped({ phase: 'sync_position', kySyncState });
+        }
+        record(
+          'kongying_live_sync_position',
+          kySyncOk,
+          kySyncState
+            ? `center=(${kySyncState.center.lat.toFixed(1)},${kySyncState.center.lng.toFixed(1)}) exp=(${kyVec.expected_leaflet.lat.toFixed(1)},${kyVec.expected_leaflet.lng.toFixed(1)}) markerErrPx=${kySyncState.mErrPx.toFixed(2)} zoom=${kySyncState.zoom} animating=${kySyncState.animating}`
+            : 'no sync state'
+        );
+
+        // Guest mark + unmark check on Kongying v3
+        const kyPinInfo = await kyTab.page.eval(`(() => {
+          const pins = window.__GH_BRIDGE__.queryNearbyUncollectedPins();
+          if (!pins.length) return null;
+          return { id: pins[0].id, rawId: pins[0].rawId };
+        })()`);
+        let kyMarkOk = false;
+        let kyMarkDetail = 'no pins available';
+        if (kyPinInfo) {
+          const fbStart = recorded.action_feedback.length;
+          pushServerEvent({
+            type: 'NAV_MARK_PIN',
+            pin_id: kyPinInfo.id,
+            action: 'mark',
+            target_provider: 'kongying',
+            owner_tab_id: kyBoot.tabId
+          });
+          const fbMark = await waitUntil(() => recorded.action_feedback.slice(fbStart).find((x) => x && x.pin_id === kyPinInfo.id && x.action === 'mark'), 10000, 150);
+          const afterMarkHas = await kyTab.page.eval(`(() => {
+            const arr = JSON.parse(localStorage.getItem('marked_layers') || '[]').map(String);
+            return arr.includes(${JSON.stringify(kyPinInfo.rawId)});
+          })()`);
+
+          const fbStart2 = recorded.action_feedback.length;
+          pushServerEvent({
+            type: 'NAV_MARK_PIN',
+            pin_id: kyPinInfo.id,
+            action: 'unmark',
+            target_provider: 'kongying',
+            owner_tab_id: kyBoot.tabId
+          });
+          const fbUnmark = await waitUntil(() => recorded.action_feedback.slice(fbStart2).find((x) => x && x.pin_id === kyPinInfo.id && x.action === 'unmark'), 10000, 150);
+          const afterUnmarkHas = await kyTab.page.eval(`(() => {
+            const arr = JSON.parse(localStorage.getItem('marked_layers') || '[]').map(String);
+            return arr.includes(${JSON.stringify(kyPinInfo.rawId)});
+          })()`);
+
+          kyMarkOk = Boolean(afterMarkHas && !afterUnmarkHas && fbMark?.status === 'ok' && fbUnmark?.status === 'ok');
+          kyMarkDetail = `pin=${kyPinInfo.id} afterMark=${afterMarkHas} afterUnmark=${afterUnmarkHas} fbMark=${fbMark?.status} fbUnmark=${fbUnmark?.status}`;
+        }
+        if (!kyMarkOk) {
+          const diagRes = kyDumped ? null : await ensureKyDumped({ phase: 'guest_mark_unmark', selectionReports, kyMarkersLoaded });
+          if (!kyPinInfo) {
+            const leafletPins = diagRes && diagRes.pageState && diagRes.pageState.leaflet ? diagRes.pageState.leaflet.leafletPinLayers : 0;
+            const siteIssue = classifyKongyingSiteIssue(kyDiag, { pendingThresholdMs: 8000 });
+            if (leafletPins === 0 && siteIssue.unavailable) {
+              kyMarkDetail = `site_unavailable: ${siteIssue.summary} (no pins available)`;
+            }
+          }
+        }
+        record('kongying_live_guest_mark_unmark', kyMarkOk, kyMarkDetail);
+
+        // GATING: 8-heading walk on Kongying v3
+        const kyWalk = await runEightHeadingWalk(kyTab.page, 'kongying', -500, 1000);
+        const kyWalkSummary = `maxArrowErr=${kyWalk.maxArrowErr.toFixed(1)}deg maxConeErr=${kyWalk.maxConeErr.toFixed(1)}deg maxPosErr=${kyWalk.maxPosErr.toFixed(2)}px fov=${kyWalk.allFov}`;
+        if (kyWalk.posOk && !kyWalk.orientOk) {
+          record(
+            'kongying_8heading_walk',
+            false,
+            `${kyWalkSummary} samples=${JSON.stringify(kyWalk.perHeading)}`,
+            'Kongying v3 live map screen motion orientation differs from arrow/cone CSS heading while position is accurate'
+          );
+        } else {
+          if (!(kyWalk.posOk && kyWalk.orientOk) && !kyDumped) {
+            await ensureKyDumped({ phase: '8heading_walk', kyWalkSummary });
+          }
+          record('kongying_8heading_walk', kyWalk.posOk && kyWalk.orientOk, kyWalkSummary);
+        }
+
+        // INFORMATIONAL: ~200-frame QA replay on Kongying v3
+        if (qaFrames) {
+          qaResults.kongying = await runQaReplay(kyTab.page, 'kongying', qaFrames);
+        }
       }
     } finally {
       await closeTab(kyTab);
