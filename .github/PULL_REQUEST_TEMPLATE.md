@@ -6,6 +6,11 @@ Briefly describe what this pull request changes and why.
 
 Closes #(issue)
 
+## Scope & AI Assistance
+
+- [ ] **Strictly Scoped:** Every changed line relates directly to this PR (no unrelated edits; large features / new platforms were discussed in an Issue first and include CI coverage for any new platform).
+- [ ] **AI Disclosure & Ownership:** _State "None" or name the AI tool/model used:_ `None` — I have personally read, understood, and verified every change in this PR and take full responsibility for it.
+
 ## Safety, Privacy & License Checklist
 
 - [ ] **Passive CV / Anti-Cheat Invariant:** No game memory reads/writes, no DLL injection, and no `SendInput` against the game window.

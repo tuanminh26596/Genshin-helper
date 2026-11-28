@@ -90,3 +90,15 @@ cargo nextest run --manifest-path rust/Cargo.toml --workspace --profile cv-heavy
 - Keep PRs focused, well-scoped, and accompanied by a deterministic offline verification check when adding non-trivial logic.
 - Update both `README.md` (English) and `README.vi.md` (Vietnamese) when changing user-facing features, hotkeys, or compatibility behavior.
 - Fill out `.github/PULL_REQUEST_TEMPLATE.md` honestly; never claim a test passed without running it.
+
+---
+
+## 5. Large PRs & AI-Assisted Contributions
+
+- **Discuss Large Changes First:** Before writing large PRs (~400+ lines), adding new crates, or introducing new OS/platform support, open an Issue to align on scope and design. Prefer splitting big features into smaller, focused PRs. Any PR adding a new platform must include CI coverage for that platform while keeping existing Windows checks passing.
+- **AI-Assisted PRs (Disclosure & Ownership):** AI tools and coding agents are welcome **only when** the author:
+  1. **Discloses AI assistance** honestly in the PR template.
+  2. **Owns every line:** has personally read, understood, and tested the diff, and can explain the design and respond to review feedback.
+  3. **Verifies honestly:** never checks off tests that were not run (clearly note checks skipped due to host OS).
+  4. **Stays strictly in scope:** avoids unrelated reformatting, lint suppressions, or out-of-scope edits; changes to high-risk areas (`gh-cv/`, `gh-win32/`, `gh-app/src/updater.rs`, `extension/manifest.json`) must include clear rationale and deterministic regression coverage.
+- **Review Triage:** Oversized, unscoped, or unverified drive-by AI PRs may be closed without a full line-by-line review so the work can be resubmitted cleanly in smaller, verified steps.
