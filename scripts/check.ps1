@@ -240,6 +240,14 @@ function Select-CheckPlan {
     $paths = @($normalizedPaths.ToArray())
 
     $extMatches = @($paths | Where-Object { $_ -like 'extension/*' })
+    # tests/verify_i18n_and_ext_v5.py also checks the desktop bundles in assets/locales.
+    $extI18nMatches = @(
+        $paths | Where-Object {
+            $_ -like 'extension/*' -or
+            $_ -like 'assets/locales/*' -or
+            $_ -eq 'tests/verify_i18n_and_ext_v5.py'
+        }
+    )
     $multimapUnitMatches = @(
         $paths | Where-Object {
             $_ -like 'extension/*' -or
@@ -264,12 +272,15 @@ function Select-CheckPlan {
             $_ -like 'tests/fixtures/hoyolab_popup/*'
         }
     )
-    $rustMatches = @($paths | Where-Object { $_ -like 'rust/*' })
+    # assets/** files are compiled into the crates (include_str!/include_bytes!: locales,
+    # category aliases, tray icons, zoom thumb template), so they need the Rust checks too.
+    $rustMatches = @($paths | Where-Object { $_ -like 'rust/*' -or $_ -like 'assets/*' })
     $framesMatches = @(
         $paths | Where-Object {
             $_ -like 'rust/crates/gh-sim/*' -or
             $_ -eq 'rust/crates/gh-core/src/ui_layout.rs' -or
             $_ -like 'rust/crates/gh-cv/*' -or
+            $_ -eq 'assets/zoom_thumb_template.png' -or
             $_ -like 'tests/frame_fixtures/*'
         }
     )
@@ -288,6 +299,7 @@ function Select-CheckPlan {
             $_ -like 'rust/crates/gh-app/*' -or
             $_ -like 'rust/crates/gh-sim/*' -or
             $_ -like 'rust/crates/gh-net/src/hd_assets*' -or
+            $_ -eq 'assets/zoom_thumb_template.png' -or
             $_ -eq 'tests/qa_baseline.json' -or
             $_ -eq 'tests/verified_gt.json' -or
             $_ -like 'tests/scenarios/*'
@@ -340,9 +352,9 @@ function Select-CheckPlan {
                     $reason = 'always'
                 }
                 'ext-i18n' {
-                    if ($extMatches.Count -gt 0) {
+                    if ($extI18nMatches.Count -gt 0) {
                         $selected = $true
-                        $reason = Format-MatchReason -MatchedPaths $extMatches
+                        $reason = Format-MatchReason -MatchedPaths $extI18nMatches
                     }
                 }
                 'multimap-unit' {
@@ -1253,6 +1265,24 @@ function Invoke-SelfTest {
             Paths    = @('extension/popup.js')
             Expected = @('guards', 'audit', 'ext-i18n', 'multimap-unit', 'provider-fixtures', 'ext-smoke')
             RecWb    = $true
+        }
+        @{
+            Name     = 'assets/locales/** -> ext-i18n, clippy, nextest (bundles are include_str! into gh-core)'
+            Paths    = @('assets/locales/en.json')
+            Expected = @('guards', 'audit', 'ext-i18n', 'clippy', 'nextest')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'tests/verify_i18n_and_ext_v5.py -> ext-i18n'
+            Paths    = @('tests/verify_i18n_and_ext_v5.py')
+            Expected = @('guards', 'audit', 'ext-i18n')
+            RecWb    = $false
+        }
+        @{
+            Name     = 'assets/zoom_thumb_template.png -> clippy, nextest, frames, qa (CV template compiled into gh-cv)'
+            Paths    = @('assets/zoom_thumb_template.png')
+            Expected = @('guards', 'audit', 'clippy', 'nextest', 'frames', 'qa')
+            RecWb    = $false
         }
         @{
             Name     = 'tests/multimap_unit.mjs -> multimap-unit'
