@@ -89,7 +89,7 @@ pub struct TrackingStackOptions {
     pub tiles_dir: PathBuf,
     pub ug_overlays_dir: PathBuf,
     pub paimon_cache_path: PathBuf,
-    /// Optional explicit path for `teyvat_global_index_v3.npz`. `None` uses `AppPaths` default.
+    /// Optional explicit path for global relocator index (`teyvat_global_index_v4.npz`). `None` uses `AppPaths` default.
     pub global_index_path: Option<PathBuf>,
     pub offline: bool,
     pub async_fetch: bool,

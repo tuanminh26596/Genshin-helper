@@ -295,7 +295,7 @@ enum Cmd {
         out: Option<PathBuf>,
     },
 
-    /// Validate data-driven still-frame UI layout, crop, and M-Map locate fixtures.
+    /// Validate data-driven still-frame UI layout, crop, M-Map locate, and global-relocate fixtures.
     Frames {
         /// Directory containing frame fixture JSON files.
         #[arg(long, default_value = DEFAULT_FRAME_FIXTURES_DIR)]
@@ -308,6 +308,14 @@ enum Cmd {
         /// Path to map datasets directory containing multimap_v4.json & terrain_n2_v4.npz.
         #[arg(long, default_value = DEFAULT_DATA_DIR)]
         data_dir: PathBuf,
+
+        /// Optional directory containing recorded QA sessions (for `session_frame` fixtures).
+        #[arg(long)]
+        sessions: Option<PathBuf>,
+
+        /// Explicit absolute path to ffmpeg.exe (for `session_frame` fixtures; never resolved via PATH).
+        #[arg(long)]
+        ffmpeg: Option<PathBuf>,
     },
 }
 
@@ -565,10 +573,14 @@ fn main() {
             dir,
             repo_root,
             data_dir,
+            sessions,
+            ffmpeg,
         } => match run_frames(&FramesOptions {
             dir,
             repo_root,
             data_dir,
+            sessions_dir: sessions,
+            ffmpeg_path: ffmpeg,
         }) {
             Ok(report) => {
                 if report.fail > 0 {

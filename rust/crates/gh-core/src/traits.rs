@@ -18,7 +18,7 @@ pub struct MapVersionCheckResult {
     pub updated_maps: BTreeMap<i32, (String, String)>,
     /// Newly discovered active map IDs not present in local `multimap_v4.json`.
     pub new_map_ids: Vec<i32>,
-    /// True when Map 2 (Teyvat) version changed, requiring `teyvat_global_index_v3.npz` rebuild.
+    /// True when Map 2 (Teyvat) version changed, requiring global relocator index rebuild.
     pub teyvat_changed: bool,
 }
 

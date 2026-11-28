@@ -15,7 +15,7 @@ use gh_core::multimap::load_multimap_db;
 use gh_core::npz::{NpyData, NpzArchive};
 use gh_core::traits::OcrProvider;
 use gh_core::ui_layout::compute_ui_layout;
-use gh_cv::global_relocator::TeyvatGlobalRelocator;
+use gh_cv::global_relocator::{GLOBAL_INDEX_FILENAME, TeyvatGlobalRelocator};
 use gh_cv::image_io::read_image_bgr;
 use gh_cv::locator::{LocatorPaths, MapLocator, TerrainRaster};
 use gh_cv::minimap_tracker::{HybridMinimapTracker, MinimapTrackerConfig, TrackerState};
@@ -678,7 +678,7 @@ fn e6_diagnostic_bundles_recovery_regression() {
                 if lazy_relocator.is_none()
                     && let Some(r2) = load_map2_raster(&root)
                 {
-                    let idx_path = tmp.0.join("teyvat_global_index_v3.npz");
+                    let idx_path = tmp.0.join(GLOBAL_INDEX_FILENAME);
                     let reloc = Arc::new(TeyvatGlobalRelocator::new(Some(r2), Some(idx_path), false));
                     if reloc.is_ready() {
                         lazy_relocator = Some(reloc);

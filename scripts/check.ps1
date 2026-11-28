@@ -1150,7 +1150,21 @@ function Build-RealExecutors {
                 return
             }
             try {
-                $outcome.ExitCode = Invoke-NativeStream -FilePath $bin.Exes[0] -ArgumentList @('frames')
+                $framesArgs = New-Object System.Collections.Generic.List[string]
+                $framesArgs.Add('frames')
+                if (-not [string]::IsNullOrWhiteSpace($EnvInfo.DataDir)) {
+                    $framesArgs.Add('--data-dir')
+                    $framesArgs.Add($EnvInfo.DataDir)
+                }
+                if (-not [string]::IsNullOrWhiteSpace($EnvInfo.QaSessionsDir)) {
+                    $framesArgs.Add('--sessions')
+                    $framesArgs.Add($EnvInfo.QaSessionsDir)
+                }
+                if (-not [string]::IsNullOrWhiteSpace($EnvInfo.FfmpegExe)) {
+                    $framesArgs.Add('--ffmpeg')
+                    $framesArgs.Add($EnvInfo.FfmpegExe)
+                }
+                $outcome.ExitCode = Invoke-NativeStream -FilePath $bin.Exes[0] -ArgumentList @($framesArgs.ToArray())
             } finally {
                 Remove-Item -LiteralPath $bin.CopyDir -Recurse -Force -ErrorAction SilentlyContinue
             }

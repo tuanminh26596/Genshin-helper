@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "210703_f085_global_relocate_underground_neg",
+  "description": "Map 2 underground minimap crop (sess_20261127_210703 f85) negative control: surface global relocator must return zero false candidates.",
+  "notes": "Extracted via ffmpeg minimap crop from sess_20261127_210703 video.mkv frame i=85 (0-based n=84, 2560x1440). Player is in underground ruins around (-4939.7, -1477.2), synced ug=True at f101.",
+  "session_frame": {
+    "session": "sess_20261127_210703",
+    "frame": 85,
+    "crop_minimap": true
+  },
+  "width": 2560,
+  "height": 1440,
+  "is_gamepad": false,
+  "global_relocate": {
+    "expect_no_match": true,
+    "min_bin_score": 3.5
+  }
+}

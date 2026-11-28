@@ -708,7 +708,7 @@ fn build_offline_replay_state(
         tiles_dir,
         ug_overlays_dir: ug_dir,
         paimon_cache_path,
-        global_index_path: Some(sandbox_root.join("teyvat_global_index_v3.npz")),
+        global_index_path: Some(sandbox_root.join(gh_cv::global_relocator::GLOBAL_INDEX_FILENAME)),
         offline: true,
         async_fetch: false,
         sync_relocator_warmup: true,

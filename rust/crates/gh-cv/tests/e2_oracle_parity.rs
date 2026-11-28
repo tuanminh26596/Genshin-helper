@@ -7,7 +7,7 @@ use gh_core::multimap::load_multimap_db;
 use gh_core::npz::{NpyData, NpzArchive};
 use gh_core::traits::UndergroundOverlaySource;
 use gh_core::ui_layout::compute_ui_layout;
-use gh_cv::global_relocator::{INDEX_VERSION, TeyvatGlobalRelocator};
+use gh_cv::global_relocator::{GLOBAL_INDEX_FILENAME, INDEX_VERSION, TeyvatGlobalRelocator};
 use gh_cv::heading360::{shortest_angle_delta, wrap_angle_360};
 use gh_cv::image_io::{ImageReadMode, DecodedImage, read_image, read_image_bgr, write_image_gray};
 use gh_cv::locator::TerrainRaster;
@@ -1038,7 +1038,7 @@ fn e2_verify_v53_production_parity() {
     }
     let db = Arc::new(load_multimap_db(&mm_path).unwrap());
     let tmp = TempDirGuard::new("gh_e2_v53");
-    let idx_path = tmp.0.join("teyvat_global_index_v3.npz");
+    let idx_path = tmp.0.join(GLOBAL_INDEX_FILENAME);
 
     let mut terrain = BTreeMap::new();
     terrain.insert(2, Arc::clone(&map2_raster));
@@ -1467,7 +1467,7 @@ fn e2_rec_20261122_hud_replay_parity() {
     };
 
     let tmp = TempDirGuard::new("gh_e2_rec");
-    let idx_path = tmp.0.join("teyvat_global_index_v3.npz");
+    let idx_path = tmp.0.join(GLOBAL_INDEX_FILENAME);
     let paimon_cache = tmp.0.join("paimon_tpl.npz");
 
     let mut terrain = BTreeMap::new();

@@ -5,26 +5,56 @@
 //!   against real user-reported screenshots.
 //! - Production [`gh_cv::locator::MapLocator::locate_player_frame`] (original + deterministic
 //!   +/-2 LSB perturbed variants) against recorded M-Map screenshots.
+//! - Production [`gh_cv::global_relocator::TeyvatGlobalRelocator`] against cropped minimap
+//!   frames decoded from recorded QA video sessions (`session_frame` + `global_relocate`).
 //!
-//! Screenshots live outside git (`scratch/`). Missing images or missing map datasets are
-//! reported as `skipped` (never `pass`).
+//! Screenshots and QA videos live outside git (`scratch/`). Missing media, missing map datasets,
+//! or omitted `--ffmpeg` for video fixtures are reported as `skipped` (never `pass`).
 
 use gh_core::frame::{FrameBuf, PixelFormat, RectI32};
 use gh_core::traits::OcrProvider;
 pub use gh_core::ui_layout::compute_tracker_hud_crop;
 use gh_core::ui_layout::compute_ui_layout;
+use gh_cv::global_relocator::{
+    DEFAULT_MIN_BIN_SCORE, DEFAULT_TOP_K, GLOBAL_INDEX_FILENAME, TeyvatGlobalRelocator, VoteBins,
+    load_map2_raster_from_npz,
+};
 use gh_cv::locator::{LocateResult, LocatorPaths, MapLocator};
 use gh_win32::win_ocr::WindowsOcrService;
 use image::ImageReader;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const FRAME_FIXTURE_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_FRAME_FIXTURES_DIR: &str = "tests/frame_fixtures";
 pub const DEFAULT_DATA_DIR: &str = "data";
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct TempDirGuard {
+    path: PathBuf,
+}
+
+impl TempDirGuard {
+    fn new(prefix: &str) -> Self {
+        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("gh_sim_frames_{prefix}_{pid}_{n}"));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        Self { path: dir }
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,6 +118,36 @@ fn default_true() -> bool {
     true
 }
 
+fn default_min_bin_score() -> f64 {
+    DEFAULT_MIN_BIN_SCORE
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionFrameSource {
+    pub session: String,
+    pub frame: usize,
+    #[serde(default = "default_true")]
+    pub crop_minimap: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalRelocateExpectation {
+    #[serde(default)]
+    pub expected_world_x: Option<f64>,
+    #[serde(default)]
+    pub expected_world_y: Option<f64>,
+    #[serde(default)]
+    pub pos_tolerance_w: Option<f64>,
+    #[serde(default = "default_min_bin_score")]
+    pub min_bin_score: f64,
+    #[serde(default)]
+    pub min_votes_near_target: usize,
+    #[serde(default)]
+    pub expect_no_match: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrameFixture {
@@ -95,7 +155,10 @@ pub struct FrameFixture {
     pub name: String,
     pub description: String,
     pub notes: String,
-    pub image: String,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub session_frame: Option<SessionFrameSource>,
     pub width: u32,
     pub height: u32,
     #[serde(default)]
@@ -114,6 +177,8 @@ pub struct FrameFixture {
     pub expect_circle_in_crop: bool,
     #[serde(default)]
     pub mmap_locate: Option<MMapLocateExpectation>,
+    #[serde(default)]
+    pub global_relocate: Option<GlobalRelocateExpectation>,
 }
 
 impl FrameFixture {
@@ -134,19 +199,54 @@ impl FrameFixture {
         if self.name.trim().is_empty() {
             return Err(format!("{source_label}: name must be non-empty"));
         }
-        if self.image.trim().is_empty() {
-            return Err(format!("{source_label}: image must be non-empty"));
-        }
-        let img_path = Path::new(&self.image);
-        if img_path.is_absolute()
-            || img_path
-                .components()
-                .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
-        {
-            return Err(format!(
-                "{source_label}: image must be a safe repo-relative path, got '{}'",
-                self.image
-            ));
+        match (&self.image, &self.session_frame) {
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "{source_label}: specify either image or session_frame, not both"
+                ));
+            }
+            (None, None) => {
+                return Err(format!(
+                    "{source_label}: fixture must specify either image or session_frame"
+                ));
+            }
+            (Some(img), None) => {
+                if img.trim().is_empty() {
+                    return Err(format!("{source_label}: image must be non-empty"));
+                }
+                let img_path = Path::new(img);
+                if img_path.is_absolute()
+                    || img_path
+                        .components()
+                        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+                {
+                    return Err(format!(
+                        "{source_label}: image must be a safe repo-relative path, got '{img}'"
+                    ));
+                }
+            }
+            (None, Some(sf)) => {
+                if sf.session.trim().is_empty() {
+                    return Err(format!(
+                        "{source_label}: session_frame.session must be non-empty"
+                    ));
+                }
+                let mut comps = Path::new(&sf.session).components();
+                match (comps.next(), comps.next()) {
+                    (Some(Component::Normal(_)), None) => {}
+                    _ => {
+                        return Err(format!(
+                            "{source_label}: session_frame.session must be a safe single directory name, got '{}'",
+                            sf.session
+                        ));
+                    }
+                }
+                if sf.frame == 0 {
+                    return Err(format!(
+                        "{source_label}: session_frame.frame is 1-based and must be >= 1"
+                    ));
+                }
+            }
         }
         if self.width == 0 || self.height == 0 {
             return Err(format!(
@@ -165,9 +265,17 @@ impl FrameFixture {
             ));
         }
         let has_layout = layout_field_count == 4;
-        if !has_layout && self.mmap_locate.is_none() {
+        if !has_layout && self.mmap_locate.is_none() && self.global_relocate.is_none() {
             return Err(format!(
-                "{source_label}: fixture must specify at least one check mode (layout fields or mmap_locate)"
+                "{source_label}: fixture must specify at least one check mode (layout fields, mmap_locate, or global_relocate)"
+            ));
+        }
+        if let Some(sf) = &self.session_frame
+            && sf.crop_minimap
+            && (has_layout || self.mmap_locate.is_some())
+        {
+            return Err(format!(
+                "{source_label}: session_frame with crop_minimap=true only supports global_relocate"
             ));
         }
 
@@ -238,6 +346,45 @@ impl FrameFixture {
             }
         }
 
+        if let Some(g) = &self.global_relocate {
+            if !g.min_bin_score.is_finite() || g.min_bin_score <= 0.0 {
+                return Err(format!(
+                    "{source_label}: global_relocate.min_bin_score must be finite and > 0, got {}",
+                    g.min_bin_score
+                ));
+            }
+            if g.expect_no_match {
+                if let Some(tol) = g.pos_tolerance_w
+                    && (!tol.is_finite() || tol <= 0.0)
+                {
+                    return Err(format!(
+                        "{source_label}: global_relocate.pos_tolerance_w must be finite and > 0, got {tol}"
+                    ));
+                }
+            } else {
+                let (Some(wx), Some(wy)) = (g.expected_world_x, g.expected_world_y) else {
+                    return Err(format!(
+                        "{source_label}: global_relocate requires expected_world_x and expected_world_y when expect_no_match is false"
+                    ));
+                };
+                if !wx.is_finite() || !wy.is_finite() {
+                    return Err(format!(
+                        "{source_label}: global_relocate expected_world_x/y must be finite, got ({wx}, {wy})"
+                    ));
+                }
+                let Some(tol) = g.pos_tolerance_w else {
+                    return Err(format!(
+                        "{source_label}: global_relocate requires pos_tolerance_w when expect_no_match is false"
+                    ));
+                };
+                if !tol.is_finite() || tol <= 0.0 {
+                    return Err(format!(
+                        "{source_label}: global_relocate.pos_tolerance_w must be finite and > 0, got {tol}"
+                    ));
+                }
+            }
+        }
+
         if let Some(bug) = &self.known_bug
             && bug.trim().is_empty()
         {
@@ -278,6 +425,8 @@ pub struct FrameCheckResult {
     pub resolved_image: Option<String>,
     pub outcome: FrameOutcome,
     pub known_bug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     pub failures: Vec<String>,
     pub skip_reason: Option<String>,
 }
@@ -306,6 +455,8 @@ pub struct FramesOptions {
     pub dir: PathBuf,
     pub repo_root: Option<PathBuf>,
     pub data_dir: PathBuf,
+    pub sessions_dir: Option<PathBuf>,
+    pub ffmpeg_path: Option<PathBuf>,
 }
 
 impl Default for FramesOptions {
@@ -314,6 +465,8 @@ impl Default for FramesOptions {
             dir: PathBuf::from(DEFAULT_FRAME_FIXTURES_DIR),
             repo_root: None,
             data_dir: PathBuf::from(DEFAULT_DATA_DIR),
+            sessions_dir: None,
+            ffmpeg_path: None,
         }
     }
 }
@@ -422,25 +575,171 @@ fn has_required_locator_datasets(dir: &Path) -> bool {
         .all(|name| dir.join(name).is_file())
 }
 
+fn has_terrain_n2_dataset(dir: &Path) -> bool {
+    dir.join("terrain_n2_v4.npz").is_file()
+}
+
+fn resolve_data_dir_with_check(
+    repo_root: &Path,
+    main_checkout: Option<&Path>,
+    data_dir: &Path,
+    pred: fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if data_dir.is_absolute() {
+        return pred(data_dir).then(|| data_dir.to_path_buf());
+    }
+    let local = repo_root.join(data_dir);
+    if pred(&local) {
+        return Some(local);
+    }
+    if let Some(main_root) = main_checkout {
+        let candidate = main_root.join(data_dir);
+        if pred(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn resolve_data_dir(
     repo_root: &Path,
     main_checkout: Option<&Path>,
     data_dir: &Path,
 ) -> Option<PathBuf> {
-    if data_dir.is_absolute() {
-        return has_required_locator_datasets(data_dir).then(|| data_dir.to_path_buf());
+    resolve_data_dir_with_check(repo_root, main_checkout, data_dir, has_required_locator_datasets)
+}
+
+fn resolve_sessions_dir(
+    repo_root: &Path,
+    main_checkout: Option<&Path>,
+    sessions_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(sdir) = sessions_dir {
+        if sdir.is_absolute() {
+            return sdir.is_dir().then(|| sdir.to_path_buf());
+        }
+        let local = repo_root.join(sdir);
+        if local.is_dir() {
+            return Some(local);
+        }
+        if let Some(main_root) = main_checkout {
+            let candidate = main_root.join(sdir);
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+        return None;
     }
-    let local = repo_root.join(data_dir);
-    if has_required_locator_datasets(&local) {
+    let local = repo_root.join("scratch").join("qa_sessions");
+    if local.is_dir() {
         return Some(local);
     }
     if let Some(main_root) = main_checkout {
-        let candidate = main_root.join(data_dir);
-        if has_required_locator_datasets(&candidate) {
+        let candidate = main_root.join("scratch").join("qa_sessions");
+        if candidate.is_dir() {
             return Some(candidate);
         }
     }
     None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct BatchCropKey {
+    video_path: PathBuf,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DecodedFrameKey {
+    batch: BatchCropKey,
+    frame_1based: usize,
+}
+
+fn decode_video_crop_batch(
+    ffmpeg_abs: &Path,
+    batch: &BatchCropKey,
+    frames_1based: &BTreeSet<usize>,
+) -> Result<HashMap<DecodedFrameKey, FrameBuf>, String> {
+    if !ffmpeg_abs.is_absolute() || !ffmpeg_abs.is_file() {
+        return Err(format!(
+            "--ffmpeg must be an existing absolute file path (never resolved from PATH): {}",
+            ffmpeg_abs.display()
+        ));
+    }
+    if frames_1based.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let select_expr = frames_1based
+        .iter()
+        .map(|&f| format!("eq(n,{})", f - 1))
+        .collect::<Vec<_>>()
+        .join("+");
+    let vf = format!(
+        "select='{select_expr}',crop={}:{}:{}:{}",
+        batch.w, batch.h, batch.x, batch.y
+    );
+    let count = frames_1based.len();
+    let count_str = count.to_string();
+    let output = Command::new(ffmpeg_abs)
+        .args(["-v", "error", "-i"])
+        .arg(&batch.video_path)
+        .args([
+            "-vf",
+            &vf,
+            "-vsync",
+            "0",
+            "-frames:v",
+            &count_str,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "pipe:1",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("failed to launch ffmpeg ({}): {e}", ffmpeg_abs.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "ffmpeg frame decode failed on '{}' (exit {:?}): {}",
+            batch.video_path.display(),
+            output.status.code(),
+            stderr.trim()
+        ));
+    }
+    let w = batch.w as usize;
+    let h = batch.h as usize;
+    let frame_bytes = w
+        .checked_mul(h)
+        .and_then(|px| px.checked_mul(3))
+        .ok_or_else(|| "decoded frame byte size overflow".to_owned())?;
+    let expected_bytes = count * frame_bytes;
+    if output.stdout.len() != expected_bytes {
+        return Err(format!(
+            "ffmpeg decoded {} bytes from '{}' (expected {expected_bytes} bytes for {count} frame(s) of {w}x{h})",
+            output.stdout.len(),
+            batch.video_path.display()
+        ));
+    }
+    let mut decoded = HashMap::with_capacity(count);
+    for (idx, &f_1based) in frames_1based.iter().enumerate() {
+        let start = idx * frame_bytes;
+        let end = start + frame_bytes;
+        let mut buf = FrameBuf::new_zeroed(batch.w as u32, batch.h as u32, PixelFormat::Bgr8);
+        buf.data.copy_from_slice(&output.stdout[start..end]);
+        decoded.insert(
+            DecodedFrameKey {
+                batch: batch.clone(),
+                frame_1based: f_1based,
+            },
+            buf,
+        );
+    }
+    Ok(decoded)
 }
 
 fn build_frame_locator(data_dir: &Path) -> MapLocator {
@@ -575,6 +874,102 @@ fn check_locate_result(
     }
 }
 
+fn check_global_relocate_result(
+    reloc: &TeyvatGlobalRelocator,
+    frame: &FrameBuf,
+    exp: &GlobalRelocateExpectation,
+    failures: &mut Vec<String>,
+) -> String {
+    let mut bins = VoteBins::new();
+    let cands = reloc.query_candidates_frame(
+        frame.as_view(),
+        Some(&mut bins),
+        DEFAULT_TOP_K,
+        exp.min_bin_score,
+    );
+    let total_votes: usize = bins.values().map(Vec::len).sum();
+    let num_des = reloc.num_descriptors();
+
+    if exp.expect_no_match {
+        let top_score = cands.first().map_or(0.0, |c| c.score);
+        let detail = format!(
+            "des={num_des} cands={} total_votes={total_votes} top_score={top_score:.1}",
+            cands.len()
+        );
+        if let Some(top) = cands.first() {
+            failures.push(format!(
+                "global_relocate[expect_no_match]: unexpected match at ({:.1}, {:.1}) ({detail})",
+                top.world_x, top.world_y
+            ));
+        }
+        return detail;
+    }
+
+    let tx = exp.expected_world_x.expect("validated expected_world_x");
+    let ty = exp.expected_world_y.expect("validated expected_world_y");
+    let tol = exp.pos_tolerance_w.expect("validated pos_tolerance_w");
+    let votes_near = bins
+        .values()
+        .flatten()
+        .filter(|v| (v.world_x - tx).hypot(v.world_y - ty) <= tol)
+        .count();
+
+    let detail = if let Some(top) = cands.first() {
+        let dist_w = (top.world_x - tx).hypot(top.world_y - ty);
+        format!(
+            "des={num_des} votes_near={votes_near}/{total_votes} top_score={:.1} best=({:.1},{:.1}) dist={dist_w:.1}w",
+            top.score, top.world_x, top.world_y
+        )
+    } else {
+        format!(
+            "des={num_des} votes_near={votes_near}/{total_votes} cands=0 (min_score={:.1})",
+            exp.min_bin_score
+        )
+    };
+
+    match cands.first() {
+        None => {
+            failures.push(format!(
+                "global_relocate: 0 candidates ({detail}; exp=({tx:.1},{ty:.1}) tol={tol:.1}w)"
+            ));
+        }
+        Some(top) => {
+            let dist_w = (top.world_x - tx).hypot(top.world_y - ty);
+            if dist_w > tol {
+                failures.push(format!(
+                    "global_relocate: top candidate out of tolerance ({detail}; exp=({tx:.1},{ty:.1}) tol={tol:.1}w)"
+                ));
+            }
+        }
+    }
+    if votes_near < exp.min_votes_near_target {
+        failures.push(format!(
+            "global_relocate: votes_near {votes_near} < min_votes_near_target {} ({detail})",
+            exp.min_votes_near_target
+        ));
+    }
+
+    detail
+}
+
+fn build_skipped_result(
+    fixture: &FrameFixture,
+    fixture_path_str: String,
+    resolved_image: Option<String>,
+    skip_reason: String,
+) -> FrameCheckResult {
+    FrameCheckResult {
+        name: fixture.name.clone(),
+        fixture_path: fixture_path_str,
+        resolved_image,
+        outcome: FrameOutcome::Skipped,
+        known_bug: fixture.known_bug.clone(),
+        detail: None,
+        failures: Vec::new(),
+        skip_reason: Some(skip_reason),
+    }
+}
+
 pub fn evaluate_fixture(
     fixture: &FrameFixture,
     fixture_path: &Path,
@@ -583,34 +978,88 @@ pub fn evaluate_fixture(
     locator: Option<&MapLocator>,
     missing_data_reason: Option<&str>,
 ) -> FrameCheckResult {
+    evaluate_fixture_with_sources(
+        fixture,
+        fixture_path,
+        repo_root,
+        main_checkout,
+        locator,
+        missing_data_reason,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_fixture_with_sources(
+    fixture: &FrameFixture,
+    fixture_path: &Path,
+    repo_root: &Path,
+    main_checkout: Option<&Path>,
+    locator: Option<&MapLocator>,
+    missing_data_reason: Option<&str>,
+    predecoded_session_frame: Option<(&Path, &FrameBuf)>,
+    session_skip_reason: Option<&str>,
+    relocator: Option<&TeyvatGlobalRelocator>,
+    relocator_skip_reason: Option<&str>,
+) -> FrameCheckResult {
     let fixture_path_str = fixture_path.display().to_string();
-    let Some(resolved_image) = resolve_fixture_image(repo_root, main_checkout, &fixture.image)
-    else {
-        return FrameCheckResult {
-            name: fixture.name.clone(),
-            fixture_path: fixture_path_str,
-            resolved_image: None,
-            outcome: FrameOutcome::Skipped,
-            known_bug: fixture.known_bug.clone(),
-            failures: Vec::new(),
-            skip_reason: Some(format!("image not found: {}", fixture.image)),
+    let mut resolved_image_str: Option<String> = None;
+    let mut resolved_png_path: Option<PathBuf> = None;
+    let mut session_buf: Option<&FrameBuf> = None;
+
+    if let Some(ref img_rel) = fixture.image {
+        let Some(path) = resolve_fixture_image(repo_root, main_checkout, img_rel) else {
+            return build_skipped_result(
+                fixture,
+                fixture_path_str,
+                None,
+                format!("image not found: {img_rel}"),
+            );
         };
-    };
+        resolved_image_str = Some(path.display().to_string());
+        resolved_png_path = Some(path);
+    } else if let Some(sf) = &fixture.session_frame {
+        if let Some(reason) = session_skip_reason {
+            return build_skipped_result(fixture, fixture_path_str, None, reason.to_owned());
+        }
+        let Some((video_path, buf)) = predecoded_session_frame else {
+            return build_skipped_result(
+                fixture,
+                fixture_path_str,
+                None,
+                format!(
+                    "session frame {}:{} not available",
+                    sf.session, sf.frame
+                ),
+            );
+        };
+        resolved_image_str = Some(format!("{}#f{}", video_path.display(), sf.frame));
+        session_buf = Some(buf);
+    }
 
     if fixture.mmap_locate.is_some() && locator.is_none() {
-        return FrameCheckResult {
-            name: fixture.name.clone(),
-            fixture_path: fixture_path_str,
-            resolved_image: Some(resolved_image.display().to_string()),
-            outcome: FrameOutcome::Skipped,
-            known_bug: fixture.known_bug.clone(),
-            failures: Vec::new(),
-            skip_reason: Some(
-                missing_data_reason
-                    .unwrap_or("required map datasets missing in data_dir")
-                    .to_owned(),
-            ),
-        };
+        return build_skipped_result(
+            fixture,
+            fixture_path_str,
+            resolved_image_str,
+            missing_data_reason
+                .unwrap_or("required map datasets missing in data_dir")
+                .to_owned(),
+        );
+    }
+
+    if fixture.global_relocate.is_some() && relocator.is_none() {
+        return build_skipped_result(
+            fixture,
+            fixture_path_str,
+            resolved_image_str,
+            relocator_skip_reason
+                .unwrap_or("terrain_n2_v4.npz missing for global_relocate")
+                .to_owned(),
+        );
     }
 
     let resolved_prime_image = if let Some(hint) = fixture
@@ -621,15 +1070,12 @@ pub fn evaluate_fixture(
         match resolve_fixture_image(repo_root, main_checkout, &hint.prime_image) {
             Some(p) => Some(p),
             None => {
-                return FrameCheckResult {
-                    name: fixture.name.clone(),
-                    fixture_path: fixture_path_str,
-                    resolved_image: Some(resolved_image.display().to_string()),
-                    outcome: FrameOutcome::Skipped,
-                    known_bug: fixture.known_bug.clone(),
-                    failures: Vec::new(),
-                    skip_reason: Some(format!("prime_image not found: {}", hint.prime_image)),
-                };
+                return build_skipped_result(
+                    fixture,
+                    fixture_path_str,
+                    resolved_image_str,
+                    format!("prime_image not found: {}", hint.prime_image),
+                );
             }
         }
     } else {
@@ -637,22 +1083,25 @@ pub fn evaluate_fixture(
     };
 
     let mut failures = Vec::new();
+    let mut detail: Option<String> = None;
 
-    // (a) Verify PNG dimensions match fixture width x height
-    match image::image_dimensions(&resolved_image) {
-        Ok((img_w, img_h)) => {
-            if img_w != fixture.width || img_h != fixture.height {
+    // (a) Verify PNG dimensions match fixture width x height (image fixtures only)
+    if let Some(ref resolved_image) = resolved_png_path {
+        match image::image_dimensions(resolved_image) {
+            Ok((img_w, img_h)) => {
+                if img_w != fixture.width || img_h != fixture.height {
+                    failures.push(format!(
+                        "image dimensions mismatch: PNG is {img_w}x{img_h}, fixture expects {}x{}",
+                        fixture.width, fixture.height
+                    ));
+                }
+            }
+            Err(err) => {
                 failures.push(format!(
-                    "image dimensions mismatch: PNG is {img_w}x{img_h}, fixture expects {}x{}",
-                    fixture.width, fixture.height
+                    "failed to read PNG dimensions from '{}': {err}",
+                    resolved_image.display()
                 ));
             }
-        }
-        Err(err) => {
-            failures.push(format!(
-                "failed to read PNG dimensions from '{}': {err}",
-                resolved_image.display()
-            ));
         }
     }
 
@@ -708,6 +1157,8 @@ pub fn evaluate_fixture(
         }
     }
 
+    let mut decoded_png_buf: Option<FrameBuf> = None;
+
     // (c) Optional M-Map locate checks (original + deterministic +/-2 LSB perturbations)
     if let (Some(exp), Some(loc)) = (&fixture.mmap_locate, locator) {
         let mut prime_decode_ok = true;
@@ -747,31 +1198,66 @@ pub fn evaluate_fixture(
         };
 
         if prime_decode_ok {
-            match load_png_as_bgra(&resolved_image) {
-                Ok(orig_frame) => {
-                    if prepare_locator_state(loc, &mut failures) {
-                        let orig_res = loc.locate_player_frame(orig_frame.as_view(), false, None);
-                        check_locate_result("orig", orig_res.as_ref(), exp, &mut failures);
+            let orig_opt: Option<&FrameBuf> = if let Some(buf) = session_buf {
+                Some(buf)
+            } else if let Some(ref resolved_image) = resolved_png_path {
+                match load_png_as_bgra(resolved_image) {
+                    Ok(buf) => {
+                        decoded_png_buf = Some(buf);
+                        decoded_png_buf.as_ref()
                     }
-
-                    for &seed in &exp.perturb_seeds {
-                        let perturbed = perturb_bgra_frame(&orig_frame, seed);
-                        if prepare_locator_state(loc, &mut failures) {
-                            let pert_res =
-                                loc.locate_player_frame(perturbed.as_view(), false, None);
-                            check_locate_result(
-                                &format!("perturb(seed={seed})"),
-                                pert_res.as_ref(),
-                                exp,
-                                &mut failures,
-                            );
-                        }
+                    Err(err) => {
+                        failures.push(format!("failed to decode PNG for mmap_locate: {err}"));
+                        None
                     }
                 }
-                Err(err) => {
-                    failures.push(format!("failed to decode PNG for mmap_locate: {err}"));
+            } else {
+                None
+            };
+            if let Some(orig_frame) = orig_opt {
+                if prepare_locator_state(loc, &mut failures) {
+                    let orig_res = loc.locate_player_frame(orig_frame.as_view(), false, None);
+                    check_locate_result("orig", orig_res.as_ref(), exp, &mut failures);
+                }
+
+                for &seed in &exp.perturb_seeds {
+                    let perturbed = perturb_bgra_frame(orig_frame, seed);
+                    if prepare_locator_state(loc, &mut failures) {
+                        let pert_res = loc.locate_player_frame(perturbed.as_view(), false, None);
+                        check_locate_result(
+                            &format!("perturb(seed={seed})"),
+                            pert_res.as_ref(),
+                            exp,
+                            &mut failures,
+                        );
+                    }
                 }
             }
+        }
+    }
+
+    // (d) Optional TeyvatGlobalRelocator crop checks
+    if let (Some(exp), Some(reloc)) = (&fixture.global_relocate, relocator) {
+        let frame_opt: Option<&FrameBuf> = if let Some(buf) = session_buf {
+            Some(buf)
+        } else if let Some(ref buf) = decoded_png_buf {
+            Some(buf)
+        } else if let Some(ref resolved_image) = resolved_png_path {
+            match load_png_as_bgra(resolved_image) {
+                Ok(buf) => {
+                    decoded_png_buf = Some(buf);
+                    decoded_png_buf.as_ref()
+                }
+                Err(err) => {
+                    failures.push(format!("failed to decode PNG for global_relocate: {err}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(frame) = frame_opt {
+            detail = Some(check_global_relocate_result(reloc, frame, exp, &mut failures));
         }
     }
 
@@ -780,9 +1266,10 @@ pub fn evaluate_fixture(
     FrameCheckResult {
         name: fixture.name.clone(),
         fixture_path: fixture_path_str,
-        resolved_image: Some(resolved_image.display().to_string()),
+        resolved_image: resolved_image_str,
         outcome,
         known_bug: fixture.known_bug.clone(),
+        detail,
         failures,
         skip_reason: None,
     }
@@ -856,6 +1343,154 @@ pub fn run_frames(opts: &FramesOptions) -> Result<FramesReport, String> {
         (None, None)
     };
 
+    let has_session_fixtures = fixtures.iter().any(|(_, f)| f.session_frame.is_some());
+    let sessions_dir = if has_session_fixtures {
+        resolve_sessions_dir(&repo_root, main_checkout.as_deref(), opts.sessions_dir.as_deref())
+    } else {
+        None
+    };
+
+    if has_session_fixtures
+        && let Some(ref ff) = opts.ffmpeg_path
+        && (!ff.is_absolute() || !ff.is_file())
+    {
+        return Err(format!(
+            "--ffmpeg must be an existing absolute file path (never resolved from PATH): {}",
+            ff.display()
+        ));
+    }
+
+    // Batch-decode all requested frames grouped by (video_path, crop_rect) in one ffmpeg call per group.
+    let mut batch_requests: BTreeMap<BatchCropKey, BTreeSet<usize>> = BTreeMap::new();
+    let mut fixture_session_keys: Vec<Option<DecodedFrameKey>> = vec![None; fixtures.len()];
+    let mut fixture_session_skips: Vec<Option<String>> = vec![None; fixtures.len()];
+
+    for (idx, (_, fixture)) in fixtures.iter().enumerate() {
+        let Some(sf) = &fixture.session_frame else {
+            continue;
+        };
+        let Some(ref ff) = opts.ffmpeg_path else {
+            fixture_session_skips[idx] =
+                Some("ffmpeg path not provided (--ffmpeg) for session_frame".to_owned());
+            continue;
+        };
+        let _ = ff;
+        let Some(ref sdir) = sessions_dir else {
+            fixture_session_skips[idx] = Some(format!(
+                "sessions directory not found for '{}'",
+                sf.session
+            ));
+            continue;
+        };
+        let video_path = sdir.join(&sf.session).join("video.mkv");
+        if !video_path.is_file() {
+            fixture_session_skips[idx] = Some(format!(
+                "session video not found: {}",
+                video_path.display()
+            ));
+            continue;
+        }
+        let crop_rect = if sf.crop_minimap {
+            let lay = compute_ui_layout(fixture.width, fixture.height, fixture.is_gamepad)
+                .map_err(|e| format!("compute_ui_layout failed: {e}"))?;
+            lay.minimap_rect
+        } else {
+            RectI32 {
+                x: 0,
+                y: 0,
+                width: fixture.width as i32,
+                height: fixture.height as i32,
+            }
+        };
+        let batch_key = BatchCropKey {
+            video_path,
+            x: crop_rect.x,
+            y: crop_rect.y,
+            w: crop_rect.width,
+            h: crop_rect.height,
+        };
+        batch_requests
+            .entry(batch_key.clone())
+            .or_default()
+            .insert(sf.frame);
+        fixture_session_keys[idx] = Some(DecodedFrameKey {
+            batch: batch_key,
+            frame_1based: sf.frame,
+        });
+    }
+
+    let mut decoded_session_frames: HashMap<DecodedFrameKey, FrameBuf> = HashMap::new();
+    if let Some(ref ff) = opts.ffmpeg_path {
+        for (batch, frames) in &batch_requests {
+            let chunk = decode_video_crop_batch(ff, batch, frames)?;
+            decoded_session_frames.extend(chunk);
+        }
+    }
+
+    // Build and cache TeyvatGlobalRelocator once per distinct terrain_n2_v4.npz directory.
+    let reloc_tmp = TempDirGuard::new("reloc_idx");
+    let mut relocators: HashMap<PathBuf, Arc<TeyvatGlobalRelocator>> = HashMap::new();
+    let fallback_terrain_dir = resolve_data_dir_with_check(
+        &repo_root,
+        main_checkout.as_deref(),
+        &opts.data_dir,
+        has_terrain_n2_dataset,
+    );
+    let mut fixture_relocators: Vec<Option<Arc<TeyvatGlobalRelocator>>> =
+        vec![None; fixtures.len()];
+    let mut fixture_relocator_skips: Vec<Option<String>> = vec![None; fixtures.len()];
+
+    for (idx, (_, fixture)) in fixtures.iter().enumerate() {
+        if fixture.global_relocate.is_none() || fixture_session_skips[idx].is_some() {
+            continue;
+        }
+        let mut candidate_dir: Option<PathBuf> = None;
+        if let (Some(sf), Some(sdir)) = (&fixture.session_frame, &sessions_dir) {
+            let sess_data = sdir.join(&sf.session).join("assets_cache").join("data");
+            if has_terrain_n2_dataset(&sess_data) {
+                candidate_dir = Some(sess_data);
+            }
+        }
+        let eff_dir = candidate_dir.or_else(|| fallback_terrain_dir.clone());
+        let Some(data_dir) = eff_dir else {
+            fixture_relocator_skips[idx] = Some(format!(
+                "terrain_n2_v4.npz missing in data_dir '{}'",
+                opts.data_dir.display()
+            ));
+            continue;
+        };
+
+        if let Some(existing) = relocators.get(&data_dir) {
+            fixture_relocators[idx] = Some(Arc::clone(existing));
+            continue;
+        }
+        let npz_path = data_dir.join("terrain_n2_v4.npz");
+        let Some(raster) = load_map2_raster_from_npz(&npz_path) else {
+            fixture_relocator_skips[idx] = Some(format!(
+                "failed to load map_2_gray/map_2_meta from {}",
+                npz_path.display()
+            ));
+            continue;
+        };
+        let idx_id = relocators.len();
+        let idx_path = reloc_tmp.path.join(format!("idx_{idx_id}_{GLOBAL_INDEX_FILENAME}"));
+        let reloc = Arc::new(TeyvatGlobalRelocator::new_with_fallback(
+            Some(raster),
+            Some(idx_path),
+            false,
+            false,
+        ));
+        if !reloc.is_ready() {
+            fixture_relocator_skips[idx] = Some(format!(
+                "failed to build global relocator index from {}",
+                npz_path.display()
+            ));
+            continue;
+        }
+        relocators.insert(data_dir, Arc::clone(&reloc));
+        fixture_relocators[idx] = Some(reloc);
+    }
+
     let mut report = FramesReport {
         pass: 0,
         fail: 0,
@@ -865,25 +1500,44 @@ pub fn run_frames(opts: &FramesOptions) -> Result<FramesReport, String> {
         results: Vec::with_capacity(fixtures.len()),
     };
 
-    for (path, fixture) in &fixtures {
-        let res = evaluate_fixture(
+    for (idx, (path, fixture)) in fixtures.iter().enumerate() {
+        let predecoded = fixture_session_keys[idx].as_ref().and_then(|k| {
+            decoded_session_frames
+                .get(k)
+                .map(|buf| (k.batch.video_path.as_path(), buf))
+        });
+        let res = evaluate_fixture_with_sources(
             fixture,
             path,
             &repo_root,
             main_checkout.as_deref(),
             locator.as_ref(),
             missing_data_reason.as_deref(),
+            predecoded,
+            fixture_session_skips[idx].as_deref(),
+            fixture_relocators[idx].as_deref(),
+            fixture_relocator_skips[idx].as_deref(),
         );
         match res.outcome {
             FrameOutcome::Pass => {
                 report.pass += 1;
-                println!(
-                    "[{}] {} ({}x{})",
-                    res.outcome.tag(),
-                    res.name,
-                    fixture.width,
-                    fixture.height
-                );
+                if let Some(ref det) = res.detail {
+                    println!(
+                        "[{}] {} ({}x{}) -- {det}",
+                        res.outcome.tag(),
+                        res.name,
+                        fixture.width,
+                        fixture.height
+                    );
+                } else {
+                    println!(
+                        "[{}] {} ({}x{})",
+                        res.outcome.tag(),
+                        res.name,
+                        fixture.width,
+                        fixture.height
+                    );
+                }
             }
             FrameOutcome::Fail => {
                 report.fail += 1;
@@ -941,30 +1595,8 @@ pub fn run_frames(opts: &FramesOptions) -> Result<FramesReport, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gh_cv::locator::TerrainRaster;
     use image::{ImageBuffer, Rgb};
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDirGuard {
-        path: PathBuf,
-    }
-
-    impl TempDirGuard {
-        fn new(prefix: &str) -> Self {
-            let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let pid = std::process::id();
-            let dir = std::env::temp_dir().join(format!("gh_sim_frames_{prefix}_{pid}_{n}"));
-            std::fs::create_dir_all(&dir).expect("create temp dir");
-            Self { path: dir }
-        }
-    }
-
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
 
     fn write_solid_png(path: &Path, width: u32, height: u32) {
         if let Some(parent) = path.parent() {
@@ -988,7 +1620,8 @@ mod tests {
             name: name.to_owned(),
             description: "1080p control".to_owned(),
             notes: "synthetic unit test fixture".to_owned(),
-            image: image_rel.to_owned(),
+            image: Some(image_rel.to_owned()),
+            session_frame: None,
             width: 1920,
             height: 1080,
             is_gamepad: false,
@@ -1013,6 +1646,7 @@ mod tests {
             }),
             expect_circle_in_crop: true,
             mmap_locate: None,
+            global_relocate: None,
         }
     }
 
@@ -1022,7 +1656,8 @@ mod tests {
             name: name.to_owned(),
             description: "mmap locate unit test".to_owned(),
             notes: "synthetic mmap fixture".to_owned(),
-            image: image_rel.to_owned(),
+            image: Some(image_rel.to_owned()),
+            session_frame: None,
             width: 2560,
             height: 1440,
             is_gamepad: false,
@@ -1040,6 +1675,7 @@ mod tests {
                 prev_hint: None,
                 perturb_seeds: vec![101, 202],
             }),
+            global_relocate: None,
         }
     }
 
@@ -1106,6 +1742,7 @@ mod tests {
             dir: fixtures_dir,
             repo_root: Some(tmp.path.clone()),
             data_dir: PathBuf::from(DEFAULT_DATA_DIR),
+            ..FramesOptions::default()
         })
         .expect("run_frames");
         assert_eq!(report.pass, 1);
@@ -1133,6 +1770,7 @@ mod tests {
             dir: fixtures_dir,
             repo_root: Some(tmp.path.clone()),
             data_dir: PathBuf::from(DEFAULT_DATA_DIR),
+            ..FramesOptions::default()
         })
         .expect("run_frames");
         assert_eq!(report.fail, 1);
@@ -1161,6 +1799,7 @@ mod tests {
             dir: fixtures_dir,
             repo_root: Some(tmp.path.clone()),
             data_dir: PathBuf::from(DEFAULT_DATA_DIR),
+            ..FramesOptions::default()
         })
         .expect("run_frames");
         assert_eq!(report.fail, 0);
@@ -1182,6 +1821,7 @@ mod tests {
             dir: fixtures_dir,
             repo_root: Some(tmp.path.clone()),
             data_dir: PathBuf::from(DEFAULT_DATA_DIR),
+            ..FramesOptions::default()
         })
         .expect("run_frames");
         assert_eq!(report.xpass, 1);
@@ -1200,6 +1840,7 @@ mod tests {
             dir: fixtures_dir,
             repo_root: Some(tmp.path.clone()),
             data_dir: PathBuf::from(DEFAULT_DATA_DIR),
+            ..FramesOptions::default()
         })
         .expect("run_frames");
         assert_eq!(report.skipped, 1);
@@ -1228,6 +1869,7 @@ mod tests {
             dir: fixtures_dir,
             repo_root: Some(tmp.path.clone()),
             data_dir: PathBuf::from(DEFAULT_DATA_DIR),
+            ..FramesOptions::default()
         })
         .expect("run_frames");
         assert_eq!(report.fail, 1);
@@ -1421,6 +2063,7 @@ mod tests {
             dir: fixtures_dir,
             repo_root: Some(tmp.path.clone()),
             data_dir: tmp.path.join("nonexistent_data"),
+            ..FramesOptions::default()
         })
         .expect("run_frames");
         assert_eq!(report.skipped, 1);
@@ -1434,5 +2077,191 @@ mod tests {
                 .unwrap_or("")
                 .contains("datasets missing")
         );
+    }
+
+    #[test]
+    fn schema_validates_session_frame_and_global_relocate() {
+        let mut both_sources = base_mmap_fixture("both", "scratch/a.png");
+        both_sources.session_frame = Some(SessionFrameSource {
+            session: "sess_demo".to_owned(),
+            frame: 1,
+            crop_minimap: true,
+        });
+        assert!(both_sources.validate("both.json").is_err());
+
+        let mut traversal = FrameFixture {
+            schema_version: FRAME_FIXTURE_SCHEMA_VERSION,
+            name: "trav".to_owned(),
+            description: "bad".to_owned(),
+            notes: "bad".to_owned(),
+            image: None,
+            session_frame: Some(SessionFrameSource {
+                session: "../escape".to_owned(),
+                frame: 1,
+                crop_minimap: true,
+            }),
+            width: 2560,
+            height: 1440,
+            is_gamepad: false,
+            known_bug: None,
+            expected_minimap_rect: None,
+            expected_paimon_rect: None,
+            tolerance_px: None,
+            true_minimap_circle: None,
+            expect_circle_in_crop: true,
+            mmap_locate: None,
+            global_relocate: Some(GlobalRelocateExpectation {
+                expected_world_x: None,
+                expected_world_y: None,
+                pos_tolerance_w: None,
+                min_bin_score: 3.5,
+                min_votes_near_target: 0,
+                expect_no_match: true,
+            }),
+        };
+        assert!(traversal.validate("trav.json").is_err());
+
+        traversal.session_frame.as_mut().unwrap().session = "sess_demo".to_owned();
+        traversal.session_frame.as_mut().unwrap().frame = 0;
+        assert!(traversal.validate("zero_frame.json").is_err());
+
+        traversal.session_frame.as_mut().unwrap().frame = 5;
+        traversal.validate("ok_neg.json").expect("valid negative global_relocate");
+
+        let mut missing_coords = traversal.clone();
+        missing_coords.global_relocate.as_mut().unwrap().expect_no_match = false;
+        assert!(missing_coords.validate("missing_coords.json").is_err());
+    }
+
+    #[test]
+    fn global_relocate_check_handles_pass_fail_neg_and_skipped() {
+        // Synthetic textured 128x128 raster centered at world (5426, 4402)
+        let mut gray_vec = vec![0u8; 128 * 128];
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut next_u64 = || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        for y in 0..128 {
+            for x in 0..128 {
+                let xf = x as f64;
+                let yf = y as f64;
+                let base = 115.0
+                    + 45.0 * (xf * 0.17).sin() * (yf * 0.13).cos()
+                    + 35.0 * (xf * 0.29 - yf * 0.23).cos();
+                gray_vec[y * 128 + x] = base.clamp(15.0, 235.0) as u8;
+            }
+        }
+        for _ in 0..70 {
+            let cx = (next_u64() % 96 + 16) as isize;
+            let cy = (next_u64() % 96 + 16) as isize;
+            let rad = (next_u64() % 5 + 3) as isize;
+            let col = (next_u64() % 180 + 40) as u8;
+            for dy in -rad..=rad {
+                for dx in -rad..=rad {
+                    if dx * dx + dy * dy <= rad * rad {
+                        gray_vec[(cy + dy) as usize * 128 + (cx + dx) as usize] = col;
+                    }
+                }
+            }
+        }
+        let full_gray = FrameBuf {
+            width: 128,
+            height: 128,
+            stride: 128,
+            format: PixelFormat::Gray8,
+            data: gray_vec.clone(),
+        };
+        let gray = gh_cv::ops::color::frame_view_to_gray_array(full_gray.as_view())
+            .expect("gray array");
+        let raster = Arc::new(TerrainRaster {
+            gray,
+            meta: [7.0, 6.0, -2.0, 2000.0, 2000.0],
+        });
+        let tmp = TempDirGuard::new("gr_eval");
+        let idx_path = tmp.path.join(GLOBAL_INDEX_FILENAME);
+        let reloc = TeyvatGlobalRelocator::new(Some(raster), Some(idx_path), false);
+        assert!(reloc.is_ready());
+
+        // Build 90x90 BGR8 crop centered at pixel (64, 64) -> world (5426, 4402)
+        let mut crop = FrameBuf::new_zeroed(90, 90, PixelFormat::Bgr8);
+        for y in 0..90 {
+            for x in 0..90 {
+                let v = gray_vec[(y + 19) * 128 + (x + 19)];
+                let off = (y * 90 + x) * 3;
+                crop.data[off] = v;
+                crop.data[off + 1] = v;
+                crop.data[off + 2] = v;
+            }
+        }
+
+        let exp_match = GlobalRelocateExpectation {
+            expected_world_x: Some(5426.0),
+            expected_world_y: Some(4402.0),
+            pos_tolerance_w: Some(240.0),
+            min_bin_score: 1.0,
+            min_votes_near_target: 1,
+            expect_no_match: false,
+        };
+        let mut failures = Vec::new();
+        let det_pass = check_global_relocate_result(&reloc, &crop, &exp_match, &mut failures);
+        assert!(failures.is_empty(), "expected pass, got {failures:?} ({det_pass})");
+
+        let flat = FrameBuf::new_zeroed(90, 90, PixelFormat::Bgr8);
+        let exp_neg = GlobalRelocateExpectation {
+            expected_world_x: None,
+            expected_world_y: None,
+            pos_tolerance_w: None,
+            min_bin_score: DEFAULT_MIN_BIN_SCORE,
+            min_votes_near_target: 0,
+            expect_no_match: true,
+        };
+        let mut neg_failures = Vec::new();
+        let _ = check_global_relocate_result(&reloc, &flat, &exp_neg, &mut neg_failures);
+        assert!(neg_failures.is_empty(), "flat negative failed: {neg_failures:?}");
+
+        let mut fail_flat = Vec::new();
+        let _ = check_global_relocate_result(&reloc, &flat, &exp_match, &mut fail_flat);
+        assert!(!fail_flat.is_empty(), "flat frame must fail positive match");
+
+        // session_frame fixture without --ffmpeg must report Skipped (never Pass)
+        let fixtures_dir = tmp.path.join("tests/frame_fixtures");
+        let sf_fix = FrameFixture {
+            schema_version: FRAME_FIXTURE_SCHEMA_VERSION,
+            name: "session_skipped".to_owned(),
+            description: "skip without ffmpeg".to_owned(),
+            notes: "unit test".to_owned(),
+            image: None,
+            session_frame: Some(SessionFrameSource {
+                session: "sess_missing".to_owned(),
+                frame: 1,
+                crop_minimap: true,
+            }),
+            width: 2560,
+            height: 1440,
+            is_gamepad: false,
+            known_bug: None,
+            expected_minimap_rect: None,
+            expected_paimon_rect: None,
+            tolerance_px: None,
+            true_minimap_circle: None,
+            expect_circle_in_crop: true,
+            mmap_locate: None,
+            global_relocate: Some(exp_neg),
+        };
+        write_fixture_json(&fixtures_dir, "01_sf.json", &sf_fix);
+        let skip_report = run_frames(&FramesOptions {
+            dir: fixtures_dir,
+            repo_root: Some(tmp.path.clone()),
+            data_dir: tmp.path.join("nonexistent_data"),
+            ..FramesOptions::default()
+        })
+        .expect("run_frames");
+        assert_eq!(skip_report.skipped, 1);
+        assert_eq!(skip_report.pass, 0);
+        assert_eq!(skip_report.fail, 0);
     }
 }
