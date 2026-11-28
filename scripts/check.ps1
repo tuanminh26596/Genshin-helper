@@ -49,6 +49,12 @@ Include `provider-live` (runs `tests/provider_live_smoke.mjs` against live AppSa
 Print the selection plan only (`<name>: selected (<reason>)` or
 `<name>: not selected`) without executing any checks.
 
+.PARAMETER NormalPriority
+Run every check at normal process priority. By default the CPU-heavy checks
+(`clippy`, `nextest`, `frames`, `qa`) run at BelowNormal priority, which their
+child processes (cargo, rustc, gh-sim, ffmpeg) inherit, so games and other apps
+keep the CPU first. Results are identical either way; only scheduling changes.
+
 .PARAMETER SelfTest
 Run built-in unit tests for path selection, guards, config parsing, and runner
 short-circuiting without invoking external build/test tools. Prints
@@ -89,7 +95,8 @@ param(
     [switch]$ProviderLive,
     [switch]$DryRun,
     [switch]$SelfTest,
-    [switch]$PruneWorktreeTargets
+    [switch]$PruneWorktreeTargets,
+    [switch]$NormalPriority
 )
 
 Set-StrictMode -Version Latest
@@ -821,7 +828,8 @@ function Invoke-CheckRunner {
         [object[]]$Plan,
         [hashtable]$Executors,
         [string[]]$NoticeLines = @(),
-        [switch]$Quiet
+        [switch]$Quiet,
+        [string[]]$LowPriorityChecks = @()
     )
 
     $rows = New-Object System.Collections.Generic.List[object]
@@ -862,7 +870,13 @@ function Invoke-CheckRunner {
             if (-not $Executors.ContainsKey($name)) {
                 throw "No executor registered for check '$name'."
             }
-            & $Executors[$name] $outcome
+            if ($LowPriorityChecks -contains $name) {
+                Invoke-WithProcessPriority -Priority ([System.Diagnostics.ProcessPriorityClass]::BelowNormal) -Action {
+                    & $Executors[$name] $outcome
+                }
+            } else {
+                & $Executors[$name] $outcome
+            }
             $exitCode = [int]$outcome.ExitCode
         } catch {
             $exitCode = 1
@@ -955,6 +969,71 @@ function Invoke-NativeStream {
     $global:LASTEXITCODE = 0
     & $FilePath @ArgumentList | ForEach-Object { [Console]::Out.WriteLine([string]$_) }
     return [int]$LASTEXITCODE
+}
+
+# CPU-heavy checks run at BelowNormal priority (children inherit it on Windows), so a game or
+# other foreground work keeps the CPU first. Browser/timing-sensitive checks stay at Normal.
+$script:LowPriorityChecks = @('clippy', 'nextest', 'frames', 'qa')
+
+function Invoke-WithProcessPriority {
+    param(
+        [System.Diagnostics.ProcessPriorityClass]$Priority,
+        [scriptblock]$Action
+    )
+    $self = [System.Diagnostics.Process]::GetCurrentProcess()
+    $previous = $self.PriorityClass
+    $changed = $false
+    try {
+        if ($previous -ne $Priority) {
+            $self.PriorityClass = $Priority
+            $changed = $true
+        }
+    } catch {
+        $changed = $false
+    }
+    try {
+        & $Action
+    } finally {
+        if ($changed) {
+            try { $self.PriorityClass = $previous } catch {}
+        }
+    }
+}
+
+# One heavy `gh-sim qa` replay at a time across every worktree and agent of this user session
+# (each run already uses all cores). Only qa runs queue; other checks and other work do not.
+$script:QaRunMutexName = 'Local\GenshinHelperCheckQaRun'
+
+function Enter-QaRunLock {
+    param(
+        [string]$Label = 'qa',
+        [TimeSpan]$Timeout = [TimeSpan]::FromMinutes(60),
+        [string]$MutexName = $script:QaRunMutexName
+    )
+    $mutex = [System.Threading.Mutex]::new($false, $MutexName)
+    $acquired = $false
+    try {
+        $acquired = $mutex.WaitOne(0)
+        if (-not $acquired) {
+            [Console]::Out.WriteLine("[$Label] Another qa replay is running on this machine; waiting for it to finish ...")
+            $acquired = $mutex.WaitOne($Timeout)
+        }
+    } catch [System.Threading.AbandonedMutexException] {
+        $acquired = $true
+    }
+    if (-not $acquired) {
+        $mutex.Dispose()
+        return $null
+    }
+    return $mutex
+}
+
+function Exit-QaRunLock {
+    param($Mutex)
+    if ($null -ne $Mutex) {
+        try { $Mutex.ReleaseMutex() } catch {}
+        $Mutex.Dispose()
+    }
 }
 
 function Resolve-CargoTargetDirectory {
@@ -1274,9 +1353,17 @@ function Build-RealExecutors {
                 $outcome.ExitCode = $bin.ExitCode
                 return
             }
+            $qaLock = $null
             try {
+                $qaLock = Enter-QaRunLock -Label 'qa'
+                if ($null -eq $qaLock) {
+                    [Console]::Out.WriteLine('[qa] FAIL: another qa replay still held the machine-wide qa lock after 60 min.')
+                    $outcome.ExitCode = 1
+                    return
+                }
                 $outcome.ExitCode = Invoke-NativeStream -FilePath $bin.Exes[0] -ArgumentList @($qaArgs.ToArray())
             } finally {
+                Exit-QaRunLock -Mutex $qaLock
                 Remove-Item -LiteralPath $bin.CopyDir -Recurse -Force -ErrorAction SilentlyContinue
             }
         }.GetNewClosure()
@@ -1770,6 +1857,62 @@ function Invoke-SelfTest {
     Assert-True ($statusByCheck['qa'] -eq 'NOT RUN') 'runner seeded-fault: qa=NOT RUN'
     Assert-True ($passRun.ResultLine -ne $failRun.ResultLine -and $passRun.ExitCode -ne $failRun.ExitCode) 'runner seeded-fault: flipping fake step flips RESULT and exit code'
 
+    # Low priority: a heavy check's child process really runs BelowNormal, a browser check's does not,
+    # and the runner's own priority is restored afterwards.
+    $prioPlan = @(
+        [PSCustomObject]@{ Name = 'qa'; Selected = $true; Reason = 'selftest' }
+        [PSCustomObject]@{ Name = 'ext-smoke'; Selected = $true; Reason = 'selftest' }
+    )
+    $childPrio = @{}
+    $probe = { (& pwsh -NoProfile -Command '[System.Diagnostics.Process]::GetCurrentProcess().PriorityClass.ToString()' | Select-Object -Last 1) }
+    $prioExecs = @{
+        'qa'        = { param($o) $childPrio['qa'] = [string](& $probe); $o.ExitCode = 0 }.GetNewClosure()
+        'ext-smoke' = { param($o) $childPrio['ext-smoke'] = [string](& $probe); $o.ExitCode = 0 }.GetNewClosure()
+    }
+    $prioBefore = [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass
+    $null = Invoke-CheckRunner -Plan $prioPlan -Executors $prioExecs -Quiet -LowPriorityChecks $script:LowPriorityChecks
+    $prioAfter = [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass
+    Assert-True ($childPrio['qa'] -eq 'BelowNormal') "priority: qa child runs BelowNormal (got '$($childPrio['qa'])')"
+    Assert-True ($childPrio['ext-smoke'] -eq $prioBefore.ToString()) "priority: ext-smoke child keeps $prioBefore (got '$($childPrio['ext-smoke'])')"
+    Assert-True ($prioAfter -eq $prioBefore) "priority: runner restored to $prioBefore (got $prioAfter)"
+    Assert-True (@(@('clippy', 'nextest', 'frames', 'qa') | Where-Object { $script:LowPriorityChecks -notcontains $_ }).Count -eq 0) 'priority: clippy, nextest, frames, qa are low-priority checks'
+    Assert-True (@(@('ext-smoke', 'provider-fixtures', 'provider-live', 'blackbox', 'web-bench') | Where-Object { $script:LowPriorityChecks -contains $_ }).Count -eq 0) 'priority: browser/timing checks stay at normal priority'
+
+    # qa lock: while another process holds it, a second qa waits (here: times out); once released it enters.
+    $lockName = 'Local\GenshinHelperCheckQaRun-selftest-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $sigDir = Join-Path ([System.IO.Path]::GetTempPath()) ('gh-qa-lock-selftest-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $sigDir | Out-Null
+    $heldFile = Join-Path $sigDir 'held'
+    $releaseFile = Join-Path $sigDir 'release'
+    $holderScript = @"
+`$m = [System.Threading.Mutex]::new(`$false, '$lockName')
+`$null = `$m.WaitOne()
+New-Item -ItemType File -Path '$heldFile' | Out-Null
+`$deadline = [DateTime]::UtcNow.AddSeconds(60)
+while (-not (Test-Path '$releaseFile') -and [DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 50 }
+`$m.ReleaseMutex()
+`$m.Dispose()
+"@
+    $holder = Start-Process -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', $holderScript) -PassThru -WindowStyle Hidden
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        while (-not (Test-Path $heldFile) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
+        Assert-True (Test-Path $heldFile) 'qa lock: holder process acquired the lock'
+        $blocked = Enter-QaRunLock -Label 'qa-selftest' -Timeout ([TimeSpan]::FromMilliseconds(300)) -MutexName $lockName
+        Assert-True ($null -eq $blocked) 'qa lock: second qa cannot enter while another holds it'
+        Exit-QaRunLock -Mutex $blocked
+        New-Item -ItemType File -Path $releaseFile | Out-Null
+        $got = Enter-QaRunLock -Label 'qa-selftest' -Timeout ([TimeSpan]::FromSeconds(30)) -MutexName $lockName
+        Assert-True ($null -ne $got) 'qa lock: second qa enters once the holder releases'
+        Exit-QaRunLock -Mutex $got
+    } finally {
+        if (-not $holder.HasExited) {
+            New-Item -ItemType File -Path $releaseFile -Force | Out-Null
+            $null = $holder.WaitForExit(10000)
+        }
+        Remove-Item -LiteralPath $sigDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     if ($failures.Count -eq 0) {
         [Console]::Out.WriteLine("All $($script:SelfTestPassed) assertions passed.")
         [Console]::Out.WriteLine('SELFTEST PASS')
@@ -1878,7 +2021,8 @@ try {
         -AllowBaselineChange:$AllowBaselineChange
 
     $notices = if ($null -ne $recommendLine) { @($recommendLine) } else { @() }
-    $runResult = Invoke-CheckRunner -Plan $selection.Plan -Executors $executors -NoticeLines $notices
+    $lowPrio = if ($NormalPriority) { @() } else { $script:LowPriorityChecks }
+    $runResult = Invoke-CheckRunner -Plan $selection.Plan -Executors $executors -NoticeLines $notices -LowPriorityChecks $lowPrio
 
     exit $runResult.ExitCode
 } catch {
