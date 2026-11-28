@@ -1,6 +1,9 @@
 //! Concrete `gh_core::traits::ServerCallbacks` & `ConflictAdvisor` bridging `gh-net` to subsystems.
 
-use crate::state::{AppState, get_hotkey_field, json_f64, json_i64, json_str_trimmed, json_truthy};
+use crate::state::{
+    AppState, get_hotkey_field, json_f64, json_i64, json_str_trimmed, json_truthy,
+    merge_guide_into_pin,
+};
 use gh_core::i18n::{get_language, t};
 use gh_core::map_bridge::{
     CanonicalAnchor, execute_cross_map_export, execute_provider_calibration,
@@ -13,6 +16,7 @@ use gh_core::tsp_route::{
 };
 use gh_core::{CoreError, CoreResult};
 use gh_hud::toast::ToastKind;
+use gh_net::community_guide::CommunitySource;
 use gh_net::pin_guide::{HoYoLABLabelCatalog, PinGuideFetcher};
 use gh_net::sync_server::HOTKEY_ACTIONS;
 use gh_win32::capture::WindowFinder;
@@ -58,6 +62,19 @@ impl AppServerCallbacks {
             })
         });
     }
+}
+
+/// The community guide source of an AppSample pin from the extension payload
+/// (`type_code` + `community_guide`, sent by `provider_runtime.js` for markers whose popup shows
+/// comments). Returns `(pin_id, source)`.
+fn community_source_of(raw: &Value) -> Option<(String, CommunitySource)> {
+    let id = json_str_trimmed(raw.get("id"));
+    let doc_id = id.strip_prefix("appsample:")?;
+    if !json_truthy(raw.get("community_guide"), false) {
+        return None;
+    }
+    let source = CommunitySource::appsample(&json_str_trimmed(raw.get("type_code")), doc_id)?;
+    Some((id.clone(), source))
 }
 
 /// Whether the in-game HUD toast + chime should answer this web feedback.
@@ -145,6 +162,8 @@ impl ServerCallbacks for AppServerCallbacks {
             "display_name_nav_undo": self.state.hotkey_mgr.get_display_name("nav_undo"),
             "hotkey_nav_guide": cfg.hotkey_nav_guide,
             "display_name_nav_guide": self.state.hotkey_mgr.get_display_name("nav_guide"),
+            "hotkey_nav_guide_next": cfg.hotkey_nav_guide_next,
+            "display_name_nav_guide_next": self.state.hotkey_mgr.get_display_name("nav_guide_next"),
             "hotkey_nav_next": cfg.hotkey_nav_next,
             "display_name_nav_next": self.state.hotkey_mgr.get_display_name("nav_next"),
             "hotkey_nav_layout": cfg.hotkey_nav_layout,
@@ -431,6 +450,14 @@ impl ServerCallbacks for AppServerCallbacks {
             .filter_map(|item| normalize_raw_nav_pin(item, map_id, Some(&resolver)))
             .collect();
 
+        for item in &raw_pins {
+            if let Some((pin_id, source)) = community_source_of(item) {
+                self.state
+                    .guide_fetcher
+                    .register_community_source(&pin_id, source);
+            }
+        }
+
         for pin in &mut norm_pins {
             if !PinGuideFetcher::is_fetchable_id(&pin.id)
                 && (!pin.description.is_empty() || !pin.image_url.is_empty())
@@ -443,12 +470,7 @@ impl ServerCallbacks for AppServerCallbacks {
                 );
             }
             if let Some(cached) = self.state.guide_fetcher.get_cached(&pin.id, None) {
-                if !cached.description.is_empty() {
-                    pin.description = cached.description;
-                }
-                if !cached.image_url.is_empty() && pin.image_url.is_empty() {
-                    pin.image_url = cached.image_url;
-                }
+                merge_guide_into_pin(pin, &cached);
             }
         }
 
@@ -505,12 +527,21 @@ impl ServerCallbacks for AppServerCallbacks {
                     "Invalid pin payload for lock_target".to_owned(),
                 ));
             };
+            if let Some((pin_id, source)) = community_source_of(&pin_val) {
+                self.state
+                    .guide_fetcher
+                    .register_community_source(&pin_id, source);
+            }
             if let Some(cached) = self.state.guide_fetcher.get_cached(&pin.id, None) {
-                if !cached.description.is_empty() && pin.description.is_empty() {
-                    pin.description = cached.description;
-                }
-                if !cached.image_url.is_empty() && pin.image_url.is_empty() {
-                    pin.image_url = cached.image_url;
+                if cached.suggestion.is_some() {
+                    merge_guide_into_pin(&mut pin, &cached);
+                } else {
+                    if !cached.description.is_empty() && pin.description.is_empty() {
+                        pin.description = cached.description;
+                    }
+                    if !cached.image_url.is_empty() && pin.image_url.is_empty() {
+                        pin.image_url = cached.image_url;
+                    }
                 }
             }
             let (locked_pin, summary) = {
@@ -2031,6 +2062,160 @@ mod tests {
         );
         assert!(byte_urls.lock().unwrap().iter().any(|u| u == AS_IMG));
         assert_eq!(gh_hud::nav_hud::guide_source_name(&t2.id), "AppSample");
+
+        state.server.set_callbacks(None);
+        state.server.stop().await;
+        state.nav_hud.close();
+        state.hud_toast.close();
+        state.guide_fetcher.stop();
+        state.audio.close();
+        state.capturer.close();
+        let _ = std::fs::remove_dir_all(&tmp_root);
+    }
+
+    /// End-to-end over the real sync server: an AppSample pin whose popup shows community
+    /// comments gets the summary and the top-voted screenshot as its guide, a non-screenshot is
+    /// skipped, and the "next guide suggestion" hotkey swaps the target's image and text.
+    #[tokio::test]
+    async fn appsample_community_guide_steps_with_next_suggestion_hotkey() {
+        use gh_net::pin_guide::{PinGuideConfig, PinGuideFetcher};
+        use std::sync::Mutex as StdMutex;
+        use std::time::{Duration, Instant};
+
+        const SHOT1: &str = "https://game-cdn.appsample.com/gim/comments/o17/107156/one.jpg";
+        const SHOT2: &str = "https://game-cdn.appsample.com/gim/comments/o17/107156/two.jpg";
+        let seq_id = CB_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp_root = std::env::temp_dir().join(format!(
+            "gh_app_cb_community_guide_{}_{seq_id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_root);
+        std::fs::create_dir_all(&tmp_root).unwrap();
+
+        let png = |w: u32, h: u32| {
+            let mut buf = std::io::Cursor::new(Vec::new());
+            image::RgbaImage::from_pixel(w, h, image::Rgba([90, 120, 160, 255]))
+                .write_to(&mut buf, image::ImageFormat::Png)
+                .unwrap();
+            buf.into_inner()
+        };
+        let (landscape, portrait) = (png(640, 360), png(360, 640));
+        let json_urls: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let fetcher = PinGuideFetcher::with_config(PinGuideConfig {
+            lang_getter: Arc::new(|| "vi".to_owned()),
+            fetch_json: Some({
+                let urls = Arc::clone(&json_urls);
+                Arc::new(move |url: &str| {
+                    urls.lock().unwrap().push(url.to_owned());
+                    Ok(json!({"data": {
+                        "summary": {"content": "Between the boxes below the ledge."},
+                        "comments": [
+                            {"content": "selfie time", "lang": "en", "vote": 99,
+                             "image": "/gim/comments/o17/107156/selfie.jpg"},
+                            {"content": "between the boxes", "lang": "en", "vote": 50,
+                             "image": "/gim/comments/o17/107156/one.jpg"},
+                            {"content": "under the snow", "lang": "en", "vote": 20,
+                             "image": "/gim/comments/o17/107156/two.jpg"}
+                        ]
+                    }}))
+                })
+            }),
+            fetch_bytes: Some(Arc::new(move |url: &str| {
+                Ok(if url.ends_with("/selfie.jpg") { portrait.clone() } else { landscape.clone() })
+            })),
+            ..Default::default()
+        });
+
+        let state = crate::state::make_test_state_with_guide_fetcher(&tmp_root, fetcher);
+        let cb = Arc::new(AppServerCallbacks::new(Arc::clone(&state)));
+        state
+            .server
+            .set_callbacks(Some(Arc::clone(&cb) as Arc<dyn ServerCallbacks>));
+        let port = state.server.start().await.expect("start sync server");
+        let post = |path: &'static str, body: Value| async move {
+            tokio::task::spawn_blocking(move || {
+                http_request(port, "POST", path, Some(&body.to_string()))
+            })
+            .await
+            .unwrap()
+        };
+        // Hang guard only: returns as soon as the condition holds.
+        let wait_until = |what: &str, mut ok: Box<dyn FnMut() -> bool + '_>| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !ok() {
+                assert!(Instant::now() < deadline, "{what} never happened");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let target_pin = |state: &Arc<AppState>| {
+            state.nav_controller.lock().unwrap().get_pin("appsample:107156").cloned().unwrap()
+        };
+
+        let (code, _) = post(
+            "/nearby_pins",
+            json!({
+                "tab_id": "as_tab", "provider_id": "appsample", "tab_visible": true,
+                "tab_focused": true, "user_initiated": true, "map_id": 2,
+                "pins": [
+                    {"id": "appsample:107156", "name": "Common Chest", "lat": 100.0, "lng": 200.3,
+                     "map_id": 2, "image_url": "", "description": "",
+                     "type_code": "o17", "community_guide": true},
+                    {"id": "appsample:55", "name": "Plant", "lat": 100.0, "lng": 260.0,
+                     "map_id": 2, "image_url": "", "description": "",
+                     "type_code": "o90", "community_guide": false}
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(code, 200);
+        assert!(state.guide_fetcher.has_community_source("appsample:107156"));
+        assert!(!state.guide_fetcher.has_community_source("appsample:55"), "level-0 pins have no thread");
+
+        // The tracking loop's per-tick step picks the pin and loads its guide.
+        let g = state.nav_controller.lock().unwrap().compute_guidance(
+            100.0, 200.5, Some(0.0), 2, None, false, "TRACKING", "",
+        );
+        assert_eq!(g.target.as_ref().map(|t| t.id.as_str()), Some("appsample:107156"));
+        state.ensure_guide(g.target.as_ref());
+        wait_until("first suggestion", Box::new(|| target_pin(&state).image_url == SHOT1));
+        let pin = target_pin(&state);
+        assert_eq!(
+            pin.description,
+            "Between the boxes below the ledge.\n\u{201C}between the boxes\u{201D}"
+        );
+        assert_eq!(state.guide_fetcher.community_position(&pin.id, None), Some((1, 2)));
+        assert_eq!(json_urls.lock().unwrap().len(), 1);
+        assert!(json_urls.lock().unwrap()[0].contains("collection=o17&docId=107156"));
+
+        // Next suggestion hotkey: opens the guide card and swaps image and text.
+        assert!(!state.nav_hud.is_guide_open());
+        state.handle_nav_guide_next_hotkey();
+        assert!(state.nav_hud.is_guide_open());
+        wait_until("second suggestion", Box::new(|| target_pin(&state).image_url == SHOT2));
+        assert!(target_pin(&state).description.ends_with("\u{201C}under the snow\u{201D}"));
+        assert_eq!(state.guide_fetcher.community_position("appsample:107156", None), Some((2, 2)));
+
+        // A /nearby_pins refresh keeps the suggestion the player picked.
+        let (code, _) = post(
+            "/nearby_pins",
+            json!({
+                "tab_id": "as_tab", "provider_id": "appsample", "tab_visible": true,
+                "tab_focused": true, "user_initiated": false, "map_id": 2,
+                "pins": [
+                    {"id": "appsample:107156", "name": "Common Chest", "lat": 100.0, "lng": 200.3,
+                     "map_id": 2, "image_url": "", "description": "",
+                     "type_code": "o17", "community_guide": true}
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(code, 200);
+        assert_eq!(target_pin(&state).image_url, SHOT2);
+
+        // Past the last suggestion it wraps to the first; the thread is fetched only once.
+        state.handle_nav_guide_next_hotkey();
+        wait_until("wrap to first", Box::new(|| target_pin(&state).image_url == SHOT1));
+        assert_eq!(json_urls.lock().unwrap().len(), 1);
 
         state.server.set_callbacks(None);
         state.server.stop().await;

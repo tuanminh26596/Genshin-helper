@@ -250,6 +250,16 @@ impl HudPalette {
 /// Name of the map site a pin's guide comes from, for the Guide card's loading / empty / error text.
 /// Third-party pins are namespaced (`appsample:<id>`, `kongying:<id>`) and carry their own inline
 /// guide; everything else is a HoYoLAB pin fetched by `PinGuideFetcher`.
+/// The suggestion position to show, only while its pin is still the target.
+fn guide_suggestion_for_target(
+    raw: Option<&(String, usize, usize)>,
+    guidance: &NavGuidance,
+) -> Option<(usize, usize)> {
+    let (pid, index, total) = raw?;
+    let target = guidance.target.as_ref()?;
+    (target.id == *pid).then_some((*index, *total))
+}
+
 pub fn guide_source_name(pin_id: &str) -> &'static str {
     if pin_id.starts_with("appsample:") {
         "AppSample"
@@ -1698,6 +1708,10 @@ pub struct NavRenderOptions<'a> {
     pub max_guide_h: Option<u32>,
     pub guide_status: &'a str,
     pub guide_frame_index: usize,
+    /// `(index, total)` of the community guide suggestion shown for the target, if any.
+    pub guide_suggestion: Option<(usize, usize)>,
+    /// Display name of the "next guide suggestion" hotkey.
+    pub guide_next_hotkey_label: &'a str,
     pub flash_text: &'a str,
     pub flash_kind: HudPalette,
     pub edit_mode: bool,
@@ -1722,6 +1736,8 @@ impl Default for NavRenderOptions<'_> {
             max_guide_h: None,
             guide_status: "",
             guide_frame_index: 0,
+            guide_suggestion: None,
+            guide_next_hotkey_label: "",
             flash_text: "",
             flash_kind: HudPalette::Info,
             edit_mode: false,
@@ -3547,6 +3563,27 @@ impl NavHudRenderer {
                     )
                 };
             }
+            // Several community suggestions: say which one this is and how to see the next.
+            // It goes first because the footer is cut to one line.
+            if let Some((index, total)) = opts.guide_suggestion
+                && total > 1
+                && !opts.guide_next_hotkey_label.is_empty()
+            {
+                let hint = t_lang(
+                    "hud.guide.suggestion_hint",
+                    Some(&eff_lang),
+                    &[
+                        ("index", &index.to_string()),
+                        ("total", &total.to_string()),
+                        ("hotkey", opts.guide_next_hotkey_label),
+                    ],
+                );
+                guide_footer = if guide_footer.is_empty() {
+                    hint
+                } else {
+                    format!("{hint} • {guide_footer}")
+                };
+            }
         }
 
         let san_guide_w = opts
@@ -3982,6 +4019,9 @@ struct NavHudShared {
     guide_zoomed: bool,
     guide_zoom_mode: GuideZoomMode,
     guide_status: String,
+    /// `(pin_id, index, total)` of the community guide suggestion currently shown.
+    guide_suggestion: Option<(String, usize, usize)>,
+    guide_next_hotkey_label: String,
     flash: Option<FlashState>,
     edit_mode: bool,
     edit_started: Instant,
@@ -4159,6 +4199,8 @@ impl NavHandler {
             mut guide_zoomed,
             guide_zoom_mode,
             guide_status,
+            guide_suggestion_raw,
+            guide_next_label,
             edit_mode,
             auto_fade_enabled,
             force_inv,
@@ -4202,6 +4244,8 @@ impl NavHandler {
                 g.guide_zoomed,
                 g.guide_zoom_mode,
                 g.guide_status.clone(),
+                g.guide_suggestion.clone(),
+                g.guide_next_hotkey_label.clone(),
                 g.edit_mode,
                 g.auto_fade_enabled,
                 force_inv,
@@ -4358,6 +4402,8 @@ impl NavHandler {
             max_guide_h: Some(max_guide_h),
             guide_status: &guide_status,
             guide_frame_index,
+            guide_suggestion: guide_suggestion_for_target(guide_suggestion_raw.as_ref(), &guidance),
+            guide_next_hotkey_label: &guide_next_label,
             flash_text: flash.as_ref().map(|f| f.text.as_str()).unwrap_or(""),
             flash_kind: flash.as_ref().map(|f| f.kind).unwrap_or(HudPalette::Info),
             edit_mode,
@@ -4580,6 +4626,8 @@ impl NavMiniHud {
             guide_zoomed: false,
             guide_zoom_mode: config.guide_zoom_mode,
             guide_status: String::new(),
+            guide_suggestion: None,
+            guide_next_hotkey_label: String::new(),
             flash: None,
             edit_mode: false,
             edit_started: Instant::now(),
@@ -5083,6 +5131,33 @@ impl NavMiniHud {
         };
         let _ = self.host.post_message(WM_APP_UPDATE, 0, 0);
         opened
+    }
+
+    /// Shows "suggestion `index`/`total`" in the guide footer while `pin_id` is the target.
+    /// `None` clears it.
+    pub fn set_guide_suggestion(&self, suggestion: Option<(&str, usize, usize)>) {
+        let next = suggestion.map(|(pid, i, n)| (pid.to_owned(), i, n));
+        let changed = {
+            let mut g = self.shared.lock().expect("nav hud shared lock poisoned");
+            if g.guide_suggestion != next {
+                g.guide_suggestion = next;
+                g.state_version += 1;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            let _ = self.host.post_message(WM_APP_UPDATE, 0, 0);
+        }
+    }
+
+    pub fn set_guide_next_hotkey_label(&self, label: &str) {
+        let mut g = self.shared.lock().expect("nav hud shared lock poisoned");
+        if g.guide_next_hotkey_label != label {
+            g.guide_next_hotkey_label = label.to_owned();
+            g.state_version += 1;
+        }
     }
 
     pub fn set_guide_status(&self, status: &str) {
@@ -7167,6 +7242,59 @@ mod tests {
         let hoyolab = render_for("107596");
         let appsample = render_for("appsample:15130");
         assert_ne!(hoyolab, appsample, "empty Guide card text must name the pin's source");
+    }
+
+    #[test]
+    fn guide_footer_shows_the_suggestion_position_and_next_hotkey() {
+        for lang in ["vi", "en"] {
+            let s = gh_core::i18n::t_lang(
+                "hud.guide.suggestion_hint",
+                Some(lang),
+                &[("index", "2"), ("total", "5"), ("hotkey", "Alt+N")],
+            );
+            assert!(s.contains("2/5") && s.contains("Alt+N") && !s.contains('{'), "{lang}: {s}");
+        }
+
+        let pin = NavPin { id: "appsample:9".into(), name: "Ghim".into(), map_id: 2, ..Default::default() };
+        let g = NavGuidance {
+            state: NavState::Tracking,
+            target: Some(pin),
+            distance_m: 35.0,
+            target_distance_m: Some(35.0),
+            ..Default::default()
+        };
+        // The position only shows while its pin is the target.
+        let raw = ("appsample:9".to_owned(), 2, 5);
+        assert_eq!(guide_suggestion_for_target(Some(&raw), &g), Some((2, 5)));
+        let other = ("appsample:8".to_owned(), 2, 5);
+        assert_eq!(guide_suggestion_for_target(Some(&other), &g), None);
+        assert_eq!(guide_suggestion_for_target(None, &g), None);
+
+        let mut r = NavHudRenderer::new();
+        let mut render_with = |suggestion: Option<(usize, usize)>| {
+            r.render(
+                &g,
+                &NavRenderOptions {
+                    lang: Some("vi"),
+                    guide_open: true,
+                    guide_status: "ready",
+                    guide_hotkey_label: "Alt+H",
+                    guide_suggestion: suggestion,
+                    guide_next_hotkey_label: "Alt+N",
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .data()
+            .to_vec()
+        };
+        let plain = render_with(None);
+        let single = render_with(Some((1, 1)));
+        let second = render_with(Some((2, 5)));
+        let third = render_with(Some((3, 5)));
+        assert_eq!(plain, single, "a single guide needs no position hint");
+        assert_ne!(plain, second, "several suggestions show the position hint");
+        assert_ne!(second, third, "the hint follows the shown suggestion");
     }
 
     #[test]

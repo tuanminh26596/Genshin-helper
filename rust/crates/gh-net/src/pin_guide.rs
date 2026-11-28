@@ -1,5 +1,8 @@
 //! Bilingual `(lang_tag, pin_id)` `PinGuideFetcher` & `HoYoLABLabelCatalog` (`src/pin_guide.py`).
 
+use crate::community_guide::{
+    CommunitySource, GuideSuggestion, build_suggestions, looks_like_screenshot, text_for_hud_lang,
+};
 use crate::hd_assets::run_blocking_http;
 use gh_core::{CoreError, CoreResult, atomic_io};
 use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
@@ -48,6 +51,9 @@ pub struct PinGuide {
     pub image_bytes: Option<Vec<u8>>,
     pub ok: bool,
     pub lang: String,
+    /// `(index, total)`, 1-based, when this guide is one of several community suggestions
+    /// the player can step through (`next_community_suggestion`).
+    pub suggestion: Option<(usize, usize)>,
 }
 
 /// Strips HoYoLAB rich-text markup down to plain multi-line text.
@@ -372,9 +378,39 @@ impl Default for PinGuideConfig {
 enum GuideJobKind {
     Hoyolab { map_id: i32 },
     Inline { description: String, image_url: String },
+    Community {
+        source: CommunitySource,
+        official_text: String,
+        official_image: String,
+        advance: bool,
+    },
 }
 
 type PendingJob = (String, String, GuideJobKind, GuideCallback);
+
+/// Most pins whose community source is remembered; the map is cleared past this and refilled by
+/// the next `/nearby_pins` push.
+const MAX_COMMUNITY_SOURCES: usize = 20_000;
+/// Downloads tried per step before giving up on the rest of a suggestion list.
+const MAX_SUGGESTION_ATTEMPTS: usize = 4;
+
+/// The suggestion list of one pin and which entry is shown.
+#[derive(Debug, Clone, Default)]
+struct CommunityThread {
+    suggestions: Vec<GuideSuggestion>,
+    index: usize,
+}
+
+/// What `next_community_suggestion` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NextSuggestion {
+    /// The next suggestion is loading; `on_done` gets it.
+    Queued,
+    /// The pin has one guide only.
+    Single,
+    /// The pin has no community guide (HoYoLAB / Kongying pins, or nothing loaded).
+    Unavailable,
+}
 
 #[derive(Default)]
 struct PinGuideState {
@@ -384,6 +420,8 @@ struct PinGuideState {
     inflight: Option<(String, String)>,
     thread_alive: bool,
     stopped: bool,
+    community_sources: HashMap<String, CommunitySource>,
+    community_threads: HashMap<(String, String), CommunityThread>,
 }
 
 #[inline]
@@ -565,7 +603,9 @@ impl PinGuideFetcher {
         if pid.is_empty() {
             return;
         }
-        let clean_desc = clean_guide_text(description);
+        let lang_tag = self.active_lang_tag(lang).to_owned();
+        // Same text rule as HoYoLAB guides: no CJK-only text in a VI/EN HUD (Kongying).
+        let clean_desc = text_for_hud_lang(&clean_guide_text(description), &lang_tag);
         let safe_img = if is_allowed_provider_image_url(image_url) {
             image_url.trim().to_owned()
         } else {
@@ -574,9 +614,12 @@ impl PinGuideFetcher {
         if clean_desc.is_empty() && safe_img.is_empty() {
             return;
         }
-        let lang_tag = self.active_lang_tag(lang).to_owned();
         let cache_key = (lang_tag.clone(), pid.clone());
         let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.community_sources.contains_key(&pid) {
+            // The community job owns this pin's guide (it already includes the official image).
+            return;
+        }
         if let Some((_, existing)) = st.cache.iter().find(|(k, _)| k == &cache_key)
             && existing.image_bytes.as_ref().is_some_and(|b| !b.is_empty())
         {
@@ -590,6 +633,7 @@ impl PinGuideFetcher {
                 image_bytes: None,
                 ok: true,
                 lang: lang_tag,
+                suggestion: None,
             };
             insert_guide_into_cache(&mut st, cache_key, guide);
         }
@@ -620,11 +664,11 @@ impl PinGuideFetcher {
         } else {
             String::new()
         };
-        let clean_desc = clean_guide_text(description);
         if safe_img.is_empty() {
             return false;
         }
         let lang_tag = self.active_lang_tag(lang).to_owned();
+        let clean_desc = text_for_hud_lang(&clean_guide_text(description), &lang_tag);
         let cache_key = (lang_tag.clone(), pid.clone());
 
         let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -666,6 +710,150 @@ impl PinGuideFetcher {
         true
     }
 
+    /// Remembers where a third-party pin's community guide lives (AppSample comments thread).
+    /// Called for every pin the extension reports with a community guide.
+    pub fn register_community_source(&self, pin_id: &str, source: CommunitySource) {
+        let pid = pin_id.trim();
+        if pid.is_empty() || Self::is_fetchable_id(pid) {
+            return;
+        }
+        let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.community_sources.len() >= MAX_COMMUNITY_SOURCES
+            && !st.community_sources.contains_key(pid)
+        {
+            st.community_sources.clear();
+        }
+        st.community_sources.insert(pid.to_owned(), source);
+    }
+
+    pub fn has_community_source(&self, pin_id: &str) -> bool {
+        let st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.community_sources.contains_key(pin_id.trim())
+    }
+
+    /// `(index, total)` of the suggestion currently shown for `pin_id`, if it has a list.
+    pub fn community_position(&self, pin_id: &str, lang: Option<&str>) -> Option<(usize, usize)> {
+        let key = (self.active_lang_tag(lang).to_owned(), pin_id.trim().to_owned());
+        let st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.community_threads
+            .get(&key)
+            .filter(|t| !t.suggestions.is_empty())
+            .map(|t| (t.index + 1, t.suggestions.len()))
+    }
+
+    /// Queues the first community guide of a pin registered with `register_community_source`.
+    /// `official_text` / `official_image` are what the extension sent for the pin; the official
+    /// image becomes the first suggestion. Returns `false` when the pin has no community source,
+    /// is already cached or loading, or the fetcher is offline.
+    pub fn request_community_guide<F>(
+        &self,
+        pin_id: &str,
+        official_text: &str,
+        official_image: &str,
+        on_done: F,
+        lang: Option<&str>,
+    ) -> bool
+    where
+        F: FnOnce(PinGuide) + Send + 'static,
+    {
+        if self.inner.offline {
+            return false;
+        }
+        let pid = pin_id.trim().to_owned();
+        let lang_tag = self.active_lang_tag(lang).to_owned();
+        let cache_key = (lang_tag.clone(), pid.clone());
+        let st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(source) = st.community_sources.get(&pid).cloned() else {
+            return false;
+        };
+        if st.stopped
+            || st.cache.iter().any(|(k, _)| k == &cache_key)
+            || st.inflight.as_ref() == Some(&cache_key)
+        {
+            return false;
+        }
+        let official_image = if is_allowed_provider_image_url(official_image) {
+            official_image.trim().to_owned()
+        } else {
+            String::new()
+        };
+        let job = GuideJobKind::Community {
+            source,
+            official_text: official_text.to_owned(),
+            official_image,
+            advance: false,
+        };
+        self.enqueue_locked(st, (lang_tag, pid, job, Box::new(on_done)))
+    }
+
+    /// Moves a pin's guide to its next community suggestion (wrapping to the first).
+    pub fn next_community_suggestion<F>(
+        &self,
+        pin_id: &str,
+        on_done: F,
+        lang: Option<&str>,
+    ) -> NextSuggestion
+    where
+        F: FnOnce(PinGuide) + Send + 'static,
+    {
+        if self.inner.offline {
+            return NextSuggestion::Unavailable;
+        }
+        let pid = pin_id.trim().to_owned();
+        let lang_tag = self.active_lang_tag(lang).to_owned();
+        let key = (lang_tag.clone(), pid.clone());
+        let st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(source) = st.community_sources.get(&pid).cloned() else {
+            return NextSuggestion::Unavailable;
+        };
+        let Some(total) = st.community_threads.get(&key).map(|t| t.suggestions.len()) else {
+            return NextSuggestion::Unavailable;
+        };
+        if total == 0 {
+            return NextSuggestion::Unavailable;
+        }
+        if total == 1 {
+            return NextSuggestion::Single;
+        }
+        if st.stopped {
+            return NextSuggestion::Unavailable;
+        }
+        let job = GuideJobKind::Community {
+            source,
+            official_text: String::new(),
+            official_image: String::new(),
+            advance: true,
+        };
+        if self.enqueue_locked(st, (lang_tag, pid, job, Box::new(on_done))) {
+            NextSuggestion::Queued
+        } else {
+            NextSuggestion::Unavailable
+        }
+    }
+
+    fn enqueue_locked(
+        &self,
+        mut st: std::sync::MutexGuard<'_, PinGuideState>,
+        job: PendingJob,
+    ) -> bool {
+        st.pending = Some(job);
+        if !st.thread_alive {
+            st.thread_alive = true;
+            let inner = Arc::clone(&self.inner);
+            if std::thread::Builder::new()
+                .name("GH_PinGuide".to_owned())
+                .spawn(move || worker_loop(inner))
+                .is_err()
+            {
+                st.thread_alive = false;
+                st.pending = None;
+                return false;
+            }
+        }
+        self.inner.cv.notify_one();
+        true
+    }
+
     pub fn stop(&self) {
         let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         st.stopped = true;
@@ -683,6 +871,7 @@ impl PinGuideFetcher {
                 image_bytes: None,
                 ok: false,
                 lang: lang_tag,
+                suggestion: None,
             };
         }
         fetch_sync_inner(&self.inner, pin_id, map_id, &lang_tag)
@@ -829,6 +1018,7 @@ fn fetch_sync_inner(
             image_bytes: None,
             ok: false,
             lang: lang_tag.to_owned(),
+            suggestion: None,
         };
     };
 
@@ -840,6 +1030,7 @@ fn fetch_sync_inner(
             image_bytes: None,
             ok: false,
             lang: lang_tag.to_owned(),
+            suggestion: None,
         };
     }
 
@@ -925,6 +1116,7 @@ fn fetch_sync_inner(
         image_bytes,
         ok: true,
         lang: effective_lang.to_owned(),
+        suggestion: None,
     }
 }
 
@@ -989,6 +1181,126 @@ fn fetch_inline_image_inner(
         image_bytes,
         ok: true,
         lang: lang_tag.to_owned(),
+        suggestion: None,
+    }
+}
+
+fn download_provider_image(inner: &PinGuideInner, url: &str) -> Result<Vec<u8>, String> {
+    if !is_allowed_provider_image_url(url) {
+        return Err("image host not allowlisted".to_owned());
+    }
+    let img_total_timeout = inner
+        .timeout
+        .saturating_mul(3)
+        .min(Duration::from_secs(25))
+        .max(inner.timeout);
+    let bytes = match &inner.fetch_bytes {
+        Some(hook) => hook(url)?,
+        None => http_get_bytes_with_timeouts(url, inner.timeout, img_total_timeout, MAX_IMAGE_BYTES)?,
+    };
+    if bytes.is_empty() {
+        return Err("empty image response".to_owned());
+    }
+    Ok(bytes)
+}
+
+/// Loads the community suggestion list of a pin once, then the image of the suggestion to show
+/// (the current one, or the next one when `advance`). Images that download but are not
+/// screenshot-shaped are dropped from the list for good; failed downloads are skipped this time
+/// only. Gives up after `MAX_SUGGESTION_ATTEMPTS` downloads.
+fn fetch_community_inner(
+    inner: &PinGuideInner,
+    pin_id: &str,
+    lang_tag: &str,
+    source: &CommunitySource,
+    official_text: &str,
+    official_image: &str,
+    advance: bool,
+) -> PinGuide {
+    let key = (lang_tag.to_owned(), pin_id.to_owned());
+    let guide = |description: String, image_url: String, image_bytes: Option<Vec<u8>>, ok: bool, pos| PinGuide {
+        pin_id: pin_id.to_owned(),
+        description,
+        image_url,
+        image_bytes,
+        ok,
+        lang: lang_tag.to_owned(),
+        suggestion: pos,
+    };
+
+    let existing = {
+        let st = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.community_threads.get(&key).cloned()
+    };
+    let mut thread = match existing {
+        Some(t) => t,
+        None => {
+            let Ok(body) =
+                fetch_json_with_limit(inner, &source.comments_url(), MAX_COMMENT_LIST_JSON_BYTES)
+            else {
+                return guide(String::new(), String::new(), None, false, None);
+            };
+            CommunityThread {
+                suggestions: build_suggestions(&body, lang_tag, official_text, official_image),
+                index: 0,
+            }
+        }
+    };
+
+    let mut idx = if thread.suggestions.is_empty() {
+        0
+    } else if advance {
+        (thread.index + 1) % thread.suggestions.len()
+    } else {
+        thread.index.min(thread.suggestions.len() - 1)
+    };
+    let mut bytes: Option<Vec<u8>> = None;
+    let mut attempts = 0usize;
+    while !thread.suggestions.is_empty() {
+        let cand = thread.suggestions[idx].clone();
+        if cand.image_url.is_empty() {
+            break;
+        }
+        if attempts >= MAX_SUGGESTION_ATTEMPTS {
+            break;
+        }
+        attempts += 1;
+        match download_provider_image(inner, &cand.image_url) {
+            Ok(b) if cand.official || looks_like_screenshot(&b) => {
+                bytes = Some(b);
+                break;
+            }
+            Ok(_) => {
+                thread.suggestions.remove(idx);
+                if idx >= thread.suggestions.len() {
+                    idx = 0;
+                }
+            }
+            Err(_) => {
+                idx = (idx + 1) % thread.suggestions.len();
+            }
+        }
+    }
+    thread.index = idx;
+    let total = thread.suggestions.len();
+    let shown = thread.suggestions.get(idx).cloned();
+
+    {
+        let mut st = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.community_threads.len() >= MAX_CACHE && !st.community_threads.contains_key(&key) {
+            let live: HashSet<(String, String)> = st.cache.iter().map(|(k, _)| k.clone()).collect();
+            st.community_threads.retain(|k, _| live.contains(k));
+        }
+        st.community_threads.insert(key, thread);
+    }
+
+    match shown {
+        None => guide(String::new(), String::new(), None, true, None),
+        Some(s) if s.image_url.is_empty() => guide(s.text, String::new(), None, true, Some((idx + 1, total))),
+        Some(s) if bytes.is_some() => guide(s.text, s.image_url, bytes, true, Some((idx + 1, total))),
+        // Every download tried failed: report the image error (not cached, so the next request
+        // retries from here).
+        Some(s) => guide(s.text, s.image_url, None, true, Some((idx + 1, total))),
     }
 }
 
@@ -1024,6 +1336,20 @@ fn worker_loop(inner: Arc<PinGuideInner>) {
                 description,
                 image_url,
             } => fetch_inline_image_inner(&inner, &pid, &description, &image_url, &lang_tag),
+            GuideJobKind::Community {
+                source,
+                official_text,
+                official_image,
+                advance,
+            } => fetch_community_inner(
+                &inner,
+                &pid,
+                &lang_tag,
+                &source,
+                &official_text,
+                &official_image,
+                advance,
+            ),
         };
         let cache_key = (lang_tag, pid);
 
@@ -3098,5 +3424,139 @@ mod tests {
                 "must reject untrusted/SSRF URL: {url:?}"
             );
         }
+    }
+
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(w, h))
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    fn community_fetcher(json_calls: Arc<AtomicUsize>) -> PinGuideFetcher {
+        PinGuideFetcher::with_config(PinGuideConfig {
+            lang_getter: Arc::new(|| "en".to_owned()),
+            fetch_json: Some(Arc::new(move |url| {
+                json_calls.fetch_add(1, Ordering::SeqCst);
+                assert!(url.starts_with("https://cache-v2.lemonapi.com/comments/v2?"), "{url}");
+                assert!(url.contains("collection=o17&docId=900"), "{url}");
+                Ok(json!({"data": {
+                    "summary": {"content": "Behind the crates."},
+                    "comments": [
+                        {"content": "my favourite character", "lang": "en", "vote": 90, "image": "/gim/comments/o17/900/portrait.jpg"},
+                        {"content": "behind the crates", "lang": "en", "vote": 80, "image": "/gim/comments/o17/900/good1.jpg"},
+                        {"content": "lol", "lang": "en", "vote": 70, "image": "/gim/comments/o17/900/tiny.jpg"},
+                        {"content": "here", "lang": "en", "vote": 60, "image": "/gim/comments/o17/900/broken.jpg"},
+                        {"content": "next to the stairs", "lang": "en", "vote": 50, "image": "/gim/comments/o17/900/good2.jpg"}
+                    ]
+                }}))
+            })),
+            fetch_bytes: Some(Arc::new(|url| {
+                if url.ends_with("/portrait.jpg") {
+                    Ok(png_bytes(885, 1080))
+                } else if url.ends_with("/tiny.jpg") {
+                    Ok(png_bytes(250, 154))
+                } else if url.ends_with("/broken.jpg") {
+                    Err("HTTP 503".to_owned())
+                } else {
+                    Ok(png_bytes(1280, 720))
+                }
+            })),
+            ..Default::default()
+        })
+    }
+
+    fn wait_guide(f: impl FnOnce(Box<dyn FnOnce(PinGuide) + Send>) -> bool) -> PinGuide {
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(f(Box::new(move |g| {
+            let _ = tx.send(g);
+        })));
+        rx.recv_timeout(Duration::from_secs(5)).expect("guide")
+    }
+
+    #[test]
+    fn community_guide_steps_through_vote_ordered_screenshots() {
+        let json_calls = Arc::new(AtomicUsize::new(0));
+        let fetcher = community_fetcher(Arc::clone(&json_calls));
+        let pid = "appsample:900";
+
+        // Unregistered pins and HoYoLAB ids have no community guide.
+        assert!(!fetcher.request_community_guide(pid, "", "", |_| {}, None));
+        assert_eq!(fetcher.next_community_suggestion(pid, |_| {}, None), NextSuggestion::Unavailable);
+        fetcher.register_community_source("107156", CommunitySource::appsample("o17", "107156").unwrap());
+        assert!(!fetcher.has_community_source("107156"));
+
+        fetcher.register_community_source(pid, CommunitySource::appsample("o17", "900").unwrap());
+        assert!(fetcher.has_community_source(pid));
+
+        // The top-voted portrait image is dropped; the first screenshot is shown.
+        let g1 = wait_guide(|cb| fetcher.request_community_guide(pid, "", "", cb, None));
+        assert!(g1.ok);
+        assert!(g1.image_url.ends_with("/good1.jpg"), "{}", g1.image_url);
+        assert!(g1.image_bytes.is_some());
+        assert_eq!(g1.description, "Behind the crates.\n\u{201C}behind the crates\u{201D}");
+        assert_eq!(g1.suggestion, Some((1, 4)));
+        assert_eq!(fetcher.get_cached(pid, None).unwrap().suggestion, Some((1, 4)));
+        assert!(!fetcher.request_community_guide(pid, "", "", |_| {}, None), "cached");
+
+        // Next: the tiny image is dropped, the broken one skipped, the next screenshot shown.
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert_eq!(
+            fetcher.next_community_suggestion(pid, move |g| { let _ = tx.send(g); }, None),
+            NextSuggestion::Queued
+        );
+        let g2 = rx.recv_timeout(Duration::from_secs(5)).expect("next guide");
+        assert!(g2.image_url.ends_with("/good2.jpg"), "{}", g2.image_url);
+        assert_eq!(g2.suggestion, Some((3, 3)));
+        assert_eq!(fetcher.community_position(pid, None), Some((3, 3)));
+        assert!(fetcher.get_cached(pid, None).unwrap().image_url.ends_with("/good2.jpg"));
+
+        // Past the end it wraps to the first suggestion.
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert_eq!(
+            fetcher.next_community_suggestion(pid, move |g| { let _ = tx.send(g); }, None),
+            NextSuggestion::Queued
+        );
+        let g3 = rx.recv_timeout(Duration::from_secs(5)).expect("wrapped guide");
+        assert!(g3.image_url.ends_with("/good1.jpg"), "{}", g3.image_url);
+        assert_eq!(g3.suggestion, Some((1, 3)));
+
+        // The thread was fetched once and reused.
+        assert_eq!(json_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn community_guide_with_one_suggestion_reports_single() {
+        let fetcher = PinGuideFetcher::with_config(PinGuideConfig {
+            lang_getter: Arc::new(|| "vi".to_owned()),
+            fetch_json: Some(Arc::new(|_| {
+                Ok(json!({"data": {"summary": {"content": "On the roof."}, "comments": []}}))
+            })),
+            fetch_bytes: Some(Arc::new(|_| Err("no images expected".to_owned()))),
+            ..Default::default()
+        });
+        let pid = "appsample:5";
+        fetcher.register_community_source(pid, CommunitySource::appsample("o3", "5").unwrap());
+        let g = wait_guide(|cb| fetcher.request_community_guide(pid, "", "", cb, None));
+        // English summary is the fallback for a Vietnamese HUD, like HoYoLAB's en-us tier.
+        assert_eq!(g.description, "On the roof.");
+        assert!(g.image_url.is_empty());
+        assert_eq!(g.suggestion, Some((1, 1)));
+        assert_eq!(fetcher.next_community_suggestion(pid, |_| {}, None), NextSuggestion::Single);
+    }
+
+    #[test]
+    fn inline_provider_text_follows_hoyolab_language_rule() {
+        let fetcher = PinGuideFetcher::new_offline(Arc::new(|| "vi".to_owned()));
+        fetcher.register_inline_guide("kongying:1", "宝箱在箱子后面", "", None);
+        assert!(fetcher.get_cached("kongying:1", None).is_none(), "CJK-only text kept out of a VI HUD");
+        fetcher.register_inline_guide("kongying:2", "Rương sau thùng gỗ", "", None);
+        assert_eq!(fetcher.get_cached("kongying:2", None).unwrap().description, "Rương sau thùng gỗ");
+
+        // A pin with a community source is left to the community job.
+        fetcher.register_community_source("appsample:7", CommunitySource::appsample("o3", "7").unwrap());
+        fetcher.register_inline_guide("appsample:7", "text", "", None);
+        assert!(fetcher.get_cached("appsample:7", None).is_none());
     }
 }

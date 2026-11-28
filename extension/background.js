@@ -456,7 +456,7 @@ function syncStatusCacheFromApi(path, ok, data) {
     lastStatus = next;
   } else if (path.startsWith('/set_hotkey') && data.results && typeof data.results === 'object') {
     const next = { ...(lastStatus || {}) };
-    for (const act of ['sync', 'debug', 'switch', 'nav_mark', 'nav_undo', 'nav_guide', 'nav_next', 'nav_layout', 'nav_toggle', 'radar_toggle']) {
+    for (const act of ['sync', 'debug', 'switch', 'nav_mark', 'nav_undo', 'nav_guide', 'nav_guide_next', 'nav_next', 'nav_layout', 'nav_toggle', 'radar_toggle']) {
       const r = data.results[act];
       if (r && r.ok) {
         if (r.hotkey) next[`hotkey_${act}`] = r.hotkey;

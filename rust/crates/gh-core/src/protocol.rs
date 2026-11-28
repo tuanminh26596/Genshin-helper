@@ -114,6 +114,8 @@ pub struct StatusResponse {
     pub display_name_nav_undo: String,
     pub hotkey_nav_guide: String,
     pub display_name_nav_guide: String,
+    pub hotkey_nav_guide_next: String,
+    pub display_name_nav_guide_next: String,
     pub hotkey_nav_next: String,
     pub display_name_nav_next: String,
     pub hotkey_nav_layout: String,
@@ -185,6 +187,8 @@ impl StatusResponse {
             display_name_nav_undo: format_hotkey_display_name(&cfg.hotkey_nav_undo),
             hotkey_nav_guide: cfg.hotkey_nav_guide.clone(),
             display_name_nav_guide: format_hotkey_display_name(&cfg.hotkey_nav_guide),
+            hotkey_nav_guide_next: cfg.hotkey_nav_guide_next.clone(),
+            display_name_nav_guide_next: format_hotkey_display_name(&cfg.hotkey_nav_guide_next),
             hotkey_nav_next: cfg.hotkey_nav_next.clone(),
             display_name_nav_next: format_hotkey_display_name(&cfg.hotkey_nav_next),
             hotkey_nav_layout: cfg.hotkey_nav_layout.clone(),
@@ -371,11 +375,13 @@ mod tests {
     }
 
     #[test]
-    fn status_response_default_and_from_config_expose_all_54_keys() {
+    fn status_response_default_and_from_config_expose_all_56_keys() {
         let status = StatusResponse::default();
         let val = serde_json::to_value(&status).expect("serialize StatusResponse");
         let obj = val.as_object().expect("json object");
-        assert_eq!(obj.len(), 54);
+        assert_eq!(obj.len(), 56);
+        assert_eq!(obj["hotkey_nav_guide_next"], "alt+n");
+        assert_eq!(obj["display_name_nav_guide_next"], "Alt + N");
         assert_eq!(obj["radar_enabled"], false);
         assert_eq!(obj["hotkey_radar_toggle"], "alt+`");
         assert_eq!(obj["hotkey_nav_unlock"], "alt+f6");

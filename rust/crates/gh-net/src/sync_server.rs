@@ -63,13 +63,14 @@ pub const TAB_VISIBLE_TTL_SECS: f64 = 20.0;
 /// Upper bound on tracked tab ids (oldest entries are pruned first).
 pub const TAB_VISIBILITY_MAXLEN: usize = 16;
 
-pub const HOTKEY_ACTIONS: [&str; 11] = [
+pub const HOTKEY_ACTIONS: [&str; 12] = [
     "sync",
     "debug",
     "switch",
     "nav_mark",
     "nav_undo",
     "nav_guide",
+    "nav_guide_next",
     "nav_next",
     "nav_layout",
     "nav_toggle",
@@ -1911,6 +1912,7 @@ fn apply_standalone_hotkey(cfg: &mut AppConfig, action: &str, new_key: &str) -> 
         "nav_mark" => cfg.hotkey_nav_mark = norm.clone(),
         "nav_undo" => cfg.hotkey_nav_undo = norm.clone(),
         "nav_guide" => cfg.hotkey_nav_guide = norm.clone(),
+        "nav_guide_next" => cfg.hotkey_nav_guide_next = norm.clone(),
         "nav_next" => cfg.hotkey_nav_next = norm.clone(),
         "nav_layout" => cfg.hotkey_nav_layout = norm.clone(),
         "nav_toggle" => cfg.hotkey_nav_toggle = norm.clone(),
@@ -4682,12 +4684,13 @@ mod tests {
             assert_eq!(j, json!({"ok": false, "error": "Forbidden"}));
         }
 
-        // 4. /status returns all 54 keys (including Radar + nav_unlock keys)
+        // 4. /status returns all 56 keys (including Radar, nav_unlock and nav_guide_next keys)
         let r_st = cli.get(format!("{base}/status")).send().await.expect("status");
         assert_eq!(r_st.status(), 200);
         assert_cors_pna(r_st.headers());
         let st_json: Value = r_st.json().await.expect("status json");
-        assert_eq!(st_json.as_object().expect("obj").len(), 54);
+        assert_eq!(st_json.as_object().expect("obj").len(), 56);
+        assert_eq!(st_json["hotkey_nav_guide_next"], "alt+n");
         assert_eq!(st_json["version"], "5.7.0");
         assert_eq!(st_json["script_version"], "v5.7.0");
         assert_eq!(st_json["radar_enabled"], false);

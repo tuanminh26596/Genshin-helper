@@ -213,6 +213,7 @@ document.addEventListener('DOMContentLoaded', () => {
     nav_mark: ['alt+f', 'Alt + F'],
     nav_undo: ['alt+t', 'Alt + T'],
     nav_guide: ['alt+h', 'Alt + H'],
+    nav_guide_next: ['alt+n', 'Alt + N'],
     nav_next: ['alt+e', 'Alt + E'],
     nav_layout: ['alt+f7', 'Alt + F7'],
     nav_toggle: ['alt+x', 'Alt + X'],

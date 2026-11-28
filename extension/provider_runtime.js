@@ -18,7 +18,7 @@
   const CT = window.GHCoordTransform;
   const GH_TAB_ID = `gh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const SCRIPT_VERSION = '5.7.0';
-  const SCRIPT_BUILD = 'multi-provider-v3';
+  const SCRIPT_BUILD = 'multi-provider-v4';
 
   // =========================================================================
   // 1. Open Provider Registry & Built-in Tier 1 Adapters
@@ -348,6 +348,17 @@
   const APPSAMPLE_LANDMARK_TYPES = new Set(['o2', 'o3', 'o154', 'entrance']);
   const APPSAMPLE_LANG_PREFIX_RE = /^\/(zh|ko|ja|ru|pt|es|id|fr|de)(?:\/|$)/i;
 
+  // Mirrors the AppSample page: comments (and with them the summary and screenshots) show for
+  // markers whose level reaches config.rules.commentMinLevel while the comments feature is on.
+  function appsampleHasCommunityGuide(ctx, m) {
+    const cfg = (ctx && ctx.catalog && ctx.catalog.config) || {};
+    if (cfg.features && cfg.features.comments === false) return false;
+    const rules = cfg.rules || {};
+    const minLevel = Number.isFinite(Number(rules.commentMinLevel)) ? Number(rules.commentMinLevel) : 4;
+    const level = Number(m && m.level);
+    return Number.isFinite(level) && level >= minLevel;
+  }
+
   function appsampleParseLabelId(typeCode) {
     if (typeof typeCode !== 'string') return null;
     const m = typeCode.trim().match(/^o(\d+)$/i);
@@ -503,6 +514,10 @@
             imageUrl = String(ctx.catalog.markerImageUrl(m) || '');
           }
         } catch (e) {}
+        // Community guide: AppSample's popup shows the comments thread (summary + player
+        // screenshots) only for markers at or above rules.commentMinLevel; the app fetches it
+        // on demand for the target pin, keyed by the marker type (`o17`) and id.
+        const communityGuide = appsampleHasCommunityGuide(ctx, m);
         // Underground markers carry layer.{groupId, floorId}. m.level is the marker's zoom level
         // (4..6 on live surface markers), not a floor, so it must not mark a pin underground.
         const ugFloor = (m.layer && typeof m.layer === 'object' && Number(m.layer.floorId) > 0)
@@ -522,6 +537,8 @@
           floor_name: ugFloor > 0 ? 'B1' : '',
           description: typeof m.description === 'string' ? m.description.trim() : '',
           image_url: imageUrl.startsWith('https://') ? imageUrl : '',
+          type_code: typeCode,
+          community_guide: communityGuide,
           marked: foundSet.has(rawId)
         });
       }

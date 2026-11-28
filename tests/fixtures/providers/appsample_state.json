@@ -9,7 +9,8 @@
     "has_sid_on_markers": false,
     "surface_markers_have_positive_level": true,
     "underground_field": "layer.{groupId,floorId,entrances}",
-    "guide_image": "catalog.markerImageUrl(m) = config.markerImageUrl with {id} when m.img and m.level >= rules.imageMinLevel (4999 of 89309 markers). Template, min level and marker 15130 added from a live guest read on 2026-11-28."
+    "guide_image": "catalog.markerImageUrl(m) = config.markerImageUrl with {id} when m.img and m.level >= rules.imageMinLevel (4999 of 89309 markers). Template, min level and marker 15130 added from a live guest read on 2026-11-28.",
+    "community_guide": "The popup's summary and player screenshots come from the comments cache (cache-v2.lemonapi.com/comments/v2?collection=<type>&docId=<id>), shown when config.features.comments and m.level >= rules.commentMinLevel (4 live on 2026-11-28; levels 4-6 = 22,826 of 89,309 markers)."
   },
   "map": {
     "center": { "lat": 0, "lng": 0.4 },
@@ -42,6 +43,7 @@
   "iconUrlTemplate": "https://game-cdn.appsample.com/gim/markers/{type}.png?v=3",
   "imageUrlTemplate": "https://game-cdn.appsample.com/gim/item-imgs/{id}.jpg",
   "imageMinLevel": 3,
+  "commentMinLevel": 4,
   "markers": [
     {
       "id": "2608",

@@ -18,6 +18,8 @@ pub const CURRENT_HOTKEY_PROFILE_VERSION: u32 = 2;
 pub const DEFAULT_HOTKEY_NAV_MARK: &str = "alt+f";
 pub const DEFAULT_HOTKEY_NAV_UNDO: &str = "alt+t";
 pub const DEFAULT_HOTKEY_NAV_GUIDE: &str = "alt+h";
+/// Next community guide suggestion (N = next). `alt+g` is out: Genshin opens Tutorials on G even with Alt held.
+pub const DEFAULT_HOTKEY_NAV_GUIDE_NEXT: &str = "alt+n";
 pub const DEFAULT_HOTKEY_NAV_NEXT: &str = "alt+e";
 pub const DEFAULT_HOTKEY_NAV_LAYOUT: &str = "alt+f7";
 pub const DEFAULT_HOTKEY_NAV_TOGGLE: &str = "alt+x";
@@ -194,6 +196,7 @@ pub struct AppConfig {
     pub hotkey_nav_mark: String,
     pub hotkey_nav_undo: String,
     pub hotkey_nav_guide: String,
+    pub hotkey_nav_guide_next: String,
     pub hotkey_nav_next: String,
     pub hotkey_nav_layout: String,
     pub hotkey_nav_toggle: String,
@@ -247,6 +250,7 @@ impl Default for AppConfig {
             hotkey_nav_mark: DEFAULT_HOTKEY_NAV_MARK.to_owned(),
             hotkey_nav_undo: DEFAULT_HOTKEY_NAV_UNDO.to_owned(),
             hotkey_nav_guide: DEFAULT_HOTKEY_NAV_GUIDE.to_owned(),
+            hotkey_nav_guide_next: DEFAULT_HOTKEY_NAV_GUIDE_NEXT.to_owned(),
             hotkey_nav_next: DEFAULT_HOTKEY_NAV_NEXT.to_owned(),
             hotkey_nav_layout: DEFAULT_HOTKEY_NAV_LAYOUT.to_owned(),
             hotkey_nav_toggle: DEFAULT_HOTKEY_NAV_TOGGLE.to_owned(),
@@ -311,6 +315,8 @@ impl AppConfig {
         cfg.hotkey_nav_mark = parse_string_or(map.get("hotkey_nav_mark"), &cfg.hotkey_nav_mark);
         cfg.hotkey_nav_undo = parse_string_or(map.get("hotkey_nav_undo"), &cfg.hotkey_nav_undo);
         cfg.hotkey_nav_guide = parse_string_or(map.get("hotkey_nav_guide"), &cfg.hotkey_nav_guide);
+        cfg.hotkey_nav_guide_next =
+            parse_string_or(map.get("hotkey_nav_guide_next"), &cfg.hotkey_nav_guide_next);
         cfg.hotkey_nav_next = parse_string_or(map.get("hotkey_nav_next"), &cfg.hotkey_nav_next);
         cfg.hotkey_nav_layout =
             parse_string_or(map.get("hotkey_nav_layout"), &cfg.hotkey_nav_layout);
@@ -425,6 +431,8 @@ impl AppConfig {
         self.hotkey_nav_mark = non_empty_or(&self.hotkey_nav_mark, DEFAULT_HOTKEY_NAV_MARK);
         self.hotkey_nav_undo = non_empty_or(&self.hotkey_nav_undo, DEFAULT_HOTKEY_NAV_UNDO);
         self.hotkey_nav_guide = non_empty_or(&self.hotkey_nav_guide, DEFAULT_HOTKEY_NAV_GUIDE);
+        self.hotkey_nav_guide_next =
+            non_empty_or(&self.hotkey_nav_guide_next, DEFAULT_HOTKEY_NAV_GUIDE_NEXT);
         self.hotkey_nav_next = non_empty_or(&self.hotkey_nav_next, DEFAULT_HOTKEY_NAV_NEXT);
         self.hotkey_nav_layout = non_empty_or(&self.hotkey_nav_layout, DEFAULT_HOTKEY_NAV_LAYOUT);
         self.hotkey_nav_toggle = non_empty_or(&self.hotkey_nav_toggle, DEFAULT_HOTKEY_NAV_TOGGLE);

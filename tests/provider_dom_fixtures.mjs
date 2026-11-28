@@ -327,7 +327,8 @@ function buildAppSampleHtml(fixture) {
         config: {
           maps: { teyvat: { id: 2 } },
           markerImageUrl: fx.imageUrlTemplate,
-          rules: { imageMinLevel: fx.imageMinLevel }
+          rules: { imageMinLevel: fx.imageMinLevel, commentMinLevel: fx.commentMinLevel },
+          features: { comments: true }
         }
       };
       const overlayCalls = [];
@@ -792,6 +793,31 @@ async function main() {
       'appsample_guide_image_from_catalog',
       asGuideRes.withImg === 'https://game-cdn.appsample.com/gim/item-imgs/15130.jpg' && asGuideRes.noImg === '',
       `15130=${JSON.stringify(asGuideRes.withImg)} 301=${JSON.stringify(asGuideRes.noImg)}`
+    );
+
+    // Community guide key: the app fetches the comments thread (summary + player screenshots)
+    // only for markers whose popup shows comments, keyed by marker type and id.
+    const asCommunityRes = await page.eval(`(() => {
+      const h = window.__ghFixtureHandles;
+      h.store.__setTypes(['o3', 'o5', 'o6', 'o111', 'o185']);
+      const pick = () => {
+        const pins = window.__GH_BRIDGE__.queryNearbyUncollectedPins();
+        const p6 = pins.find((p) => p.id === 'appsample:301');
+        const p3 = pins.find((p) => p.id === 'appsample:15130');
+        return { p6: p6 && [p6.type_code, p6.community_guide], p3: p3 && [p3.type_code, p3.community_guide] };
+      };
+      const on = pick();
+      h.catalog.config.features.comments = false;
+      const off = pick();
+      h.catalog.config.features.comments = true;
+      h.store.__setTypes(['o3', 'o5', 'o6', 'o111']);
+      return { on, off };
+    })()`);
+    record(
+      'appsample_community_guide_key_follows_comment_rules',
+      JSON.stringify(asCommunityRes.on) === JSON.stringify({ p6: ['o5', true], p3: ['o185', false] }) &&
+        JSON.stringify(asCommunityRes.off) === JSON.stringify({ p6: ['o5', false], p3: ['o185', false] }),
+      JSON.stringify(asCommunityRes)
     );
 
     // (e) Target lock clearing on AppSample

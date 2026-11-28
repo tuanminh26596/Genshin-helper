@@ -39,7 +39,9 @@ use gh_hud::radar_map::{
 use gh_hud::toast::{HudToastOverlay, ToastKind};
 use gh_net::hd_assets::{HoyolabHdTileProvider, UndergroundOverlayProvider};
 use gh_net::lan_companion::LanCompanionServer;
-use gh_net::pin_guide::{HoYoLABLabelCatalog, PinGuide, PinGuideFetcher, PinIconCache};
+use gh_net::pin_guide::{
+    HoYoLABLabelCatalog, NextSuggestion, PinGuide, PinGuideFetcher, PinIconCache,
+};
 use gh_net::sync_server::{HOTKEY_ACTIONS, SyncServer};
 use gh_win32::audio::AudioFeedback;
 use gh_win32::capture::WindowFinder;
@@ -79,6 +81,46 @@ pub fn is_replay_dispatchable_hotkey(action: &str) -> bool {
     REPLAY_DISPATCHABLE_HOTKEYS.contains(&action)
 }
 
+/// Copies a loaded guide onto its pin. A community suggestion replaces the pin's text and image
+/// outright (stepping to the next suggestion must swap them); other guides only fill gaps, so
+/// the image the map sent is kept.
+pub fn merge_guide_into_pin(pin: &mut NavPin, guide: &PinGuide) {
+    if guide.suggestion.is_some() {
+        pin.description = guide.description.clone();
+        pin.image_url = guide.image_url.clone();
+        return;
+    }
+    if !guide.description.is_empty() {
+        pin.description = guide.description.clone();
+    }
+    if !guide.image_url.is_empty() && pin.image_url.is_empty() {
+        pin.image_url = guide.image_url.clone();
+    }
+}
+
+/// Toast title, detail, kind and chime for a finished diagnostic capture (`handle_debug_action`).
+/// A bundle with a folder name was saved; anything else (`{"success": false, "error": ..}`) failed.
+pub fn diagnostic_toast_content(bundle: &Value) -> (String, String, ToastKind, &'static str) {
+    let folder = bundle.get("folder_name").and_then(Value::as_str).unwrap_or("").trim();
+    let failed = bundle.get("success").and_then(Value::as_bool) == Some(false);
+    if !folder.is_empty() && !failed {
+        (
+            t("toast.diagnostic_saved", &[("folder", folder)]),
+            t("toast.diagnostic_saved_detail", &[]),
+            ToastKind::Success,
+            "success",
+        )
+    } else {
+        let error = bundle.get("error").and_then(Value::as_str).unwrap_or("").trim();
+        (
+            t("toast.diagnostic_failed", &[("error", error)]),
+            String::new(),
+            ToastKind::Error,
+            "error",
+        )
+    }
+}
+
 /// Shared production hotkey dispatcher invoked by both live `GenshinHelper.exe` and `gh-sim` replay.
 pub fn dispatch_hotkey_action(state: &Arc<AppState>, action: &str) {
     match action {
@@ -90,6 +132,7 @@ pub fn dispatch_hotkey_action(state: &Arc<AppState>, action: &str) {
         "nav_mark" => state.handle_nav_mark_hotkey(),
         "nav_undo" => state.handle_nav_undo_hotkey(),
         "nav_guide" => state.handle_nav_guide_hotkey(),
+        "nav_guide_next" => state.handle_nav_guide_next_hotkey(),
         "nav_next" => state.handle_nav_next_hotkey(),
         "nav_layout" => state.handle_nav_layout_hotkey(),
         "nav_toggle" => state.handle_nav_toggle_hotkey(),
@@ -210,6 +253,7 @@ pub fn get_hotkey_field(cfg: &AppConfig, action: &str) -> String {
         "nav_mark" => cfg.hotkey_nav_mark.clone(),
         "nav_undo" => cfg.hotkey_nav_undo.clone(),
         "nav_guide" => cfg.hotkey_nav_guide.clone(),
+        "nav_guide_next" => cfg.hotkey_nav_guide_next.clone(),
         "nav_next" => cfg.hotkey_nav_next.clone(),
         "nav_layout" => cfg.hotkey_nav_layout.clone(),
         "nav_toggle" => cfg.hotkey_nav_toggle.clone(),
@@ -234,6 +278,7 @@ pub fn set_hotkey_field(cfg: &mut AppConfig, action: &str, new_hk: &str) -> bool
         "nav_mark" => cfg.hotkey_nav_mark = norm,
         "nav_undo" => cfg.hotkey_nav_undo = norm,
         "nav_guide" => cfg.hotkey_nav_guide = norm,
+        "nav_guide_next" => cfg.hotkey_nav_guide_next = norm,
         "nav_next" => cfg.hotkey_nav_next = norm,
         "nav_layout" => cfg.hotkey_nav_layout = norm,
         "nav_toggle" => cfg.hotkey_nav_toggle = norm,
@@ -1348,6 +1393,8 @@ impl AppState {
         let layout = self.hotkey_mgr.get_display_name("nav_layout");
         self.nav_hud
             .set_hotkey_labels(Some(&mark), Some(&guide), Some(&layout));
+        self.nav_hud
+            .set_guide_next_hotkey_label(&self.hotkey_mgr.get_display_name("nav_guide_next"));
     }
 
     pub fn nav_flash(&self, key: &str, kind: HudPalette, duration_s: f64, args: &[(&str, &str)]) {
@@ -1358,12 +1405,7 @@ impl AppState {
         let cur_id = {
             let mut nav = self.nav_controller.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(pin) = nav.get_pin_mut(&guide.pin_id) {
-                if !guide.description.is_empty() {
-                    pin.description = guide.description.clone();
-                }
-                if !guide.image_url.is_empty() && pin.image_url.is_empty() {
-                    pin.image_url = guide.image_url.clone();
-                }
+                merge_guide_into_pin(pin, guide);
             }
             nav.current_target().map(|p| p.id.clone())
         };
@@ -1383,12 +1425,16 @@ impl AppState {
                 "empty"
             };
             self.nav_hud.set_guide_status(status);
+            self.nav_hud.set_guide_suggestion(
+                guide.suggestion.map(|(i, n)| (guide.pin_id.as_str(), i, n)),
+            );
         }
     }
 
     pub fn ensure_guide(self: &Arc<Self>, pin: Option<&NavPin>) {
         let Some(pin) = pin else {
             self.nav_hud.set_guide_status("");
+            self.nav_hud.set_guide_suggestion(None);
             return;
         };
         if let Some(cached) = self.guide_fetcher.get_cached(&pin.id, None) {
@@ -1402,6 +1448,19 @@ impl AppState {
             move |guide| {
                 if let Some(st) = state_weak.upgrade() {
                     st.apply_guide(&guide);
+                }
+            },
+            None,
+        ) || self.guide_fetcher.request_community_guide(
+            &pin.id,
+            &pin.description,
+            &pin.image_url,
+            {
+                let state_weak = Arc::downgrade(self);
+                move |guide| {
+                    if let Some(st) = state_weak.upgrade() {
+                        st.apply_guide(&guide);
+                    }
                 }
             },
             None,
@@ -1481,6 +1540,7 @@ impl AppState {
             "nav_mark",
             "nav_undo",
             "nav_guide",
+            "nav_guide_next",
             "nav_next",
             "nav_layout",
             "nav_toggle",
@@ -1971,7 +2031,39 @@ impl AppState {
                 false,
             );
         }
+        self.confirm_diagnostic_in_game(trigger_source, &bundle);
         bundle
+    }
+
+    /// Confirms an `Alt+F12` capture in game with a toast and chime.
+    ///
+    /// The only other sign of a save is the HoYoLAB page's note modal, which sits on another
+    /// monitor or behind the fullscreen game, and third-party map tabs show nothing at all. So
+    /// without this the player cannot tell whether the report was saved. Captures started from
+    /// the web page or the tray are confirmed there and get no toast. Returns the toast title
+    /// when one was shown.
+    pub fn confirm_diagnostic_in_game(&self, trigger_source: &str, bundle: &Value) -> Option<String> {
+        if trigger_source != "hotkey_debug" {
+            return None;
+        }
+        let (title, detail, kind, sound) = diagnostic_toast_content(bundle);
+        let rect = self.game_state.lock().unwrap_or_else(|e| e.into_inner()).rect;
+        let delivered = self.hud_toast.show_toast(&title, &detail, kind, 3500, rect);
+        let sound_played = self.audio.play(sound, false);
+        self.record_session_event_with("hud_feedback", || {
+            json!({
+                "event_type": "DIAGNOSTIC",
+                "status": if kind == ToastKind::Success { "saved" } else { "error" },
+                "seq": 0,
+                "shown": true,
+                "reason": "",
+                "output": "toast",
+                "delivered": delivered,
+                "sound": sound,
+                "sound_played": sound_played,
+            })
+        });
+        Some(title)
     }
 
     pub fn build_diag_env_health(&self) -> Value {
@@ -2284,6 +2376,61 @@ impl AppState {
                 self.nav_flash("hud.flash.no_target", HudPalette::Warning, 2.6, &[]);
             }
             self.ensure_guide(cur.as_ref());
+        }
+    }
+
+    /// Shows the target pin's next community guide suggestion (AppSample screenshots, by votes),
+    /// so the player can skip memes and unrelated photos. Opens the guide card if it is closed.
+    pub fn handle_nav_guide_next_hotkey(self: &Arc<Self>) {
+        if !self.engine_active.load(Ordering::Acquire) {
+            return;
+        }
+        let cur = self
+            .nav_controller
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .current_target()
+            .cloned();
+        let Some(pin) = cur else {
+            self.nav_flash("hud.flash.no_target", HudPalette::Warning, 2.6, &[]);
+            return;
+        };
+        if !self.nav_hud.is_guide_open() {
+            self.nav_hud.set_guide_open(true, None);
+        }
+        let state_weak = Arc::downgrade(self);
+        let result = self.guide_fetcher.next_community_suggestion(
+            &pin.id,
+            move |guide| {
+                if let Some(st) = state_weak.upgrade() {
+                    st.apply_guide(&guide);
+                    if let Some((i, n)) = guide.suggestion {
+                        st.nav_flash(
+                            "hud.flash.guide_next",
+                            HudPalette::Info,
+                            1.6,
+                            &[("index", &i.to_string()), ("total", &n.to_string())],
+                        );
+                    }
+                }
+            },
+            None,
+        );
+        match result {
+            NextSuggestion::Queued => {
+                self.nav_flash("hud.flash.guide_next_loading", HudPalette::Info, 1.6, &[]);
+            }
+            NextSuggestion::Single => {
+                self.nav_flash("hud.flash.guide_single", HudPalette::Info, 2.0, &[]);
+            }
+            NextSuggestion::Unavailable => {
+                if self.guide_fetcher.has_community_source(&pin.id) {
+                    // The list is not loaded yet: load the first suggestion.
+                    self.ensure_guide(Some(&pin));
+                } else {
+                    self.nav_flash("hud.flash.guide_no_suggestions", HudPalette::Info, 2.2, &[]);
+                }
+            }
         }
     }
 
@@ -4105,5 +4252,67 @@ mod tests {
         state.audio.close();
         state.capturer.close();
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn diagnostic_toast_says_where_the_report_went_or_why_it_failed() {
+        let (title, detail, kind, sound) =
+            diagnostic_toast_content(&json!({"success": true, "folder_name": "diag_20261128_120336"}));
+        assert!(title.contains("diag_20261128_120336"), "{title}");
+        assert!(!detail.is_empty());
+        assert_eq!(kind, ToastKind::Success);
+        assert_eq!(sound, "success");
+
+        let (title, detail, kind, sound) =
+            diagnostic_toast_content(&json!({"success": false, "error": "disk full"}));
+        assert!(title.contains("disk full"), "{title}");
+        assert!(detail.is_empty());
+        assert_eq!(kind, ToastKind::Error);
+        assert_eq!(sound, "error");
+    }
+
+    #[test]
+    fn alt_f12_capture_is_confirmed_in_game_but_web_captures_are_not() {
+        let seq = STATE_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("gh_app_state_diag_toast_{}_{seq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let state = make_test_state(&root);
+
+        let saved = json!({"success": true, "folder_name": "diag_20261128_120336"});
+        let shown = state.confirm_diagnostic_in_game("hotkey_debug", &saved);
+        assert!(shown.is_some_and(|t| t.contains("diag_20261128_120336")));
+        // Captures started from the web page or tray are confirmed there.
+        assert!(state.confirm_diagnostic_in_game("web_popup", &saved).is_none());
+        assert!(state.confirm_diagnostic_in_game("tray", &saved).is_none());
+
+        state.nav_hud.close();
+        state.hud_toast.close();
+        state.audio.close();
+        state.capturer.close();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn community_guides_replace_pin_media_other_guides_fill_gaps() {
+        let mut pin = NavPin { id: "appsample:1".into(), image_url: "https://a/official.jpg".into(), ..Default::default() };
+        let mut guide = PinGuide {
+            pin_id: "appsample:1".into(),
+            description: "under the snow".into(),
+            image_url: "https://a/shot2.jpg".into(),
+            image_bytes: None,
+            ok: true,
+            lang: "vi-vn".into(),
+            suggestion: Some((2, 3)),
+        };
+        merge_guide_into_pin(&mut pin, &guide);
+        assert_eq!(pin.image_url, "https://a/shot2.jpg");
+        assert_eq!(pin.description, "under the snow");
+
+        let mut hoyolab = NavPin { id: "1".into(), image_url: "https://a/map.jpg".into(), ..Default::default() };
+        guide.suggestion = None;
+        merge_guide_into_pin(&mut hoyolab, &guide);
+        assert_eq!(hoyolab.image_url, "https://a/map.jpg", "the map's own image is kept");
+        assert_eq!(hoyolab.description, "under the snow");
     }
 }

@@ -302,6 +302,7 @@
   "popup.hotkeys.nav_mark_title": "Mark target",
   "popup.hotkeys.nav_undo_title": "Undo mark",
   "popup.hotkeys.nav_guide_title": "Guide card",
+  "popup.hotkeys.nav_guide_next_title": "Next guide tip",
   "popup.hotkeys.nav_next_title": "Next target",
   "popup.hotkeys.nav_layout_title": "Move HUD",
   "popup.hotkeys.nav_toggle_title": "Show/Hide HUD",

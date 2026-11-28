@@ -1847,7 +1847,7 @@ a:focus-visible,
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 5px 10px;
+  padding: 4px 10px;
   min-width: 0;
   border-bottom: 1px solid var(--obs-border);
 }
@@ -1858,6 +1858,16 @@ a:focus-visible,
 
 .nav-rec-grid .recorder-group--compact:nth-last-child(-n+2) {
   border-bottom: none;
+}
+
+/* Odd number of cells: the last one spans both columns, and the cell above-right of it keeps
+   its bottom border so the row lines stay continuous. */
+.nav-rec-grid .recorder-group--compact:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
+.nav-rec-grid .recorder-group--compact:nth-last-child(2):nth-child(even) {
+  border-bottom: 1px solid var(--obs-border);
 }
 
 .recorder-group--compact .recorder-title {
