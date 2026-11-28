@@ -66,7 +66,7 @@
 ## Cài đặt nhanh
 
 1. Tải **`GenshinHelper-Setup-v5.8.0.exe`** (`~8.5 MB`, `0` DLL ngoài) tại [**GitHub Releases**](https://github.com/tuanminh26596/Genshin-helper/releases/latest) và chạy với quyền **Administrator** (bắt buộc do Windows UIPI để phím tắt/HUD hoạt động đè lên game).
-2. Khi cài xong, làm theo trang **Hướng dẫn Extension** (`install_extension.html`) tự mở: vào `chrome://extensions` (hoặc Edge / Brave) → bật **Developer mode** → **Load unpacked** → dán đường dẫn thư mục `extension` và ghim biểu tượng lên thanh công cụ.
+2. Khi cài xong, làm theo trang **Hướng dẫn Extension** (`install_extension.html`) tự mở: vào `chrome://extensions` (hoặc Edge / Brave) → bật **Developer mode** → **Load unpacked** → dán đường dẫn thư mục `extension` và ghim biểu tượng lên thanh công cụ. Trên Firefox, tải `extension/manifest.json` làm temporary add-on trong `about:debugging#/runtime/this-firefox`.
 3. Ở lần chạy đầu, `GenshinHelper.exe` tự tải dữ liệu bản đồ công khai HoYoLAB (~15 MB) về `%LOCALAPPDATA%\GenshinHelper\data` (mất ~10–20 giây một lần duy nhất).
 4. Mở [**HoYoLAB Interactive Map**](https://act.hoyolab.com/ys/app/interactive-map/index.html#/map/2), đặt Genshin Impact ở **Borderless Windowed**, bấm **`M`** một lần để khóa vị trí và bắt đầu thám hiểm!
 
@@ -136,8 +136,8 @@ Tổ hợp `Alt` tay trái không dùng `Shift/Ctrl` — tùy chỉnh trực ti�
 
 ```text
 +----------------------------------+          localhost:8765 (HTTP)         +---------------------------------+
-|  Genshin-Helper Thuần Rust (x64) | <====================================> | Chrome / Edge / Brave Extension |
-|  GenshinHelper.exe (0 DLL ngoài) |  Ring buffer /poll?since=<seq> lossless|  (MV3 Service Worker + Popup)   |
+|  Genshin-Helper Thuần Rust (x64) | <====================================> | Chrome / Edge / Brave / Firefox Extension |
+|  GenshinHelper.exe (0 DLL ngoài) |  Ring buffer /poll?since=<seq> lossless|  (MV3 background + Popup)       |
 |  - Chụp WGC HDR / GDI SRCCOPY    |                                        |  - Cầu nối HoYoLAB Map & Route  |
 |  - Định vị Map M & Minimap Rust  |        Native Messaging (stdio)        |  - Đồng bộ nền không giảm nhịp  |
 |  - Mini-HUD, Live Radar & Map M  | <------------------------------------> |  - Tuyến TSP & Xuất ghim mở     |

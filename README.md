@@ -66,7 +66,7 @@
 ## Quick Start
 
 1. Download **`GenshinHelper-Setup-v5.8.0.exe`** (`~8.5 MB`, `0` external DLLs) from [**GitHub Releases**](https://github.com/tuanminh26596/Genshin-helper/releases/latest) and run as **Administrator** (required by Windows UIPI so hotkeys/HUD work over Genshin).
-2. When Setup finishes, follow the auto-opened **Extension Setup Guide** (`install_extension.html`): open `chrome://extensions` (or Edge / Brave) → enable **Developer mode** → **Load unpacked** → paste the shown `extension` folder path & pin the icon.
+2. When Setup finishes, follow the auto-opened **Extension Setup Guide** (`install_extension.html`): open `chrome://extensions` (or Edge / Brave) → enable **Developer mode** → **Load unpacked** → paste the shown `extension` folder path & pin the icon. On Firefox, load `extension/manifest.json` as a temporary add-on from `about:debugging#/runtime/this-firefox`.
 3. On first launch, `GenshinHelper.exe` auto-downloads public HoYoLAB map metadata (~15 MB) into `%LOCALAPPDATA%\GenshinHelper\data` (~10–20s once).
 4. Open [**HoYoLAB Interactive Map**](https://act.hoyolab.com/ys/app/interactive-map/index.html#/map/2), set Genshin Impact to **Borderless Windowed**, press **`M`** once to lock position, and explore!
 
@@ -136,8 +136,8 @@ Shift/Ctrl-free left-hand `Alt` combos — fully customizable in **Extension Pop
 
 ```text
 +----------------------------------+          localhost:8765 (HTTP)         +---------------------------------+
-| Genshin-Helper Pure-Rust (Win64) | <====================================> | Chrome / Edge / Brave Extension |
-|  GenshinHelper.exe (0 ext DLLs)  |   Lossless /poll?since=<seq> ring buf  |  (MV3 Service Worker + Popup)   |
+| Genshin-Helper Pure-Rust (Win64) | <====================================> | Chrome / Edge / Brave / Firefox Extension |
+|  GenshinHelper.exe (0 ext DLLs)  |   Lossless /poll?since=<seq> ring buf  |  (MV3 background + Popup)       |
 |  - Passive WGC HDR / GDI SRCCOPY |                                        |  - HoYoLAB Map & Route Bridge   |
 |  - Pure-Rust Map M + Minimap CV  |        Native Messaging (stdio)        |  - Zero-Throttle Background Sync|
 |  - Mini-HUD, Live Radar & M-Map  | <------------------------------------> |  - TSP Overlay & Pin Exporter   |

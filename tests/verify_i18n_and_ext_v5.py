@@ -101,6 +101,26 @@ def verify_extension_i18n_and_manifest() -> None:
     ext_id = "".join(chr(97 + (b >> 4)) + chr(97 + (b & 15)) for b in hashlib.sha256(der).digest()[:16])
     assert ext_id == EXPECTED_EXT_ID, f"Pinned extension ID changed: got {ext_id}, expected {EXPECTED_EXT_ID}"
 
+    # Firefox port: one directory, both background models, stable Gecko add-on ID.
+    gecko = manifest.get("browser_specific_settings", {}).get("gecko", {})
+    assert gecko.get("id") == "genshin-helper@tuannm26596.github.io", (
+        f"Unexpected Firefox add-on ID: {gecko.get('id')!r}"
+    )
+    assert gecko.get("strict_min_version"), "Firefox strict_min_version is missing"
+    assert "activeTab" in manifest.get("permissions", []), (
+        "activeTab is required for Firefox captureVisibleTab diagnostics"
+    )
+    background = manifest.get("background", {})
+    assert background.get("service_worker") == "background.js"
+    scripts = background.get("scripts", [])
+    assert "background.js" in scripts, (
+        "Firefox needs background.scripts alongside service_worker"
+    )
+    assert "providers_registry.js" in scripts, (
+        "Firefox background.scripts must load providers_registry.js before background.js"
+    )
+    assert scripts.index("providers_registry.js") < scripts.index("background.js")
+
     # Verify i18n wiring: bridge in the isolated world, i18n.js before page_main.js in MAIN.
     cs = manifest.get("content_scripts", [])
     assert any("i18n_bridge.js" in entry.get("js", []) and entry.get("world") != "MAIN" for entry in cs), (
