@@ -5,6 +5,7 @@
 //! Acyclic dependency: depends ONLY on `gh-core`.
 
 pub mod audio;
+pub mod authenticode;
 pub mod capture;
 pub mod game_settings;
 pub mod hdr_tonemap;

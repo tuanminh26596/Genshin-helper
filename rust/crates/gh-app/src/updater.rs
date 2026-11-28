@@ -29,6 +29,7 @@ use gh_net::update_check::{
     VerifiedInstaller, cleanup_stale_update_files, is_newer_version, is_safe_installer_filename,
     verify_file_sha256,
 };
+use gh_win32::authenticode::verify_installer_against_current_exe;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -580,6 +581,12 @@ fn spawn_verified_installer_exe(
         }
         Err(e) => return Err(format!("SHA-256 re-verification error: {e}")),
     }
+    if let Err(err) = verify_installer_against_current_exe(&verified.path) {
+        let _ = std::fs::remove_file(&verified.path);
+        return Err(format!(
+            "Authenticode verification failed before launch; removed file: {err}"
+        ));
+    }
 
     let args = build_inno_update_args(lang, trigger);
     let path_str = verified.path.to_string_lossy();
@@ -991,6 +998,7 @@ impl AppState {
                 v.sha256.eq_ignore_ascii_case(&sha)
                     && v.path.is_file()
                     && verify_file_sha256(&v.path, &sha).unwrap_or(false)
+                    && verify_installer_against_current_exe(&v.path).is_ok()
             });
             if ready.is_none() {
                 g.phase = UpdatePhase::Downloading;
@@ -1045,34 +1053,42 @@ impl AppState {
                 let mut last_emit = Instant::now()
                     .checked_sub(Duration::from_secs(1))
                     .unwrap_or_else(Instant::now);
-                let dl_res = client.download_verified_installer(
-                    &installer,
-                    &expected_sha256,
-                    &updates_dir,
-                    Some(Arc::clone(&cancel_flag)),
-                    move |dl, tot| {
-                        {
-                            let mut g = st_prog
-                                .updater
-                                .inner
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                            g.downloaded_bytes = dl;
-                            if tot > 0 {
-                                g.total_bytes = tot;
+                let dl_res = client
+                    .download_verified_installer(
+                        &installer,
+                        &expected_sha256,
+                        &updates_dir,
+                        Some(Arc::clone(&cancel_flag)),
+                        move |dl, tot| {
+                            {
+                                let mut g = st_prog
+                                    .updater
+                                    .inner
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                g.downloaded_bytes = dl;
+                                if tot > 0 {
+                                    g.total_bytes = tot;
+                                }
+                                if tot > 0 && dl >= tot {
+                                    g.phase = UpdatePhase::Verifying;
+                                }
                             }
-                            if tot > 0 && dl >= tot {
-                                g.phase = UpdatePhase::Verifying;
+                            if last_emit.elapsed() >= Duration::from_millis(180)
+                                || (tot > 0 && dl >= tot)
+                            {
+                                last_emit = Instant::now();
+                                st_prog.broadcast_app_update_state();
                             }
+                        },
+                    )
+                    .and_then(|verified| {
+                        if let Err(sig_err) = verify_installer_against_current_exe(&verified.path) {
+                            let _ = std::fs::remove_file(&verified.path);
+                            return Err(format!("Authenticode verification failed: {sig_err}"));
                         }
-                        if last_emit.elapsed() >= Duration::from_millis(180)
-                            || (tot > 0 && dl >= tot)
-                        {
-                            last_emit = Instant::now();
-                            st_prog.broadcast_app_update_state();
-                        }
-                    },
-                );
+                        Ok(verified)
+                    });
 
                 match dl_res {
                     Ok(verified) => {
@@ -1182,20 +1198,20 @@ impl AppState {
         let updates_dir = self.paths.updates_dir();
         let lang = get_language();
         if dry_run {
-            match verify_file_sha256(&verified.path, &verified.sha256) {
-                Ok(true) => {}
-                Ok(false) => {
-                    let _ = std::fs::remove_file(&verified.path);
-                    let mut g = self.updater.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    g.phase = UpdatePhase::Error;
-                    g.verified_installer = None;
-                    g.last_error =
-                        Some("SHA-256 re-verification failed before launch".to_owned());
-                    return Err(CoreError::InvalidData(
-                        "SHA-256 re-verification failed before launch".to_owned(),
-                    ));
-                }
+            let check_err = match verify_file_sha256(&verified.path, &verified.sha256) {
+                Ok(true) => verify_installer_against_current_exe(&verified.path)
+                    .err()
+                    .map(|e| format!("Authenticode verification failed before launch: {e}")),
+                Ok(false) => Some("SHA-256 re-verification failed before launch".to_owned()),
                 Err(e) => return Err(CoreError::InvalidData(e)),
+            };
+            if let Some(msg) = check_err {
+                let _ = std::fs::remove_file(&verified.path);
+                let mut g = self.updater.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.phase = UpdatePhase::Error;
+                g.verified_installer = None;
+                g.last_error = Some(msg.clone());
+                return Err(CoreError::InvalidData(msg));
             }
             if !latest_ver.is_empty() {
                 self.updater
@@ -1563,7 +1579,10 @@ fn find_cached_verified_installer(
         return None;
     }
     let path = updates_dir.join(&asset.name);
-    if path.is_file() && verify_file_sha256(&path, expected).unwrap_or(false) {
+    if path.is_file()
+        && verify_file_sha256(&path, expected).unwrap_or(false)
+        && verify_installer_against_current_exe(&path).is_ok()
+    {
         let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(asset.size);
         return Some(VerifiedInstaller {
             path,
@@ -1644,12 +1663,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn auto_mode_predownloads_in_background_and_supports_install_on_exit_and_mode_switching() {
-        let payload = b"MZ-synthetic-inno-installer-payload-v5.8.0-verified".to_vec();
+    fn spawn_mock_release_server(
+        setup_name: &'static str,
+        payload: Vec<u8>,
+    ) -> (String, std::thread::JoinHandle<()>) {
         let good_sha = sha256_hex(&payload);
-        let setup_name = "GenshinHelper-Setup-v5.8.0.exe";
-
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock github");
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{addr}");
@@ -1674,7 +1692,6 @@ mod tests {
         })
         .to_string();
         let sums_body = format!("{good_sha}  {setup_name}\n");
-        let payload_srv = payload.clone();
 
         let srv = std::thread::spawn(move || {
             for _ in 0..3 {
@@ -1715,14 +1732,24 @@ mod tests {
                 } else if path == format!("/dl/{setup_name}") {
                     let hdr = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        payload_srv.len()
+                        payload.len()
                     );
                     let _ = stream.write_all(hdr.as_bytes());
-                    let _ = stream.write_all(&payload_srv);
+                    let _ = stream.write_all(&payload);
                 }
                 let _ = stream.flush();
             }
         });
+
+        (base, srv)
+    }
+
+    #[test]
+    fn auto_mode_predownloads_in_background_and_supports_install_on_exit_and_mode_switching() {
+        let payload = std::fs::read(std::env::current_exe().expect("current test exe"))
+            .expect("read test exe");
+        let setup_name = "GenshinHelper-Setup-v5.8.0.exe";
+        let (base, srv) = spawn_mock_release_server(setup_name, payload);
 
         let root = temp_root("auto_predl");
         let mut state_arc = make_test_state_with_db(&root, None, None, None);
@@ -1739,7 +1766,7 @@ mod tests {
             st_mut.updater.set_allow_install_on_exit(true);
         }
 
-        // 1. Background check in default "auto" mode triggers automatic SHA-256 pre-download
+        // 1. Background check in default "auto" mode triggers automatic SHA-256 + Authenticode pre-download
         let res = state_arc
             .run_app_update_check(false, false)
             .expect("background check ok");
@@ -1779,6 +1806,62 @@ mod tests {
         assert_eq!(persisted.pending_install_version.as_deref(), Some("5.8.0"));
 
         srv.join().expect("mock server done");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn auto_mode_rejects_and_deletes_non_pe_installer_payload() {
+        let payload = b"not-a-valid-pe-installer".to_vec();
+        let setup_name = "GenshinHelper-Setup-v5.8.0.exe";
+        let (base, srv) = spawn_mock_release_server(setup_name, payload);
+
+        let root = temp_root("reject_non_pe");
+        let mut state_arc = make_test_state_with_db(&root, None, None, None);
+        {
+            let st_mut = Arc::get_mut(&mut state_arc).expect("unique Arc in test");
+            st_mut.updater = Arc::new(AppUpdater::with_config(
+                UpdateCheckConfig {
+                    api_base_url: base,
+                    timeout_secs: 15,
+                    ..Default::default()
+                },
+                "5.7.0".to_owned(),
+            ));
+        }
+
+        let res = state_arc
+            .run_app_update_check(false, false)
+            .expect("check ok");
+        assert!(res.has_update);
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while state_arc
+            .updater
+            .inner
+            .lock()
+            .unwrap()
+            .last_error
+            .is_none()
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        srv.join().expect("mock server done");
+
+        let g = state_arc.updater.inner.lock().unwrap();
+        assert_ne!(g.phase, UpdatePhase::ReadyToInstall);
+        assert!(g.verified_installer.is_none());
+        let err = g.last_error.as_deref().unwrap_or("");
+        assert!(
+            err.contains("Authenticode"),
+            "expected Authenticode rejection error, got: {err}"
+        );
+        drop(g);
+
+        assert!(
+            !state_arc.paths.updates_dir().join(setup_name).exists(),
+            "rejected non-PE installer must be deleted from updates/"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

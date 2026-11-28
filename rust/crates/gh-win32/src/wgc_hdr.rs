@@ -31,7 +31,7 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_SDR_WHITE_LEVEL, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DisplayConfigGetDeviceInfo,
     GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
 };
-use windows::Win32::Foundation::{ERROR_SUCCESS, HMODULE, HWND, POINT, RECT, RPC_E_CHANGED_MODE, S_OK};
+use windows::Win32::Foundation::{ERROR_SUCCESS, HMODULE, HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
@@ -46,14 +46,14 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIDevice, IDXGIFactory1, IDXGIOutput6,
+    CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
+    IDXGIOutput6,
 };
 use windows::Win32::Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONULL, MonitorFromPoint};
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
-use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow};
 use windows::core::Interface;
 
@@ -118,43 +118,8 @@ impl MonitorHdrInfo {
     }
 }
 
-struct WinRtThreadGuard {
-    needs_uninit: bool,
-}
-
-impl Drop for WinRtThreadGuard {
-    fn drop(&mut self) {
-        if self.needs_uninit {
-            // SAFETY: Paired 1:1 with a successful `RoInitialize(RO_INIT_MULTITHREADED)` on this thread.
-            unsafe {
-                RoUninitialize();
-            }
-        }
-    }
-}
-
-thread_local! {
-    static WINRT_THREAD_INIT: std::cell::RefCell<Option<WinRtThreadGuard>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 fn ensure_winrt_initialized() {
-    let _ = WINRT_THREAD_INIT.try_with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if slot.is_some() {
-            return;
-        }
-        // SAFETY: Initializes WinRT MTA for the calling thread; `S_FALSE` or `RPC_E_CHANGED_MODE`
-        // means the thread is already initialized and must not be uninitialized by us.
-        let hr = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
-        let needs_uninit = match hr {
-            Ok(()) => true,
-            Err(e) if e.code() == S_OK => true,
-            Err(e) if e.code() == RPC_E_CHANGED_MODE => false,
-            Err(_) => false,
-        };
-        *slot = Some(WinRtThreadGuard { needs_uninit });
-    });
+    let _ = crate::win_ocr::ensure_winrt_initialized();
 }
 
 fn utf16_cstr_to_string(buf: &[u16]) -> String {
@@ -396,6 +361,26 @@ pub fn probe_hdr_monitor_for_region(
     })
 }
 
+#[inline]
+fn is_software_adapter_flags(flags: u32) -> bool {
+    (flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0
+}
+
+fn is_software_dxgi_device(dxgi_device: &IDXGIDevice) -> bool {
+    // SAFETY: Standard read-only DXGI adapter descriptor query on a valid `IDXGIDevice`.
+    let Ok(adapter) = (unsafe { dxgi_device.GetAdapter() }) else {
+        return false;
+    };
+    let Ok(adapter1) = adapter.cast::<IDXGIAdapter1>() else {
+        return false;
+    };
+    // SAFETY: `GetDesc1` writes `DXGI_ADAPTER_DESC1` for a valid `IDXGIAdapter1`.
+    let Ok(desc) = (unsafe { adapter1.GetDesc1() }) else {
+        return false;
+    };
+    is_software_adapter_flags(desc.Flags)
+}
+
 /// Returns true if Windows Graphics Capture is supported on the current Windows version.
 pub fn is_wgc_supported() -> bool {
     ensure_winrt_initialized();
@@ -409,16 +394,18 @@ struct StagingSlot {
 }
 
 /// Persistent free-threaded WGC `R16G16B16A16Float` capture session bound to one `HMONITOR`.
+// Field order drops WGC session/pool/item before D3D11 textures/context/device.
 pub struct WgcHdrMonitorSession {
-    device: ID3D11Device,
-    context: ID3D11DeviceContext,
-    winrt_device: IDirect3DDevice,
-    frame_pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
-    content_size: SizeInt32,
+    frame_pool: Direct3D11CaptureFramePool,
+    _item: GraphicsCaptureItem,
     latest_gpu_tex: Option<ID3D11Texture2D>,
-    latest_tex_dims: (u32, u32),
     staging_slots: Vec<StagingSlot>,
+    winrt_device: IDirect3DDevice,
+    context: ID3D11DeviceContext,
+    device: ID3D11Device,
+    content_size: SizeInt32,
+    latest_tex_dims: (u32, u32),
     tonemap_bgra: Vec<u8>,
     closed: bool,
 }
@@ -470,6 +457,9 @@ impl WgcHdrMonitorSession {
         let device = device?;
         let context = context?;
         let dxgi_device: IDXGIDevice = device.cast().ok()?;
+        if is_software_dxgi_device(&dxgi_device) {
+            return None;
+        }
         // SAFETY: Wrapping valid `IDXGIDevice` into WinRT `IDirect3DDevice`.
         let inspectable = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device).ok()? };
         let winrt_device: IDirect3DDevice = inspectable.cast().ok()?;
@@ -495,18 +485,23 @@ impl WgcHdrMonitorSession {
         // Disable cursor capture (matches GDI SRCCOPY) and border glow (best-effort on Win11).
         let _ = session.SetIsCursorCaptureEnabled(false);
         let _ = session.SetIsBorderRequired(false);
-        session.StartCapture().ok()?;
+        if session.StartCapture().is_err() {
+            let _ = session.Close();
+            let _ = frame_pool.Close();
+            return None;
+        }
 
         Some(Self {
-            device,
-            context,
-            winrt_device,
-            frame_pool,
             session,
-            content_size,
+            frame_pool,
+            _item: item,
             latest_gpu_tex: None,
-            latest_tex_dims: (0, 0),
             staging_slots: Vec::with_capacity(WGC_STAGING_POOL_SLOTS),
+            winrt_device,
+            context,
+            device,
+            content_size,
+            latest_tex_dims: (0, 0),
             tonemap_bgra: Vec::new(),
             closed: false,
         })
@@ -901,12 +896,16 @@ pub fn compute_window_client_crop(
 /// Captures strictly the target window's own surface — completely blind to topmost overlays
 /// (`WS_EX_LAYERED` HUDs / M-Map route overlay even when set to `WDA_NONE` for OBS/ShadowPlay).
 /// Supports both SDR (`B8G8R8A8UIntNormalized`) and HDR (`R16G16B16A16Float` + scRGB tonemap).
+// Field order drops WGC session/pool/item before D3D11 textures/context/device.
 pub struct WgcWindowSession {
-    device: ID3D11Device,
-    context: ID3D11DeviceContext,
-    winrt_device: IDirect3DDevice,
-    frame_pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
+    frame_pool: Direct3D11CaptureFramePool,
+    _item: GraphicsCaptureItem,
+    latest_gpu_tex: Option<ID3D11Texture2D>,
+    staging_slots: Vec<StagingSlot>,
+    winrt_device: IDirect3DDevice,
+    context: ID3D11DeviceContext,
+    device: ID3D11Device,
     pixel_format: DirectXPixelFormat,
     dxgi_format: DXGI_FORMAT,
     is_hdr: bool,
@@ -914,9 +913,7 @@ pub struct WgcWindowSession {
     opened_at: Instant,
     first_frame_ms: Option<u64>,
     last_error: Option<String>,
-    latest_gpu_tex: Option<ID3D11Texture2D>,
     latest_tex_dims: (u32, u32),
-    staging_slots: Vec<StagingSlot>,
     tonemap_bgra: Vec<u8>,
     closed: bool,
 }
@@ -969,6 +966,9 @@ impl WgcWindowSession {
         let dxgi_device: IDXGIDevice = device
             .cast()
             .map_err(|e| format!("cast_IDXGIDevice({:#010X})", e.code().0 as u32))?;
+        if is_software_dxgi_device(&dxgi_device) {
+            return Err("software_adapter_unsupported".to_owned());
+        }
         // SAFETY: Wrapping valid `IDXGIDevice` into WinRT `IDirect3DDevice`.
         let inspectable = unsafe {
             CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device)
@@ -1032,11 +1032,14 @@ impl WgcWindowSession {
         }
 
         Ok(Self {
-            device,
-            context,
-            winrt_device,
-            frame_pool,
             session,
+            frame_pool,
+            _item: item,
+            latest_gpu_tex: None,
+            staging_slots: Vec::with_capacity(WGC_STAGING_POOL_SLOTS),
+            winrt_device,
+            context,
+            device,
             pixel_format,
             dxgi_format,
             is_hdr,
@@ -1044,9 +1047,7 @@ impl WgcWindowSession {
             opened_at: Instant::now(),
             first_frame_ms: None,
             last_error: None,
-            latest_gpu_tex: None,
             latest_tex_dims: (0, 0),
-            staging_slots: Vec::with_capacity(WGC_STAGING_POOL_SLOTS),
             tonemap_bgra: Vec::new(),
             closed: false,
         })
@@ -1720,5 +1721,24 @@ mod tests {
         // Closing when idle is an atomic no-op and safe to call repeatedly.
         mgr.close();
         mgr.close();
+    }
+
+    #[test]
+    fn software_adapter_flag_helper_detects_warp_and_accepts_hardware() {
+        let sw_flag = DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32;
+        assert!(!is_software_adapter_flags(0));
+        assert!(is_software_adapter_flags(sw_flag));
+        assert!(is_software_adapter_flags(sw_flag | 1));
+    }
+
+    #[test]
+    fn scoped_worker_thread_wgc_probe_keeps_process_mta_anchored() {
+        let first = std::thread::spawn(is_wgc_supported)
+            .join()
+            .expect("first worker thread panicked");
+        let second = std::thread::spawn(is_wgc_supported)
+            .join()
+            .expect("second worker thread panicked");
+        assert_eq!(first, second);
     }
 }
