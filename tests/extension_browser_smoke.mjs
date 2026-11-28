@@ -586,6 +586,28 @@ async function main() {
       { forceReconnectRes, tabIdBeforeForce, asAfterForce }
     );
 
+    // The forced re-injection also re-ran i18n.js in the HoYoLAB tab while page_main.js exited
+    // early (same SCRIPT_BUILD). Its GHI18n.onChange handler must follow the new GHI18n.
+    const hlAfterForce = await waitUntil(async () => {
+      const v = await page.eval(`(() => ({
+        i18nToken: window.GHI18n ? (window.GHI18n.__smokeToken || null) : 'missing',
+        listeners: window.__gh_i18n_listeners instanceof Set ? window.__gh_i18n_listeners.size : -1
+      }))()`);
+      return v && v.i18nToken !== 'initial' ? v : null;
+    }, 10000, 100);
+    check(
+      'RECONNECT_MAP_TABS re-ran i18n.js in the HoYoLAB tab (new GHI18n instance)',
+      Boolean(hlAfterForce && hlAfterForce.i18nToken !== 'initial' && hlAfterForce.i18nToken !== 'missing'),
+      hlAfterForce
+    );
+    await setChoice('vi');
+    const recenterAfterI18nRerun = await waitFor((x) => x.lang === 'vi' && x.recenter === 'Bám lại vị trí', 8000);
+    check(
+      'HoYoLAB re-center button still follows a live language switch after i18n.js re-runs',
+      Boolean(recenterAfterI18nRerun && recenterAfterI18nRerun.lang === 'vi' && recenterAfterI18nRerun.recenter === 'Bám lại vị trí'),
+      recenterAfterI18nRerun
+    );
+
     // Informational: >1 means Chromium stopped and restarted the worker during the run.
     console.log(`[info] extension service worker started ${swStarts} time(s); app mock attached each time`);
   } finally {

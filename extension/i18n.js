@@ -61,14 +61,15 @@
     });
   }
 
-  function createI18n(initialBundles, initialLang) {
+  function createI18n(initialBundles, initialLang, sharedListeners) {
     let bundles = {
       vi: (initialBundles && initialBundles.vi) ? { ...initialBundles.vi } : {},
       en: (initialBundles && initialBundles.en) ? { ...initialBundles.en } : {}
     };
     let currentLang = resolveLanguage(initialLang);
     let ready = Boolean(Object.keys(bundles.vi).length > 0 || Object.keys(bundles.en).length > 0);
-    const listeners = new Set();
+    // A shared Set lets listeners survive a re-run of this script (see the MAIN-world core below).
+    const listeners = sharedListeners instanceof Set ? sharedListeners : new Set();
 
     function notify() {
       for (const fn of Array.from(listeners)) {
@@ -519,7 +520,23 @@
   }
 
   const useEmbeddedPageBundles = !isExtensionPage && isHoyolabMap;
-  const core = createI18n(useEmbeddedPageBundles ? EMBEDDED_PAGE_BUNDLES : null, initialStoredLang);
+  // The extension can execute this file again in an open map tab (popup Reconnect, extension
+  // reload/update) while page_main.js exits early on the same SCRIPT_BUILD. Its
+  // GHI18n.onChange handlers must move to the new core instead of staying on the discarded
+  // one, and an unsubscribe returned by the old core must still remove them, so every core in
+  // this window shares one listener Set.
+  let sharedI18nListeners = null;
+  try {
+    if (!(globalScope.__gh_i18n_listeners instanceof Set)) {
+      globalScope.__gh_i18n_listeners = new Set();
+    }
+    sharedI18nListeners = globalScope.__gh_i18n_listeners;
+  } catch (e) {}
+  const core = createI18n(
+    useEmbeddedPageBundles ? EMBEDDED_PAGE_BUNDLES : null,
+    initialStoredLang,
+    sharedI18nListeners
+  );
   let initPromise = null;
   // True only once the user's choice (chrome.storage gh_lang) is known — never from the cache.
   let hasExplicitStoredLang = false;
