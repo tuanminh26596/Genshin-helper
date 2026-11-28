@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub const GLOBAL_INDEX_FILENAME: &str = "teyvat_global_index_v4.npz";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMode {
     /// Installed layout: `%APPDATA%\GenshinHelper` & `%LOCALAPPDATA%\GenshinHelper`.
@@ -188,7 +190,7 @@ impl AppPaths {
     }
 
     pub fn global_index_path(&self) -> PathBuf {
-        self.cache_dir.join("teyvat_global_index_v3.npz")
+        self.cache_dir.join(GLOBAL_INDEX_FILENAME)
     }
 
     pub fn routes_dir(&self) -> PathBuf {
@@ -378,7 +380,7 @@ mod tests {
             );
             assert_eq!(
                 paths.global_index_path(),
-                PathBuf::from(r"X:\Local\GenshinHelper\cache\teyvat_global_index_v3.npz")
+                PathBuf::from(r"X:\Local\GenshinHelper\cache\teyvat_global_index_v4.npz")
             );
         }
     }

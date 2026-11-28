@@ -2128,7 +2128,7 @@ pub fn run_qa(opts: &QaOptions) -> Result<QaReport, String> {
                 let _ = std::fs::create_dir_all(&idx_dir);
                 let tracking_assets = Arc::new(SharedTrackingAssets::load_for_data_dir(
                     &eff_data_dir,
-                    Some(idx_dir.join("teyvat_global_index_v3.npz")),
+                    Some(idx_dir.join(gh_cv::global_relocator::GLOBAL_INDEX_FILENAME)),
                     true,
                 ));
                 let ctx = Arc::new(ReplaySharedContext {

@@ -1718,7 +1718,7 @@ mod tests {
         assert!(global_idx.is_file());
         assert!(data_dir.join("multimap_v4.json").is_file());
 
-        // 5. Now test Map 2 changed -> invalidates teyvat_global_index_v3.npz
+        // 5. Now test Map 2 changed -> invalidates global relocator index
         let res2 =
             check_and_apply_startup_update(&runner, &paths, &cfg_auto, &local_versions).unwrap();
         assert!(matches!(

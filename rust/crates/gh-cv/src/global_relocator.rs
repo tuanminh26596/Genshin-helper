@@ -1,7 +1,9 @@
 //! Full-Teyvat RootSIFT KD-Tree global relocator (`src/global_relocator.py`).
 //!
-//! Bumped to `INDEX_VERSION = 3` (`teyvat_global_index_v3.npz`) so Rust never mixes
-//! descriptors with Python OpenCV's `v2` cache.
+//! Bumped to `INDEX_VERSION = 4` (`teyvat_global_index_v4.npz`): builds uncapped
+//! per-tile RootSIFT descriptors so high-contrast tiles never starve calmer
+//! regions, and embeds `terrain_fingerprint` so disk caches rebuild whenever
+//! `terrain_n2_v4.npz` changes.
 
 use crate::locator::TerrainRaster;
 use crate::ops::color::{bgr_to_gray, bgr_to_hsv, frame_view_to_bgr, frame_view_to_gray_array};
@@ -21,11 +23,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
-pub const INDEX_VERSION: i32 = 3;
+pub const INDEX_VERSION: i32 = 4;
 pub const SCALE_FACTOR: f32 = 400.0;
 pub const BIN_WORLD: f64 = 240.0;
 pub const NMS_DIST_W: f64 = 420.0;
-pub const GLOBAL_INDEX_FILENAME: &str = "teyvat_global_index_v3.npz";
+pub const GLOBAL_INDEX_FILENAME: &str = gh_core::paths::GLOBAL_INDEX_FILENAME;
 
 pub const DEFAULT_TOP_K: usize = 4;
 pub const DEFAULT_MIN_BIN_SCORE: f64 = 3.5;
@@ -83,6 +85,39 @@ fn tile_std_u8(tile: ArrayView2<'_, u8>) -> f64 {
     (sum_sq as f64 / nf - mean * mean).max(0.0).sqrt()
 }
 
+#[inline]
+fn fnv1a_update(mut h: u64, bytes: &[u8]) -> u64 {
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
+/// Computes a deterministic 64-bit FNV-1a fingerprint over Map 2 dimensions,
+/// world metadata, and pixel bytes (stride-independent across sliced views).
+pub fn terrain_raster_fingerprint(gray: ArrayView2<'_, u8>, meta: &[f64; 5]) -> i64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h = FNV_OFFSET;
+    let (rows, cols) = gray.dim();
+    h = fnv1a_update(h, &(rows as u64).to_le_bytes());
+    h = fnv1a_update(h, &(cols as u64).to_le_bytes());
+    for m in meta {
+        h = fnv1a_update(h, &m.to_bits().to_le_bytes());
+    }
+    for row in gray.rows() {
+        if let Some(sl) = row.as_slice() {
+            h = fnv1a_update(h, sl);
+        } else {
+            for &b in row {
+                h = fnv1a_update(h, &[b]);
+            }
+        }
+    }
+    h as i64
+}
+
 struct TileJob {
     y0: usize,
     y1: usize,
@@ -94,7 +129,7 @@ struct TileJob {
     keep_x1: usize,
 }
 
-/// Tiles Map 2 `terrain_n2` into 384x384 RootSIFT patches and atomically writes `teyvat_global_index_v3.npz`.
+/// Tiles Map 2 `terrain_n2` into 384x384 RootSIFT patches and atomically writes `teyvat_global_index_v4.npz`.
 pub fn build_teyvat_global_index(
     map2_gray: ArrayView2<'_, u8>,
     map2_meta: &[f64; 5],
@@ -179,7 +214,9 @@ pub fn build_teyvat_global_index(
         }
     }
 
-    let extractor = SiftExtractor::new(900, 0.011, 15.0);
+    // Remove the per-tile keypoint cap (`nfeatures = 0`) so high-contrast cliffs/cities
+    // cannot evict calmer open-world terrain features inside the same 384x384 tile.
+    let extractor = SiftExtractor::new(0, 0.011, 15.0);
     let per_tile: Vec<Option<GlobalIndexVectors>> = jobs
         .par_iter()
         .map(|job| {
@@ -242,11 +279,16 @@ pub fn build_teyvat_global_index(
         flat_pts.extend_from_slice(p);
     }
 
+    let terrain_fp = terrain_raster_fingerprint(map2_gray, map2_meta);
     let mut archive = NpzArchive::new();
     archive.insert("des_u8", NpyArray::from_u8(vec![n, 128], flat_des)?);
     archive.insert("pts_world", NpyArray::from_f32(vec![n, 2], flat_pts)?);
     archive.insert("scale_factor", NpyArray::scalar_f32(SCALE_FACTOR));
     archive.insert("index_version", NpyArray::scalar_i32(INDEX_VERSION));
+    archive.insert(
+        "terrain_fingerprint",
+        NpyArray::from_i64(Vec::new(), vec![terrain_fp])?,
+    );
 
     let dest = cache_path
         .map(PathBuf::from)
@@ -256,13 +298,13 @@ pub fn build_teyvat_global_index(
     Ok((all_des, all_pts))
 }
 
-struct LoadedV3Index {
+struct LoadedCachedIndex {
     des_u8: Vec<[u8; 128]>,
     pts_world: Vec<[f32; 2]>,
     scale_factor: f32,
 }
 
-fn load_v3_index(path: &Path) -> Option<LoadedV3Index> {
+fn load_cached_index(path: &Path, expected_fingerprint: Option<i64>) -> Option<LoadedCachedIndex> {
     if !path.is_file() {
         return None;
     }
@@ -275,6 +317,15 @@ fn load_v3_index(path: &Path) -> Option<LoadedV3Index> {
     };
     if ver != INDEX_VERSION {
         return None;
+    }
+    if let Some(expected_fp) = expected_fingerprint {
+        let fp_arr = archive.get("terrain_fingerprint")?;
+        let NpyData::I64(v) = &fp_arr.data else {
+            return None;
+        };
+        if v.is_empty() || v[0] != expected_fp {
+            return None;
+        }
     }
 
     let des_arr = archive.get("des_u8")?;
@@ -317,11 +368,46 @@ fn load_v3_index(path: &Path) -> Option<LoadedV3Index> {
         pts_world.push(*chunk);
     }
 
-    Some(LoadedV3Index {
+    Some(LoadedCachedIndex {
         des_u8,
         pts_world,
         scale_factor,
     })
+}
+
+pub fn load_map2_raster_from_npz(path: &Path) -> Option<Arc<TerrainRaster>> {
+    if !path.is_file() {
+        return None;
+    }
+    let gray_arr = NpzArchive::read_single_from_file(path, "map_2_gray").ok()?;
+    let meta_arr = NpzArchive::read_single_from_file(path, "map_2_meta").ok()?;
+    if gray_arr.shape.len() != 2 {
+        return None;
+    }
+    let (h, w) = (gray_arr.shape[0], gray_arr.shape[1]);
+    let NpyData::U8(raw_gray) = gray_arr.data else {
+        return None;
+    };
+    let gray = Array2::from_shape_vec((h, w), raw_gray).ok()?;
+    let meta_vals: Vec<f64> = match meta_arr.data {
+        NpyData::I64(v) => v.into_iter().map(|x| x as f64).collect(),
+        NpyData::I32(v) => v.into_iter().map(|x| x as f64).collect(),
+        NpyData::F32(v) => v.into_iter().map(|x| x as f64).collect(),
+        NpyData::U8(v) => v.into_iter().map(|x| x as f64).collect(),
+    };
+    if meta_vals.len() < 5 {
+        return None;
+    }
+    Some(Arc::new(TerrainRaster {
+        gray,
+        meta: [
+            meta_vals[0],
+            meta_vals[1],
+            meta_vals[2],
+            meta_vals[3],
+            meta_vals[4],
+        ],
+    }))
 }
 
 fn load_map2_from_npz() -> Option<Arc<TerrainRaster>> {
@@ -330,44 +416,9 @@ fn load_map2_from_npz() -> Option<Arc<TerrainRaster>> {
         AppPaths::resolve().data_dir.join("terrain_n2_v4.npz"),
     ];
     for p in candidates {
-        if !p.is_file() {
-            continue;
+        if let Some(raster) = load_map2_raster_from_npz(&p) {
+            return Some(raster);
         }
-        let Ok(gray_arr) = NpzArchive::read_single_from_file(&p, "map_2_gray") else {
-            continue;
-        };
-        let Ok(meta_arr) = NpzArchive::read_single_from_file(&p, "map_2_meta") else {
-            continue;
-        };
-        if gray_arr.shape.len() != 2 {
-            continue;
-        }
-        let (h, w) = (gray_arr.shape[0], gray_arr.shape[1]);
-        let NpyData::U8(raw_gray) = gray_arr.data else {
-            continue;
-        };
-        let Ok(gray) = Array2::from_shape_vec((h, w), raw_gray) else {
-            continue;
-        };
-        let meta_vals: Vec<f64> = match meta_arr.data {
-            NpyData::I64(v) => v.into_iter().map(|x| x as f64).collect(),
-            NpyData::I32(v) => v.into_iter().map(|x| x as f64).collect(),
-            NpyData::F32(v) => v.into_iter().map(|x| x as f64).collect(),
-            NpyData::U8(v) => v.into_iter().map(|x| x as f64).collect(),
-        };
-        if meta_vals.len() < 5 {
-            continue;
-        }
-        return Some(Arc::new(TerrainRaster {
-            gray,
-            meta: [
-                meta_vals[0],
-                meta_vals[1],
-                meta_vals[2],
-                meta_vals[3],
-                meta_vals[4],
-            ],
-        }));
     }
     None
 }
@@ -825,9 +876,14 @@ fn ensure_ready_inner(inner: &RelocatorInner) -> bool {
         return true;
     }
 
-    let (des_u8, pts_world, scale_f) = if let Some(loaded) = load_v3_index(&inner.cache_path) {
-        (loaded.des_u8, loaded.pts_world, loaded.scale_factor)
-    } else {
+    let expected_fp = inner
+        .terrain_map2
+        .as_ref()
+        .map(|r| terrain_raster_fingerprint(r.gray.view(), &r.meta));
+    let (des_u8, pts_world, scale_f) =
+        if let Some(loaded) = load_cached_index(&inner.cache_path, expected_fp) {
+            (loaded.des_u8, loaded.pts_world, loaded.scale_factor)
+        } else {
         let Some(raster) = inner
             .terrain_map2
             .as_ref()
@@ -932,20 +988,21 @@ mod tests {
     }
 
     #[test]
-    fn default_index_path_uses_v3_filename() {
+    fn default_index_path_uses_v4_filename() {
         let p = default_global_index_path();
         assert_eq!(
             p.file_name().and_then(|s| s.to_str()),
             Some(GLOBAL_INDEX_FILENAME)
         );
-        assert_eq!(INDEX_VERSION, 3);
+        assert_eq!(INDEX_VERSION, 4);
     }
 
     #[test]
-    fn build_save_and_reload_v3_npz_in_temp_dir() {
-        let tmp = TempDirGuard::new("gh_gr_v3");
+    fn build_save_and_reload_v4_npz_in_temp_dir() {
+        let tmp = TempDirGuard::new("gh_gr_v4");
         let cache_path = tmp.0.join(GLOBAL_INDEX_FILENAME);
         let raster = make_synthetic_terrain_512();
+        let expected_fp = terrain_raster_fingerprint(raster.gray.view(), &raster.meta);
         let (built_des, built_pts) =
             build_teyvat_global_index(raster.gray.view(), &raster.meta, Some(&cache_path)).unwrap();
         assert!(built_des.len() >= 20);
@@ -958,7 +1015,11 @@ mod tests {
         let NpyData::I32(ver) = &npz.get("index_version").unwrap().data else {
             panic!("expected I32 index_version");
         };
-        assert_eq!(ver[0], 3);
+        assert_eq!(ver[0], 4);
+        let NpyData::I64(fp) = &npz.get("terrain_fingerprint").unwrap().data else {
+            panic!("expected I64 terrain_fingerprint");
+        };
+        assert_eq!(fp, &[expected_fp]);
         let NpyData::F32(sf) = &npz.get("scale_factor").unwrap().data else {
             panic!("expected F32 scale_factor");
         };
@@ -996,27 +1057,79 @@ mod tests {
     }
 
     #[test]
-    fn rejects_python_v2_cache_and_rebuilds_v3() {
-        let tmp = TempDirGuard::new("gh_gr_v2_reject");
-        let cache_path = tmp.0.join("legacy_v2.npz");
-
-        let mut v2 = NpzArchive::new();
-        v2.insert("des_u8", NpyArray::from_u8(vec![4, 128], vec![10; 4 * 128]).unwrap());
-        v2.insert("pts_world", NpyArray::from_f32(vec![4, 2], vec![0.0; 8]).unwrap());
-        v2.insert("scale_factor", NpyArray::scalar_f32(400.0));
-        v2.insert("index_version", NpyArray::scalar_i32(2));
-        v2.write_file_atomic(&cache_path).unwrap();
-
+    fn rejects_legacy_v2_and_v3_caches_and_rebuilds_v4() {
+        let tmp = TempDirGuard::new("gh_gr_legacy_reject");
         let raster = make_synthetic_terrain_512();
-        let reloc = TeyvatGlobalRelocator::new(Some(raster), Some(cache_path.clone()), false);
-        assert!(reloc.is_ready());
-        assert!(reloc.num_descriptors() >= 20);
+        let expected_fp = terrain_raster_fingerprint(raster.gray.view(), &raster.meta);
+
+        for legacy_ver in [2i32, 3i32] {
+            let cache_path = tmp.0.join(format!("legacy_v{legacy_ver}.npz"));
+            let mut legacy = NpzArchive::new();
+            legacy.insert(
+                "des_u8",
+                NpyArray::from_u8(vec![4, 128], vec![10; 4 * 128]).unwrap(),
+            );
+            legacy.insert(
+                "pts_world",
+                NpyArray::from_f32(vec![4, 2], vec![0.0; 8]).unwrap(),
+            );
+            legacy.insert("scale_factor", NpyArray::scalar_f32(400.0));
+            legacy.insert("index_version", NpyArray::scalar_i32(legacy_ver));
+            legacy.write_file_atomic(&cache_path).unwrap();
+
+            let reloc = TeyvatGlobalRelocator::new(
+                Some(Arc::clone(&raster)),
+                Some(cache_path.clone()),
+                false,
+            );
+            assert!(reloc.is_ready(), "failed rebuild for legacy v{legacy_ver}");
+            assert!(reloc.num_descriptors() >= 20);
+
+            let rebuilt = NpzArchive::read_file(&cache_path).unwrap();
+            let NpyData::I32(ver) = &rebuilt.get("index_version").unwrap().data else {
+                panic!("expected I32 index_version");
+            };
+            assert_eq!(ver[0], 4);
+            let NpyData::I64(fp) = &rebuilt.get("terrain_fingerprint").unwrap().data else {
+                panic!("expected I64 terrain_fingerprint");
+            };
+            assert_eq!(fp, &[expected_fp]);
+        }
+    }
+
+    #[test]
+    fn rebuilds_cache_when_terrain_fingerprint_changes() {
+        let tmp = TempDirGuard::new("gh_gr_fp_rebuild");
+        let cache_path = tmp.0.join(GLOBAL_INDEX_FILENAME);
+        let raster_a = make_synthetic_terrain_512();
+        let fp_a = terrain_raster_fingerprint(raster_a.gray.view(), &raster_a.meta);
+
+        let reloc_a =
+            TeyvatGlobalRelocator::new(Some(Arc::clone(&raster_a)), Some(cache_path.clone()), false);
+        assert!(reloc_a.is_ready());
+
+        let mut gray_b = raster_a.gray.clone();
+        for y in 240..272 {
+            for x in 240..272 {
+                gray_b[[y, x]] ^= 0x55;
+            }
+        }
+        let raster_b = Arc::new(TerrainRaster {
+            gray: gray_b,
+            meta: raster_a.meta,
+        });
+        let fp_b = terrain_raster_fingerprint(raster_b.gray.view(), &raster_b.meta);
+        assert_ne!(fp_a, fp_b);
+
+        let reloc_b =
+            TeyvatGlobalRelocator::new(Some(Arc::clone(&raster_b)), Some(cache_path.clone()), false);
+        assert!(reloc_b.is_ready());
 
         let rebuilt = NpzArchive::read_file(&cache_path).unwrap();
-        let NpyData::I32(ver) = &rebuilt.get("index_version").unwrap().data else {
-            panic!("expected I32 index_version");
+        let NpyData::I64(fp) = &rebuilt.get("terrain_fingerprint").unwrap().data else {
+            panic!("expected I64 terrain_fingerprint");
         };
-        assert_eq!(ver[0], 3);
+        assert_eq!(fp, &[fp_b]);
     }
 
     #[test]
@@ -1090,5 +1203,136 @@ mod tests {
         let empty_cands = reloc.query_candidates_gray(blank.view(), Some(&mut bins), 4, 3.5);
         assert!(empty_cands.is_empty());
         assert_eq!(bins.len(), 3);
+    }
+
+    #[test]
+    fn global_index_avoids_tile_feature_starvation_in_moderate_contrast_region() {
+        // Single 384x384 tile with >1,000 high-response features in the top-left quadrant
+        // and moderate-contrast features in the bottom-right quadrant (like calm Teyvat terrain).
+        // Under a 900-feature tile cap, high-contrast corners evict the moderate-contrast region;
+        // removing the per-tile cap must locate both regions reliably.
+        let mut gray = Array2::<u8>::from_elem((384, 384), 120u8);
+        let mut state = 0xfeed_face_cafe_beefu64;
+        let mut next_u64 = || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+
+        // Top-left high-contrast corner (x in 16..208, y in 16..208): dense crisp features
+        for y in 16..208 {
+            for x in 16..208 {
+                let xf = x as f64;
+                let yf = y as f64;
+                let fine = if ((x / 5) + (y / 5)) % 2 == 0 { 95.0 } else { -95.0 };
+                let wave = 40.0 * (xf * 0.41).sin() * (yf * 0.37).cos();
+                gray[[y, x]] = (128.0 + fine + wave).clamp(5.0, 250.0) as u8;
+            }
+        }
+        for _ in 0..260 {
+            let cx = (next_u64() % 176 + 24) as isize;
+            let cy = (next_u64() % 176 + 24) as isize;
+            let rad = (next_u64() % 4 + 2) as isize;
+            let col = if next_u64() % 2 == 0 { 245u8 } else { 10u8 };
+            for dy in -rad..=rad {
+                for dx in -rad..=rad {
+                    if dx * dx + dy * dy <= rad * rad {
+                        gray[[(cy + dy) as usize, (cx + dx) as usize]] = col;
+                    }
+                }
+            }
+        }
+
+        // Bottom-right moderate-contrast quadrant (x in 236..364, y in 236..364): std ~ 20
+        for y in 236..364 {
+            for x in 236..364 {
+                let xf = (x - 236) as f64;
+                let yf = (y - 236) as f64;
+                let base = 124.0
+                    + 18.0 * (xf * 0.13).sin() * (yf * 0.11).cos()
+                    + 14.0 * (xf * 0.23 - yf * 0.19).cos()
+                    + 10.0 * ((xf - 64.0).hypot(yf - 64.0) * 0.29).sin();
+                gray[[y, x]] = base.clamp(70.0, 180.0) as u8;
+            }
+        }
+        for _ in 0..65 {
+            let cx = (next_u64() % 104 + 248) as isize;
+            let cy = (next_u64() % 104 + 248) as isize;
+            let rad = (next_u64() % 5 + 3) as isize;
+            let col = (92 + (next_u64() % 64)) as u8;
+            for dy in -rad..=rad {
+                for dx in -rad..=rad {
+                    if dx * dx + dy * dy <= rad * rad {
+                        gray[[(cy + dy) as usize, (cx + dx) as usize]] = col;
+                    }
+                }
+            }
+        }
+
+        let raster = Arc::new(TerrainRaster {
+            gray,
+            meta: [7.0, 6.0, -2.0, 2000.0, 2000.0],
+        });
+        let tmp = TempDirGuard::new("gh_gr_starvation");
+        let cache_path = tmp.0.join(GLOBAL_INDEX_FILENAME);
+        let reloc = TeyvatGlobalRelocator::new(Some(Arc::clone(&raster)), Some(cache_path), false);
+        assert!(reloc.is_ready());
+
+        let mut terrain_map = BTreeMap::new();
+        terrain_map.insert(2, raster);
+        let tc = LruTerrainTileCache::from_config(TileCacheConfig {
+            max_tiles: 16,
+            tile_size: 256,
+            npz_path: None,
+            use_default_npz: false,
+            disk_cache_dir: Some(tmp.0.join("tiles")),
+            terrain_data: terrain_map,
+            tile_provider: None,
+            async_fetch: false,
+        })
+        .unwrap();
+
+        // Control: high-contrast quadrant centered at pixel (110, 110) -> world (5610, 4586)
+        let (wx_hi, wy_hi) = (5610.0, 4586.0);
+        let (patch_hi_opt, _) = tc.extract_local_patch(2, wx_hi, wy_hi, 180.0, 0.25);
+        let patch_hi = patch_hi_opt.expect("high-contrast patch");
+        let cands_hi =
+            reloc.query_candidates_gray(patch_hi.view(), None, 4, DEFAULT_MIN_BIN_SCORE);
+        assert!(
+            !cands_hi.is_empty(),
+            "control high-contrast region must relocate"
+        );
+        let best_dist_hi = cands_hi
+            .iter()
+            .map(|c| (c.world_x - wx_hi).hypot(c.world_y - wy_hi))
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            best_dist_hi <= 250.0,
+            "control high-contrast best_dist={best_dist_hi}"
+        );
+
+        // Bug reproducer: moderate-contrast quadrant centered at pixel (300, 300) -> world (6370, 5346)
+        let (wx_lo, wy_lo) = (6370.0, 5346.0);
+        let (patch_lo_opt, _) = tc.extract_local_patch(2, wx_lo, wy_lo, 180.0, 0.25);
+        let patch_lo = patch_lo_opt.expect("moderate-contrast patch");
+        let mut bins_lo = VoteBins::new();
+        let cands_lo =
+            reloc.query_candidates_gray(patch_lo.view(), Some(&mut bins_lo), 4, DEFAULT_MIN_BIN_SCORE);
+        let votes_lo: usize = bins_lo.values().map(Vec::len).sum();
+        assert!(
+            !cands_lo.is_empty(),
+            "moderate-contrast region starved of global index votes (votes={votes_lo}, total_des={})",
+            reloc.num_descriptors()
+        );
+        let best_dist_lo = cands_lo
+            .iter()
+            .map(|c| (c.world_x - wx_lo).hypot(c.world_y - wy_lo))
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            best_dist_lo <= 250.0,
+            "moderate-contrast best_dist={best_dist_lo} (votes={votes_lo})"
+        );
     }
 }
