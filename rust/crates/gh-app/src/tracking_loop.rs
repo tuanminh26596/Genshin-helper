@@ -2472,7 +2472,7 @@ mod tests {
         use crate::capture_backend::FrameCapturer;
         use gh_cv::minimap_tracker::{HybridMinimapTracker, MinimapTrackerConfig};
         use gh_cv::tile_cache::{LruTerrainTileCache, TileCacheConfig};
-        use gh_win32::wgc_hdr::WgcWindowCaptureOutcome;
+        use gh_platform::wgc_hdr::WgcWindowCaptureOutcome;
         use std::sync::Mutex;
         use std::sync::atomic::AtomicUsize;
 
@@ -2660,7 +2660,7 @@ mod tests {
         use crate::capture_backend::FrameCapturer;
         use gh_cv::minimap_tracker::{HybridMinimapTracker, MinimapTrackerConfig};
         use gh_cv::tile_cache::{LruTerrainTileCache, TileCacheConfig};
-        use gh_win32::wgc_hdr::WgcWindowCaptureOutcome;
+        use gh_platform::wgc_hdr::WgcWindowCaptureOutcome;
         use std::sync::Mutex;
 
         struct UltrawideMockCapturer {
@@ -3023,7 +3023,7 @@ mod tests {
     #[test]
     fn step_map_frame_reuses_single_capture_for_settling_when_recording_and_skips_when_inactive() {
         use crate::capture_backend::FrameCapturer;
-        use gh_win32::wgc_hdr::WgcWindowCaptureOutcome;
+        use gh_platform::wgc_hdr::WgcWindowCaptureOutcome;
         use std::sync::atomic::AtomicUsize;
 
         struct FullCountingCapturer {

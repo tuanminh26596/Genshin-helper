@@ -20,7 +20,7 @@ use gh_cv::locator::MapLocator;
 use gh_hud::diag_annotate::render_annotated_frame;
 use gh_hud::fonts::HudFonts;
 use gh_net::sync_server::decode_png_base64;
-use gh_platform::capture::{ScreenCapturer, WindowFinder};
+use gh_platform::capture::WindowFinder;
 use gh_platform::game_settings::is_process_elevated;
 use gh_platform::locale::Win32LocaleProvider;
 use gh_core::traits::LocaleProvider;
@@ -1783,7 +1783,7 @@ mod tests {
         log_buf.push_line(concat!("INFO gh_app: loaded ", "C:\\", "Users\\", "Player\\cache"));
         let mgr = DiagnosticManager::new(
             paths.clone(),
-            Arc::new(gh_win32::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
+            Arc::new(gh_platform::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
             None,
             Arc::new(RwLock::new(AppConfig::default())),
             Arc::new(Map::new),
@@ -1901,7 +1901,7 @@ mod tests {
         // Missing frames without log_buffer must omit unwritten PNG names from `files`
         let bare_mgr = DiagnosticManager::new(
             paths,
-            Arc::new(gh_win32::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
+            Arc::new(gh_platform::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
             None,
             Arc::new(RwLock::new(AppConfig::default())),
             Arc::new(Map::new),
@@ -1934,7 +1934,7 @@ mod tests {
 
         let mgr = DiagnosticManager::new(
             paths,
-            Arc::new(gh_win32::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
+            Arc::new(gh_platform::capture::ScreenCapturer::new(2)) as Arc<dyn FrameCapturer>,
             None,
             Arc::new(RwLock::new(AppConfig::default())),
             Arc::new(Map::new),

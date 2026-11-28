@@ -26,7 +26,7 @@ use gh_cv::heading360::{
     shortest_angle_delta,
 };
 use gh_cv::locator::{LocateResult, LocatorPaths, MapLocator};
-use gh_win32::win_ocr::WindowsOcrService;
+use gh_platform::win_ocr::WindowsOcrService;
 use image::ImageReader;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};

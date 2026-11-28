@@ -738,6 +738,32 @@ impl LayeredWindowHost {
             .visible
     }
 
+    /// Waits until `pred()` returns `true` or `timeout` elapses, polling the shared state via
+    /// `ready_cv`. Mirrors the Windows `LayeredWindowHost::wait_until_state` API so tests are
+    /// cross-platform.
+    pub fn wait_until_state<F>(&self, timeout: std::time::Duration, mut pred: F) -> bool
+    where
+        F: FnMut() -> bool,
+    {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if pred() {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let guard = self.shared.state.lock().expect("layered host lock poisoned");
+            let wait_for = remaining.min(std::time::Duration::from_millis(15));
+            let _ = self
+                .shared
+                .ready_cv
+                .wait_timeout(guard, wait_for)
+                .expect("layered ready_cv poisoned");
+        }
+    }
+
     pub fn is_edit_mode(&self) -> bool {
         self.shared
             .state

@@ -22,6 +22,10 @@ impl LinuxOcrProvider {
     pub fn try_new() -> CoreResult<Self> {
         Ok(Self)
     }
+
+    pub fn recognizer_language_tag(&self) -> &str {
+        "none"
+    }
 }
 
 impl OcrProvider for LinuxOcrProvider {

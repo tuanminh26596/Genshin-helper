@@ -4903,6 +4903,7 @@ impl NavMiniHud {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     fn hide_ack_seq(&self) -> u64 {
         self.shared
             .lock()
@@ -7333,6 +7334,7 @@ mod tests {
         assert_ne!(second, third, "the hint follows the shown suggestion");
     }
 
+    #[cfg(windows)]
     #[test]
     fn nav_mini_hud_offscreen_advances_animated_gif_frames_without_dib_realloc() {
         let hud = NavMiniHud::new(NavHudConfig {

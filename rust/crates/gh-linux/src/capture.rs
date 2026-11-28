@@ -65,12 +65,35 @@ pub const GAME_IGNORED_TITLE_SUBSTRINGS: [&str; 4] = [
     "code",
 ];
 
-pub const BROWSER_KEYWORDS: [&str; 4] = [
+pub const BROWSER_KEYWORDS: [&str; 10] = [
     "hoyolab",
     "interactive map",
+    "interactive world map",
     "bản đồ tương tác",
     "genshin helper",
+    "appsample",
+    "yuanshen",
+    "原神地图",
+    "mapgenie",
+    "gamedot",
 ];
+
+/// Title keywords specific to an individual interactive map provider (mirrors `gh-win32::capture`).
+pub fn provider_browser_keywords(provider: &str) -> &'static [&'static str] {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "hoyolab" | "miyoushe" => &[
+            "hoyolab",
+            "bản đồ tương tác",
+            "teyvat interactive map",
+            "interactive map",
+        ],
+        "appsample" => &["appsample", "genshin impact interactive world map"],
+        "kongying" => &["yuanshen", "原神地图", "空荧"],
+        "mapgenie" => &["mapgenie"],
+        "gamedot" => &["gamedot"],
+        _ => &[],
+    }
+}
 
 // ---------------------------------------------------------------------------
 // X11 connection singleton
@@ -339,8 +362,17 @@ impl WindowFinder {
         })
     }
 
-    /// Find browser window containing HoYoLAB map keywords.
-    pub fn find_browser_window_any_state(_specific_only: bool) -> Option<isize> {
+    /// Find browser window containing interactive map keywords.
+    pub fn find_browser_window_any_state(specific_only: bool) -> Option<isize> {
+        Self::find_browser_window_for_provider(None, specific_only)
+    }
+
+    /// Find browser window matching `preferred_provider` first, then any map keyword, then (when
+    /// `!specific_only`) any generic browser window.
+    pub fn find_browser_window_for_provider(
+        preferred_provider: Option<&str>,
+        specific_only: bool,
+    ) -> Option<isize> {
         let wins = if let Some(hypr_wins) = hypr_enumerate_clients() {
             hypr_wins
         } else {
@@ -349,17 +381,49 @@ impl WindowFinder {
             enumerate_windows(&conn, root).ok()?
         };
 
+        let is_browser_or_map_title = |win: &WindowInfo, title_lc: &str| -> bool {
+            let class_lc = win.class.to_ascii_lowercase();
+            let is_browser_class = BROWSER_PROCESS_NAMES.iter().any(|p| class_lc.contains(p));
+            let blocked_non_game = BROWSER_TITLE_EXCLUDE
+                .iter()
+                .filter(|&&bad| bad != "genshin impact")
+                .any(|bad| title_lc.contains(bad));
+            !blocked_non_game
+                && (is_browser_class || !BROWSER_TITLE_EXCLUDE.iter().any(|e| title_lc.contains(e)))
+        };
+
+        if let Some(prov) = preferred_provider.map(str::trim).filter(|s| !s.is_empty()) {
+            let p_kws = provider_browser_keywords(prov);
+            if !p_kws.is_empty() {
+                for win in &wins {
+                    let title_lc = win.title.to_lowercase();
+                    if p_kws.iter().any(|k| title_lc.contains(k))
+                        && is_browser_or_map_title(win, &title_lc)
+                    {
+                        return Some(win.hwnd);
+                    }
+                }
+            }
+        }
+
         for win in &wins {
-            let title_lc = win.title.to_ascii_lowercase();
-            if BROWSER_KEYWORDS.iter().any(|k| title_lc.contains(k)) {
+            let title_lc = win.title.to_lowercase();
+            if BROWSER_KEYWORDS.iter().any(|k| title_lc.contains(k))
+                && is_browser_or_map_title(win, &title_lc)
+            {
                 return Some(win.hwnd);
             }
         }
+
+        if specific_only {
+            return None;
+        }
+
         // Fallback: any window whose class looks like a browser
         for win in &wins {
             let class_lc = win.class.to_ascii_lowercase();
             if BROWSER_PROCESS_NAMES.iter().any(|p| class_lc.contains(p)) {
-                let title_lc = win.title.to_ascii_lowercase();
+                let title_lc = win.title.to_lowercase();
                 if !BROWSER_TITLE_EXCLUDE.iter().any(|e| title_lc.contains(e)) {
                     return Some(win.hwnd);
                 }
@@ -764,7 +828,7 @@ impl ScreenCapturer {
         y: i32,
         w: i32,
         h: i32,
-    ) -> crate::wgc_hdr::WgcWindowCaptureOutcome<FrameBuf> {
+    ) -> crate::wgc_hdr::WgcWindowCaptureOutcome {
         match self.capture_region(x, y, w, h) {
             Some(frame) => crate::wgc_hdr::WgcWindowCaptureOutcome::Frame(frame),
             None => crate::wgc_hdr::WgcWindowCaptureOutcome::Failed,

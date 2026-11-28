@@ -44,7 +44,7 @@ use gh_net::pin_guide::{
 };
 use gh_net::sync_server::{HOTKEY_ACTIONS, SyncServer};
 use gh_platform::audio::AudioFeedback;
-use gh_platform::capture::{ScreenCapturer, WindowFinder};
+use gh_platform::capture::WindowFinder;
 use gh_platform::game_settings::UipiStatus;
 use gh_platform::hotkey::UnifiedHotkeyManager;
 use gh_platform::hotkey_conflicts::HotkeyConflictAdvisor;
@@ -3004,7 +3004,7 @@ fn make_test_state_full(
 
     let config = Arc::new(RwLock::new(cfg.clone()));
     let capturer: Arc<dyn FrameCapturer> = custom_capturer
-        .unwrap_or_else(|| Arc::new(gh_win32::capture::ScreenCapturer::new(2)));
+        .unwrap_or_else(|| Arc::new(gh_platform::capture::ScreenCapturer::new(2)));
     let maps_db = custom_maps_db.unwrap_or_else(|| Arc::new(MultimapDb::default()));
     let hd_provider = Arc::new(
         HoyolabHdTileProvider::new(
@@ -4337,8 +4337,8 @@ mod tests {
             _: i32,
             _: i32,
             _: i32,
-        ) -> gh_win32::wgc_hdr::WgcWindowCaptureOutcome {
-            gh_win32::wgc_hdr::WgcWindowCaptureOutcome::Failed
+        ) -> gh_platform::wgc_hdr::WgcWindowCaptureOutcome {
+            gh_platform::wgc_hdr::WgcWindowCaptureOutcome::Failed
         }
         fn window_capture_status(&self) -> String {
             "test".to_owned()

@@ -14,6 +14,7 @@ pub const ID_QUIT: u32 = 1005;
 pub const ID_LAUNCH_BORDERLESS: u32 = 1006;
 pub const ID_SUPPORT: u32 = 1007;
 pub const ID_CHECK_UPDATE: u32 = 1008;
+pub const ID_STOP_SESSION_REC: u32 = 1009;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrayState {
@@ -56,6 +57,7 @@ pub struct TrayIcon {
 struct TrayShared {
     state: Mutex<TrayState>,
     engine_active: Mutex<bool>,
+    session_rec_active: Mutex<bool>,
     action_cb: Mutex<Option<MenuAction>>,
 }
 
@@ -84,13 +86,14 @@ impl Tray for GenshinTray {
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let engine_active = *self.shared.engine_active.lock().unwrap();
+        let session_rec_active = *self.shared.session_rec_active.lock().unwrap();
         let toggle_label = if engine_active {
             "⏸ Pause Tracking"
         } else {
             "▶ Resume Tracking"
         };
 
-        vec![
+        let mut items = vec![
             MenuItem::Standard(ksni::menu::StandardItem {
                 label: toggle_label.into(),
                 activate: Box::new(|this: &mut Self| {
@@ -101,6 +104,20 @@ impl Tray for GenshinTray {
                 ..Default::default()
             }),
             MenuItem::Separator,
+        ];
+        if session_rec_active {
+            items.push(MenuItem::Standard(ksni::menu::StandardItem {
+                label: "⏹ Stop Session Recording".into(),
+                activate: Box::new(|this: &mut Self| {
+                    if let Some(cb) = &*this.shared.action_cb.lock().unwrap() {
+                        cb(ID_STOP_SESSION_REC);
+                    }
+                }),
+                ..Default::default()
+            }));
+            items.push(MenuItem::Separator);
+        }
+        items.extend([
             MenuItem::Standard(ksni::menu::StandardItem {
                 label: "🗺 Open HoYoLAB Map".into(),
                 activate: Box::new(|this: &mut Self| {
@@ -138,7 +155,8 @@ impl Tray for GenshinTray {
                 }),
                 ..Default::default()
             }),
-        ]
+        ]);
+        items
     }
 }
 
@@ -147,6 +165,7 @@ impl TrayIcon {
         let shared = Arc::new(TrayShared {
             state: Mutex::new(TrayState::Idle),
             engine_active: Mutex::new(false),
+            session_rec_active: Mutex::new(false),
             action_cb: Mutex::new(Some(action_cb)),
         });
 
@@ -176,6 +195,13 @@ impl TrayIcon {
         }
     }
 
+    pub fn set_session_recording(&self, active: bool) {
+        *self.shared.session_rec_active.lock().unwrap() = active;
+        if let Some(h) = &self.handle {
+            h.update(|_| {});
+        }
+    }
+
     pub fn close(&self) {
         // ksni handles cleanup automatically on drop
     }
@@ -193,6 +219,7 @@ pub struct TrayCallbacks {
     pub on_launch_borderless: Option<TrayCallback>,
     pub on_open_support: Option<TrayCallback>,
     pub on_check_update: Option<TrayCallback>,
+    pub on_stop_session_rec: Option<TrayCallback>,
 }
 
 pub struct SystemTrayApp {
@@ -248,6 +275,11 @@ impl SystemTrayApp {
                     f();
                 }
             }
+            ID_STOP_SESSION_REC => {
+                if let Some(ref f) = cbs.on_stop_session_rec {
+                    f();
+                }
+            }
             ID_QUIT => {
                 if let Some(ref f) = cbs.on_quit {
                     f();
@@ -285,6 +317,11 @@ impl SystemTrayApp {
     pub fn set_uipi_warning(&self, _mismatch: bool) {}
     pub fn set_available_update(&self, _version: Option<&str>) {}
     pub fn set_update_status(&self, _version: Option<&str>, _ready_to_restart: bool) {}
+    pub fn set_session_recording(&self, active: bool) {
+        if let Some(ref icon) = *self.inner.lock().unwrap() {
+            icon.set_session_recording(active);
+        }
+    }
     pub fn set_language(&self, _lang: Option<&str>) {}
 
     pub fn close(&self) {

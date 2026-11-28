@@ -297,3 +297,34 @@ pub fn local_time_parts() -> (i32, u32, u32, u32, u32, u32, u32) {
         ms,
     )
 }
+
+/// Returns `(total_mb, available_mb)` from `/proc/meminfo` (mirrors `gh_win32::sys_info`).
+pub fn query_system_memory_mb() -> Option<(u64, u64)> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let mut total_kb: Option<u64> = None;
+    let mut avail_kb: Option<u64> = None;
+    for line in meminfo.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            total_kb = rest.split_whitespace().next()?.parse::<u64>().ok();
+        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            avail_kb = rest.split_whitespace().next()?.parse::<u64>().ok();
+        }
+        if total_kb.is_some() && avail_kb.is_some() {
+            break;
+        }
+    }
+    Some((total_kb? / 1024, avail_kb? / 1024))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_system_memory_mb_reports_valid_bounds() {
+        let (total, avail) = query_system_memory_mb().expect("/proc/meminfo");
+        assert!(total > 0, "total_mb must be positive: {total}");
+        assert!(avail <= total, "avail_mb ({avail}) <= total_mb ({total})");
+    }
+}
+
