@@ -23,6 +23,9 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURES_DIR = join(ROOT, 'tests', 'fixtures', 'providers');
 const VECTORS_PATH = join(ROOT, 'tests', 'fixtures', 'multimap', 'transform_vectors.json');
+const I18N_PATH = process.env.GH_I18N_PATH
+  ? resolve(process.env.GH_I18N_PATH)
+  : join(ROOT, 'extension', 'i18n.js');
 const COORD_TRANSFORM_PATH = process.env.GH_COORD_TRANSFORM_PATH
   ? resolve(process.env.GH_COORD_TRANSFORM_PATH)
   : join(ROOT, 'extension', 'coord_transform.js');
@@ -140,6 +143,43 @@ function buildMockBridgeAndMapScript() {
     window.__ghRequests = [];
     window.__ghSetViewCalls = [];
     window.__ghPanToCalls = [];
+    window.__ghFitBoundsCalls = [];
+    window.__ghDownloads = [];
+    window.__ghMockRouteState = { ok: true, active: false };
+    window.__ghMockRouteExportDoc = null;
+
+    (function installBlobDownloadCapture() {
+      const OrigBlob = window.Blob;
+      const blobTexts = new WeakMap();
+      const urlTexts = new Map();
+      window.Blob = function (parts, opts) {
+        const b = new OrigBlob(parts, opts);
+        try {
+          blobTexts.set(b, (parts || []).map((p) => String(p)).join(''));
+        } catch (e) {}
+        return b;
+      };
+      window.Blob.prototype = OrigBlob.prototype;
+      const origCreateUrl = URL.createObjectURL.bind(URL);
+      URL.createObjectURL = (blob) => {
+        const u = origCreateUrl(blob);
+        if (blob && blobTexts.has(blob)) urlTexts.set(u, blobTexts.get(blob));
+        return u;
+      };
+      const origClick = HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click = function () {
+        if (this.hasAttribute('download')) {
+          const href = this.getAttribute('href') || '';
+          window.__ghDownloads.push({
+            filename: this.getAttribute('download') || '',
+            href,
+            content: urlTexts.has(href) ? urlTexts.get(href) : null
+          });
+          return;
+        }
+        return origClick.apply(this, arguments);
+      };
+    })();
 
     window.addEventListener('message', (e) => {
       if (e.source !== window || !e.data || e.data.__gh_ext !== true || e.data.dir !== 'to-bg') return;
@@ -153,6 +193,24 @@ function buildMockBridgeAndMapScript() {
         data = { ok: true, is_owner: true };
       } else if (rec.path === '/calibrate_provider') {
         data = { ok: true, transform: null };
+      } else if (rec.path === '/route') {
+        const act = rec.body && rec.body.action ? String(rec.body.action) : '';
+        if (rec.method === 'GET' || act === 'status') {
+          data = window.__ghMockRouteState || { ok: true, active: false };
+        } else if (act === 'export') {
+          data = window.__ghMockRouteExportDoc
+            ? { ok: true, filename: window.__ghMockRouteExportDoc.filename || 'route.ghroute.json', doc: window.__ghMockRouteExportDoc.doc }
+            : { ok: false, error: 'No active route' };
+        } else if (act === 'clear') {
+          window.__ghMockRouteState = { ok: true, active: false };
+          data = window.__ghMockRouteState;
+        } else if (act === 'reset' && window.__ghMockRouteState && window.__ghMockRouteState.active) {
+          window.__ghMockRouteState = { ...window.__ghMockRouteState, active_section: 0, section_done: 0 };
+          data = window.__ghMockRouteState;
+        } else if (act === 'section' && window.__ghMockRouteState && window.__ghMockRouteState.active) {
+          window.__ghMockRouteState = { ...window.__ghMockRouteState, active_section: Number(rec.body.section_index || 0) };
+          data = window.__ghMockRouteState;
+        }
       }
       window.postMessage({
         __gh_ext: true,
@@ -207,6 +265,16 @@ function buildMockBridgeAndMapScript() {
           window.__ghPanToCalls.push({ lat, lng, opts });
           return map;
         },
+        fitBounds: (bounds, opts) => {
+          window.__ghFitBoundsCalls.push({ bounds, opts });
+          if (Array.isArray(bounds) && bounds.length === 2) {
+            center = {
+              lat: (Number(bounds[0][0]) + Number(bounds[1][0])) * 0.5,
+              lng: (Number(bounds[0][1]) + Number(bounds[1][1])) * 0.5
+            };
+          }
+          return map;
+        },
         latLngToLayerPoint: (ll) => {
           const lat = Array.isArray(ll) ? Number(ll[0]) : Number(ll.lat);
           const lng = Array.isArray(ll) ? Number(ll[1]) : Number(ll.lng);
@@ -230,6 +298,11 @@ function buildMockBridgeAndMapScript() {
             if (listeners[ev]) listeners[ev] = listeners[ev].filter((f) => f !== fn);
           }
           return map;
+        },
+        emit: (evStr) => {
+          for (const ev of String(evStr).split(/\s+/)) {
+            for (const fn of (listeners[ev] || []).slice()) fn();
+          }
         }
       };
       return map;
@@ -254,6 +327,7 @@ function buildAppSampleHtml(fixture) {
 <body>
   <div class="leaflet-container" style="position:relative;width:800px;height:600px;"></div>
   <script>
+    localStorage.removeItem('gh_lang_cache');
     ${buildMockBridgeAndMapScript()}
     (function setupAppSampleFixture() {
       const fx = ${JSON.stringify(fixture)};
@@ -292,23 +366,45 @@ function buildAppSampleHtml(fixture) {
         }
       };
 
-      const state = {
+      const MAP_SLUG_TO_ID = {
+        teyvat: 2,
+        enkanomiya: 7,
+        chasm: 9,
+        'sea-of-bygone-eras': 34,
+        ancient_sacred_mountain: 36,
+        temple_of_space: 37,
+        frost_moon: 40
+      };
+
+      let state = {
         mapKey: fx.storeState.mapKey,
         types: [...fx.storeState.types],
         sid: fx.storeState.sid,
         user: fx.storeState.user,
         found: new Set(fx.storeState.found || []),
         overlay: { ...(fx.storeState.overlay || { mode: 'none' }) },
+        selectedId: null,
+        popupOpen: false,
         markersComplete: fx.storeState.markersComplete,
         markers: fx.markers
       };
       const subs = new Set();
+      const notifySubs = () => { for (const fn of subs) fn(state); };
       const store = {
         getState: () => state,
+        setState: (patch) => {
+          const next = typeof patch === 'function' ? patch(state) : patch;
+          state = { ...state, ...next };
+          notifySubs();
+        },
         subscribe: (fn) => { subs.add(fn); return () => subs.delete(fn); },
         __setTypes: (nextTypes) => {
-          state.types = [...nextTypes];
-          for (const fn of subs) fn(state);
+          state = { ...state, types: [...nextTypes] };
+          notifySubs();
+        },
+        __setMapKey: (nextKey) => {
+          state = { ...state, mapKey: String(nextKey) };
+          notifySubs();
         }
       };
       const indexMap = new Map(fx.markers.map((m) => [String(m.id), m]));
@@ -331,14 +427,92 @@ function buildAppSampleHtml(fixture) {
           features: { comments: true }
         }
       };
+
+      const overlays = [];
+      const seenOv = new Set();
+      for (const m of fx.markers) {
+        if (m.layer && m.layer.floorId && m.layer.groupId) {
+          const k = m.layer.groupId + ':' + m.layer.floorId;
+          if (!seenOv.has(k)) {
+            seenOv.add(k);
+            overlays.push({
+              id: Number(m.layer.floorId),
+              groupId: Number(m.layer.groupId),
+              name: 'B' + m.layer.floorId,
+              url: 'https://game-cdn.appsample.com/gim/overlays/' + m.layer.floorId + '.png',
+              bounds: {
+                west: Number(m.position.x) - 0.02,
+                south: Number(m.position.y) - 0.02,
+                east: Number(m.position.x) + 0.02,
+                north: Number(m.position.y) + 0.02
+              }
+            });
+          }
+        }
+      }
+
       const overlayCalls = [];
       const adapter = {
         map,
-        showOverlays: (flag) => {
-          overlayCalls.push(Boolean(flag));
-          state.overlay = { mode: flag ? 'underground' : 'none' };
+        overlays: new Map(overlays.map((o) => [o.id, o])),
+        activeOverlayIds: [],
+        showOverlays: (ids) => {
+          if (!Array.isArray(ids)) {
+            throw new TypeError('AppSample adapter.showOverlays expects array of overlay IDs');
+          }
+          adapter.activeOverlayIds = ids.map(Number);
+          overlayCalls.push([...adapter.activeOverlayIds]);
         }
       };
+
+      const renderInfoWindow = (markerId) => {
+        let infoWin = document.querySelector('[data-testid="info-window"]');
+        if (!markerId) {
+          if (infoWin) infoWin.remove();
+          return;
+        }
+        if (!infoWin) {
+          infoWin = document.createElement('div');
+          infoWin.setAttribute('data-testid', 'info-window');
+          const titleP = document.createElement('p');
+          titleP.className = 'font-semibold';
+          const footer = document.createElement('footer');
+          infoWin.append(titleP, footer);
+          document.body.appendChild(infoWin);
+        }
+        const m = indexMap.get(String(markerId));
+        infoWin.setAttribute('data-marker-id', String(markerId));
+        const titleP = infoWin.querySelector('p.font-semibold');
+        if (titleP) titleP.textContent = (m && (m.title || (fx.messages && fx.messages.markers && fx.messages.markers[m.type]))) || String(markerId);
+      };
+
+      const mapSync = {
+        adapter,
+        deps: {
+          currentMap: () => ({ id: MAP_SLUG_TO_ID[state.mapKey] || 2, overlays }),
+          onMarkerClick: (id) => {
+            const m = indexMap.get(String(id));
+            if (!m) return;
+            const nextOv = (m.layer && m.layer.floorId && m.layer.groupId)
+              ? { mode: 'group', groupId: Number(m.layer.groupId), floorId: Number(m.layer.floorId) }
+              : { mode: 'none' };
+            state = { ...state, selectedId: String(id), popupOpen: true, overlay: nextOv };
+            mapSync.applyOverlay();
+            renderInfoWindow(String(id));
+            notifySubs();
+          }
+        },
+        applyOverlay: () => {
+          const ov = state.overlay || { mode: 'none' };
+          if (ov.mode === 'none') adapter.showOverlays([]);
+          else if (ov.mode === 'group' && ov.floorId) adapter.showOverlays([Number(ov.floorId)]);
+          else if (ov.mode === 'all') adapter.showOverlays(overlays.map((o) => o.id));
+        },
+        applyPopup: () => {
+          renderInfoWindow(state.popupOpen ? state.selectedId : null);
+        }
+      };
+
       const progress = {
         toggleFound: async (id) => {
           if (state.found.has(id)) state.found.delete(id);
@@ -350,7 +524,7 @@ function buildAppSampleHtml(fixture) {
         catalog,
         progress,
         data: { mapKey: fx.storeState.mapKey, messages: fx.messages },
-        mapSync: { adapter }
+        mapSync
       };
       container['__reactFiber$fixture'] = {
         memoizedProps: {},
@@ -359,9 +533,10 @@ function buildAppSampleHtml(fixture) {
           return: null
         }
       };
-      window.__ghFixtureHandles = { map, store, catalog, overlayCalls };
+      window.__ghFixtureHandles = { map, store, catalog, adapter, mapSync, overlayCalls, renderInfoWindow };
     })();
   </script>
+  <script src="/__gh/i18n.js"></script>
   <script src="/__gh/coord_transform.js"></script>
   <script src="/__gh/provider_runtime.js"></script>
 </body>
@@ -377,12 +552,52 @@ function buildKongyingHtml(fixture) {
     <div class="leaflet-container" style="position:relative;width:800px;height:600px;"></div>
   </div>
   <script>
+    localStorage.removeItem('gh_lang_cache');
     ${buildMockBridgeAndMapScript()}
     (function setupKongyingFixture() {
       localStorage.removeItem('marked_layers');
       const fx = ${JSON.stringify(fixture)};
       const container = document.querySelector('.leaflet-container');
       const map = createMockLeafletMap(container, fx.map);
+
+      const mainStore = {
+        selected_area: fx.mainStore.selected_area,
+        selected_child_area: { ...fx.mainStore.selected_child_area },
+        area_list: fx.mainStore.area_list,
+        selected_item_list: fx.mainStore.selected_item_list
+      };
+      let refreshCount = 0;
+      const vm = {
+        map_tiles: { _map: map },
+        BXGroup: null,
+        teleport_group: null,
+        mainStore,
+        underground_show: Boolean(fx.vm.underground_show),
+        underground_opacity: Boolean(fx.vm.underground_opacity),
+        popup_window_show: false,
+        handle_layer: { target: null },
+        refresh_layergroup: () => { refreshCount += 1; },
+        underground_opacity_switch: () => { vm.underground_opacity = !vm.underground_opacity; },
+        popup_callback: (ev) => {
+          const target = (ev && ev.target) || ev;
+          if (!target || !target.options || !target.options.data) return;
+          vm.handle_layer = { target };
+          vm.popup_window_show = true;
+          let pop = document.getElementById('popup_window');
+          if (!pop) {
+            pop = document.createElement('div');
+            pop.id = 'popup_window';
+            const content = document.createElement('div');
+            content.className = 'content';
+            const toggleBtn = document.createElement('div');
+            toggleBtn.className = 'toggle_btn';
+            pop.append(content, toggleBtn);
+            document.body.appendChild(pop);
+          }
+          pop.style.display = 'block';
+          pop.setAttribute('data-marker-id', String(target.options.data.id));
+        }
+      };
 
       const tpLayers = [];
       const bxLayers = [];
@@ -392,7 +607,12 @@ function buildKongyingHtml(fixture) {
             data: m.data,
             icon: { options: { ...(m.icon_options || {}) } }
           },
-          getLatLng: () => ({ lat: m.latlng.lat, lng: m.latlng.lng })
+          getLatLng: () => ({ lat: m.latlng.lat, lng: m.latlng.lng }),
+          fire: (evName, payload) => {
+            if (evName === 'click') {
+              vm.popup_callback(payload || { target: layerObj, latlng: layerObj.getLatLng() });
+            }
+          }
         };
         if (m.icon_options && m.icon_options.teleport) tpLayers.push(layerObj);
         else bxLayers.push(layerObj);
@@ -404,28 +624,13 @@ function buildKongyingHtml(fixture) {
       });
       const teleportGroup = makeGroup(tpLayers);
       const bxGroup = makeGroup(bxLayers);
+      vm.BXGroup = bxGroup;
+      vm.teleport_group = teleportGroup;
       map._layers = {
         1: teleportGroup,
         2: bxGroup
       };
 
-      const mainStore = {
-        selected_area: fx.mainStore.selected_area,
-        selected_child_area: { ...fx.mainStore.selected_child_area },
-        area_list: fx.mainStore.area_list,
-        selected_item_list: fx.mainStore.selected_item_list
-      };
-      let refreshCount = 0;
-      const vm = {
-        map_tiles: { _map: map },
-        BXGroup: bxGroup,
-        teleport_group: teleportGroup,
-        mainStore,
-        underground_show: Boolean(fx.vm.underground_show),
-        underground_opacity: Boolean(fx.vm.underground_opacity),
-        refresh_layergroup: () => { refreshCount += 1; },
-        underground_opacity_switch: () => { vm.underground_opacity = !vm.underground_opacity; }
-      };
       const qapp = document.querySelector('#q-app');
       qapp.__vue_app__ = {
         config: {
@@ -440,9 +645,20 @@ function buildKongyingHtml(fixture) {
           }
         }
       };
-      window.__ghFixtureHandles = { map, vm, mainStore, getRefreshCount: () => refreshCount };
+      window.__ghFixtureHandles = {
+        map,
+        vm,
+        mainStore,
+        getRefreshCount: () => refreshCount,
+        setUndergroundShow: (flag) => { vm.underground_show = Boolean(flag); },
+        setAreaCode: (code) => {
+          const match = (mainStore.area_list || []).find((a) => a && a.code === code);
+          if (match) mainStore.selected_child_area = { ...match };
+        }
+      };
     })();
   </script>
+  <script src="/__gh/i18n.js"></script>
   <script src="/__gh/coord_transform.js"></script>
   <script src="/__gh/provider_runtime.js"></script>
 </body>
@@ -472,12 +688,13 @@ async function main() {
     return 2;
   }
 
-  for (const p of [COORD_TRANSFORM_PATH, PROVIDER_RUNTIME_PATH, VECTORS_PATH]) {
+  for (const p of [I18N_PATH, COORD_TRANSFORM_PATH, PROVIDER_RUNTIME_PATH, VECTORS_PATH]) {
     if (!existsSync(p)) throw new Error(`Required file not found: ${p}`);
   }
   const appsampleFixture = JSON.parse(readFileSync(join(FIXTURES_DIR, 'appsample_state.json'), 'utf8'));
   const kongyingFixture = JSON.parse(readFileSync(join(FIXTURES_DIR, 'kongying_state.json'), 'utf8'));
   const vectorsDoc = JSON.parse(readFileSync(VECTORS_PATH, 'utf8'));
+  const i18nSrc = readFileSync(I18N_PATH, 'utf8');
   const coordTransformSrc = readFileSync(COORD_TRANSFORM_PATH, 'utf8');
   const providerRuntimeSrc = readFileSync(PROVIDER_RUNTIME_PATH, 'utf8');
 
@@ -485,6 +702,7 @@ async function main() {
     [APPSAMPLE_URL, { contentType: 'text/html; charset=utf-8', body: buildAppSampleHtml(appsampleFixture) }],
     [KONGYING_URL, { contentType: 'text/html; charset=utf-8', body: buildKongyingHtml(kongyingFixture) }],
     [HOYOLAB_URL, { contentType: 'text/html; charset=utf-8', body: buildHoyolabHtml() }],
+    ['/__gh/i18n.js', { contentType: 'application/javascript; charset=utf-8', body: i18nSrc }],
     ['/__gh/coord_transform.js', { contentType: 'application/javascript; charset=utf-8', body: coordTransformSrc }],
     ['/__gh/provider_runtime.js', { contentType: 'application/javascript; charset=utf-8', body: providerRuntimeSrc }]
   ]);
@@ -920,6 +1138,351 @@ async function main() {
     })()`);
     record('appsample_routing_isolation_and_guest_mark_error', asMarkRes.ok, `ignoredAll=${asMarkRes.ignoredAll} detail="${asMarkRes.feedbackDetail}" toastVisible=${asMarkRes.toastVisible}`);
 
+    // (h1) AppSample LAN_FOCUS_PIN: isolation, transformed camera focus, underground overlay & popup
+    const asFocusRes = await page.eval(`(async () => {
+      const h = window.__ghFixtureHandles;
+      const CT = window.GHCoordTransform;
+      const tf = CT.getTransform('appsample', 2);
+      const canon = CT.leafletToCanonical(tf, -0.24196, 0.61993);
+      const baseViews = window.__ghSetViewCalls.length;
+
+      // Ignored: foreign provider, un-namespaced id, wrong target_provider, wrong owner_tab_id
+      window.__ghSendServerEvent({ type: 'LAN_FOCUS_PIN', pin_id: 'kongying:1288', map_id: 2, lat: canon.lat, lng: canon.lng });
+      window.__ghSendServerEvent({ type: 'LAN_FOCUS_PIN', pin_id: '18596', map_id: 2, lat: canon.lat, lng: canon.lng });
+      window.__ghSendServerEvent({ type: 'LAN_FOCUS_PIN', pin_id: 'appsample:18596', map_id: 2, lat: canon.lat, lng: canon.lng, target_provider: 'kongying' });
+      window.__ghSendServerEvent({ type: 'LAN_FOCUS_PIN', pin_id: 'appsample:18596', map_id: 2, lat: canon.lat, lng: canon.lng, owner_tab_id: 'wrong_tab' });
+      await new Promise((r) => setTimeout(r, 120));
+      const ignoredOk = window.__ghSetViewCalls.length === baseViews && !document.querySelector('[data-testid="info-window"]');
+
+      // Valid LAN_FOCUS_PIN for underground pin appsample:18596 (floorId=5, groupId=82)
+      window.__ghSendServerEvent({
+        type: 'LAN_FOCUS_PIN',
+        pin_id: 'appsample:18596',
+        map_id: 2,
+        lat: canon.lat,
+        lng: canon.lng,
+        floor_id: '5',
+        target_provider: 'appsample',
+        owner_tab_id: window.__GH_BRIDGE__.tabId
+      });
+      await new Promise((r) => setTimeout(r, 150));
+
+      const lastView = window.__ghSetViewCalls[window.__ghSetViewCalls.length - 1];
+      const expLl = CT.canonicalToLeaflet(tf, canon.lat, canon.lng);
+      const viewOk = Boolean(lastView && Math.abs(lastView.lat - expLl[0]) < 1e-5 && Math.abs(lastView.lng - expLl[1]) < 1e-5);
+      const st = h.store.getState();
+      const overlayOk = Boolean(st.overlay && st.overlay.mode === 'group' && st.overlay.groupId === 82 && st.overlay.floorId === 5 && h.adapter.activeOverlayIds.includes(5));
+      const infoWin = document.querySelector('[data-testid="info-window"]');
+      const popupOk = Boolean(infoWin && infoWin.getAttribute('data-marker-id') === '18596');
+      const recenterVisible = Boolean(document.getElementById('gh-recenter-btn')?.classList.contains('is-visible'));
+
+      // Reset state for subsequent tests
+      h.renderInfoWindow(null);
+      h.store.setState({ overlay: { mode: 'none' }, popupOpen: false, selectedId: null });
+      h.mapSync.applyOverlay();
+      window.__GH_BRIDGE__.recenter();
+
+      return { ok: ignoredOk && viewOk && overlayOk && popupOk && recenterVisible, ignoredOk, viewOk, overlayOk, popupOk, recenterVisible, overlay: st.overlay };
+    })()`);
+    record('appsample_lan_focus_pin', asFocusRes.ok, JSON.stringify(asFocusRes));
+
+    // (h2) AppSample LAN_SET_FLOOR: group/floor selection, surface reset, and provider routing guard
+    const asFloorRes = await page.eval(`(async () => {
+      const h = window.__ghFixtureHandles;
+      window.__ghSendServerEvent({
+        type: 'LAN_SET_FLOOR',
+        floor_id: '10',
+        target_provider: 'appsample',
+        owner_tab_id: window.__GH_BRIDGE__.tabId
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      const ugSt = h.store.getState().overlay;
+      const ugIds = [...h.adapter.activeOverlayIds];
+      const ugOk = Boolean(ugSt && ugSt.mode === 'group' && ugSt.groupId === 84 && ugSt.floorId === 10 && ugIds.length === 1 && ugIds[0] === 10);
+
+      // Surface reset
+      window.__ghSendServerEvent({
+        type: 'LAN_SET_FLOOR',
+        floor_id: '0',
+        target_provider: 'appsample',
+        owner_tab_id: window.__GH_BRIDGE__.tabId
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      const surfSt = h.store.getState().overlay;
+      const surfOk = Boolean(surfSt && surfSt.mode === 'none' && h.adapter.activeOverlayIds.length === 0);
+
+      // Mismatched provider ignored
+      window.__ghSendServerEvent({
+        type: 'LAN_SET_FLOOR',
+        floor_id: '5',
+        target_provider: 'kongying'
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      const ignoredOk = h.store.getState().overlay.mode === 'none';
+
+      return { ok: ugOk && surfOk && ignoredOk, ugOk, surfOk, ignoredOk, ugSt, surfSt };
+    })()`);
+    record('appsample_lan_set_floor', asFloorRes.ok, JSON.stringify(asFloorRes));
+
+    // (h3) AppSample ROUTE_UPDATED: route bar + transformed SVG polyline & stops + map-switch clear/redraw
+    const asRouteRes = await page.eval(`(async () => {
+      const h = window.__ghFixtureHandles;
+      const CT = window.GHCoordTransform;
+      const tf = CT.getTransform('appsample', 2);
+      const stop0 = { id: 'appsample:301', kind: 'collectible', lat: -2000, lng: 1500, collected: false };
+      const stop1 = { id: 'appsample:16514', kind: 'collectible', lat: 5500, lng: 1500, collected: false };
+      const exp0 = CT.canonicalToLeaflet(tf, stop0.lat, stop0.lng);
+      const exp1 = CT.canonicalToLeaflet(tf, stop1.lat, stop1.lng);
+      const baseLng1 = tf.base.ax * stop1.lng + tf.base.bx;
+
+      window.__ghSendServerEvent({
+        type: 'ROUTE_UPDATED',
+        active: true,
+        title: 'Inazuma Route',
+        provider: 'hoyolab',
+        map_id: 2,
+        active_section: 0,
+        section_count: 2,
+        section_done: 0,
+        section_total: 2,
+        section_color: '#7EE8FF',
+        active_edges: [[0, 1]],
+        active_stops: [stop0, stop1]
+      });
+      await new Promise((r) => setTimeout(r, 60));
+
+      const bar = document.getElementById('gh-route-bar');
+      const svg = document.getElementById('gh-tsp-route-svg');
+      const leg = svg ? svg.querySelector('.gh-route-leg') : null;
+      const stops = svg ? svg.querySelectorAll('.gh-tsp-stop') : [];
+      const fromParts = leg ? leg.getAttribute('data-leaflet-from').split(',').map(Number) : [];
+      const toParts = leg ? leg.getAttribute('data-leaflet-to').split(',').map(Number) : [];
+      const drawnCoordsOk = Boolean(
+        bar && bar.textContent.includes('Inazuma Route') && bar.textContent.includes('S1/2') &&
+        svg && leg && stops.length === 2 &&
+        Math.abs(fromParts[0] - exp0[0]) < 1e-4 && Math.abs(fromParts[1] - exp0[1]) < 1e-4 &&
+        Math.abs(toParts[0] - exp1[0]) < 1e-4 && Math.abs(toParts[1] - exp1[1]) < 1e-4 &&
+        Math.abs(toParts[1] - baseLng1) > 0.15
+      );
+
+      // Switch to Enkanomiya (map 7) -> route SVG clears automatically
+      h.store.__setMapKey('enkanomiya');
+      await new Promise((r) => setTimeout(r, 50));
+      const clearedOnSwitch = !document.getElementById('gh-tsp-route-svg');
+
+      // Switch back to Teyvat (map 2) -> route SVG redraws
+      h.store.__setMapKey('teyvat');
+      await new Promise((r) => setTimeout(r, 50));
+      const redrawnOnReturn = Boolean(document.getElementById('gh-tsp-route-svg')?.querySelector('.gh-route-leg'));
+
+      // Route deactivation clears bar & SVG
+      window.__ghSendServerEvent({ type: 'ROUTE_UPDATED', active: false });
+      await new Promise((r) => setTimeout(r, 50));
+      const clearedOnInactive = !document.getElementById('gh-route-bar') && !document.getElementById('gh-tsp-route-svg') && !document.body.classList.contains('gh-has-route-bar');
+
+      return { ok: drawnCoordsOk && clearedOnSwitch && redrawnOnReturn && clearedOnInactive, drawnCoordsOk, clearedOnSwitch, redrawnOnReturn, clearedOnInactive };
+    })()`);
+    record('appsample_route_updated_and_map_switch', asRouteRes.ok, JSON.stringify(asRouteRes));
+
+    // (h4) AppSample GH_CMD_ROUTE_IMPORT / GH_CMD_ROUTE_EXPORT / GH_CMD_ROUTE_CLEAR
+    const asRouteCmdRes = await page.eval(`(async () => {
+      window.__ghMockRouteState = {
+        ok: true,
+        active: true,
+        title: 'Popup Imported',
+        map_id: 2,
+        active_section: 0,
+        section_count: 1,
+        section_done: 0,
+        section_total: 2,
+        section_color: '#52C4A0',
+        active_edges: [[0, 1]],
+        active_stops: [
+          { id: 'appsample:301', kind: 'collectible', lat: -2000, lng: 1500, collected: false },
+          { id: 'appsample:302', kind: 'collectible', lat: -1950, lng: 1550, collected: false }
+        ]
+      };
+      const expectedDoc = { schema: 1, title: 'Popup Imported', map_id: 2, sections: [{ name: 'Sec 1', stops: ['301', '302'] }] };
+      window.__ghMockRouteExportDoc = { filename: 'popup_imported.ghroute.json', doc: expectedDoc };
+      const dlStart = window.__ghDownloads.length;
+      const fitStart = window.__ghFitBoundsCalls.length;
+
+      window.__ghSendServerEvent({ type: 'GH_CMD_ROUTE_IMPORT', fit: true });
+      await new Promise((r) => setTimeout(r, 100));
+      const importOk = Boolean(
+        document.getElementById('gh-route-bar')?.textContent.includes('Popup Imported') &&
+        document.getElementById('gh-tsp-route-svg')?.querySelector('.gh-route-leg') &&
+        window.__ghFitBoundsCalls.length > fitStart
+      );
+
+      window.__ghSendServerEvent({ type: 'GH_CMD_ROUTE_EXPORT' });
+      await new Promise((r) => setTimeout(r, 100));
+      const dl = window.__ghDownloads[window.__ghDownloads.length - 1] || null;
+      const exportOk = Boolean(
+        window.__ghDownloads.length > dlStart &&
+        dl && dl.filename === 'popup_imported.ghroute.json' &&
+        JSON.parse(dl.content || '{}').title === 'Popup Imported'
+      );
+
+      window.__ghSendServerEvent({ type: 'GH_CMD_ROUTE_CLEAR' });
+      await new Promise((r) => setTimeout(r, 60));
+      const clearOk = !document.getElementById('gh-route-bar') && !document.getElementById('gh-tsp-route-svg');
+      window.__ghMockRouteState = { ok: true, active: false };
+
+      return { ok: importOk && exportOk && clearOk, importOk, exportOk, clearOk };
+    })()`);
+    record('appsample_route_commands_import_export_clear', asRouteCmdRes.ok, JSON.stringify(asRouteCmdRes));
+
+    // (h5) AppSample DIAGNOSTIC_CAPTURED modal: renders, tag appends, Save & Zip, Save Note
+    const asDiagRes = await page.eval(`(async () => {
+      const saveReqsBefore = window.__ghRequests.filter((r) => r.path === '/save_diagnostic_note').length;
+      const openReqsBefore = window.__ghRequests.filter((r) => r.path === '/open_diagnostics').length;
+
+      window.__ghSendServerEvent({
+        type: 'DIAGNOSTIC_CAPTURED',
+        folder_name: 'diag_as_001',
+        zip_name: 'diag_as_001.zip',
+        has_world_coords: true,
+        summary: { app_version: '5.7.0', os_label: 'Windows 11' }
+      });
+      await new Promise((r) => setTimeout(r, 80));
+
+      const modal = document.getElementById('gh-diag-note-modal');
+      const modalOk = Boolean(modal && modal.getAttribute('data-folder') === 'diag_as_001' && document.getElementById('gh-note-title')?.textContent.includes('Diagnostic Capture Saved'));
+      const firstTag = document.querySelector('#gh-note-tags button');
+      if (firstTag) firstTag.click();
+      const input = document.getElementById('gh-diag-note-input');
+      if (input) input.value += 'extra test note';
+      const tagOk = Boolean(input && input.value.includes('[Wrong Position]') && input.value.includes('extra test note'));
+
+      document.getElementById('gh-note-save')?.click();
+      await new Promise((r) => setTimeout(r, 80));
+      const zipSaveReq = window.__ghRequests.slice(saveReqsBefore).find((r) => r.path === '/save_diagnostic_note');
+      const zipOpenReq = window.__ghRequests.slice(openReqsBefore).find((r) => r.path === '/open_diagnostics');
+      const zipFlowOk = Boolean(
+        zipSaveReq?.body?.create_zip === true &&
+        zipSaveReq?.body?.folder_name === 'diag_as_001' &&
+        zipOpenReq?.body?.ensure_zip === true
+      );
+
+      document.getElementById('gh-note-save-only')?.click();
+      await new Promise((r) => setTimeout(r, 80));
+      const saveReqsAfter = window.__ghRequests.filter((r) => r.path === '/save_diagnostic_note');
+      const noteOnlyReq = saveReqsAfter[saveReqsAfter.length - 1];
+      const saveOnlyOk = Boolean(
+        noteOnlyReq?.body?.create_zip === false &&
+        String(noteOnlyReq?.body?.note || '').includes('[Wrong Position]') &&
+        !document.getElementById('gh-diag-note-modal')
+      );
+
+      return { ok: modalOk && tagOk && zipFlowOk && saveOnlyOk, modalOk, tagOk, zipFlowOk, saveOnlyOk };
+    })()`);
+    record('appsample_diagnostic_captured_modal', asDiagRes.ok, JSON.stringify(asDiagRes));
+
+    // (h6) AppSample LANGUAGE_UPDATED: live VI <-> EN re-render across all overlays
+    const asLangRes = await page.eval(`(async () => {
+      const h = window.__ghFixtureHandles;
+      const CT = window.GHCoordTransform;
+      const tf = CT.getTransform('appsample', 2);
+      const canon = CT.leafletToCanonical(tf, 0.24676, 0.43245);
+
+      // Show recenter btn (via unpinning LAN_FOCUS_PIN on surface pin 301), target lock pill, popup navigate btn, route bar, and diagnostic modal + toast
+      window.__ghSendServerEvent({
+        type: 'TARGET_LOCK_UPDATED',
+        locked_target: { id: 'appsample:302', name: 'Anemoculus 302', map_id: 2, lat: canon.lat, lng: canon.lng }
+      });
+      window.__ghSendServerEvent({
+        type: 'LAN_FOCUS_PIN',
+        pin_id: 'appsample:301',
+        map_id: 2,
+        lat: canon.lat,
+        lng: canon.lng,
+        target_provider: 'appsample',
+        owner_tab_id: window.__GH_BRIDGE__.tabId
+      });
+      window.__ghSendServerEvent({
+        type: 'ROUTE_UPDATED',
+        active: true,
+        title: 'Lang Route',
+        map_id: 2,
+        active_section: 0,
+        section_count: 1,
+        section_done: 0,
+        section_total: 1,
+        active_edges: [],
+        active_stops: [{ id: 'appsample:301', kind: 'collectible', lat: canon.lat, lng: canon.lng, collected: false }]
+      });
+      window.__ghSendServerEvent({
+        type: 'DIAGNOSTIC_CAPTURED',
+        folder_name: 'diag_lang_as',
+        zip_name: 'diag_lang_as.zip',
+        has_world_coords: true
+      });
+      await new Promise((r) => setTimeout(r, 150));
+
+      // Switch EN -> VI
+      window.__ghSendServerEvent({ type: 'LANGUAGE_UPDATED', language: 'vi' });
+      await new Promise((r) => setTimeout(r, 60));
+      const viSnap = {
+        lang: window.__GH_BRIDGE__.getLanguage(),
+        recenter: document.getElementById('gh-recenter-btn')?.textContent || '',
+        lockCancel: document.querySelector('#gh-target-lock-pill button')?.textContent || '',
+        navBtn: document.getElementById('gh-popup-navigate-btn')?.textContent || '',
+        routeBar: document.getElementById('gh-route-bar')?.textContent || '',
+        modalTitle: document.getElementById('gh-note-title')?.textContent || '',
+        modalSaveOnly: document.getElementById('gh-note-save-only')?.textContent || '',
+        modalTag: document.querySelector('#gh-note-tags button')?.textContent || '',
+        toast: document.getElementById('gh-mini-toast')?.textContent || ''
+      };
+      const viOk = (
+        viSnap.lang === 'vi' &&
+        viSnap.recenter.includes('Bám lại vị trí') &&
+        viSnap.lockCancel === 'Hủy' &&
+        viSnap.navBtn.includes('Dẫn đường') &&
+        viSnap.routeBar.includes('Xem tuyến') &&
+        viSnap.modalTitle.includes('Chụp Chẩn Đoán Thành Công') &&
+        viSnap.modalSaveOnly === 'Lưu ghi chú' &&
+        viSnap.modalTag === '[Sai vị trí]' &&
+        viSnap.toast.includes('Đã chụp chẩn đoán')
+      );
+
+      // Switch VI -> EN
+      window.__ghSendServerEvent({ type: 'LANGUAGE_UPDATED', language: 'en' });
+      await new Promise((r) => setTimeout(r, 60));
+      const enSnap = {
+        lang: window.__GH_BRIDGE__.getLanguage(),
+        recenter: document.getElementById('gh-recenter-btn')?.textContent || '',
+        lockCancel: document.querySelector('#gh-target-lock-pill button')?.textContent || '',
+        navBtn: document.getElementById('gh-popup-navigate-btn')?.textContent || '',
+        routeBar: document.getElementById('gh-route-bar')?.textContent || '',
+        modalTitle: document.getElementById('gh-note-title')?.textContent || '',
+        modalSaveOnly: document.getElementById('gh-note-save-only')?.textContent || '',
+        modalTag: document.querySelector('#gh-note-tags button')?.textContent || '',
+        toast: document.getElementById('gh-mini-toast')?.textContent || ''
+      };
+      const enOk = (
+        enSnap.lang === 'en' &&
+        enSnap.recenter.includes('Re-center') &&
+        enSnap.lockCancel === 'Cancel' &&
+        enSnap.navBtn.includes('Navigate') &&
+        enSnap.routeBar.includes('View Route') &&
+        enSnap.modalTitle.includes('Diagnostic Capture Saved') &&
+        enSnap.modalSaveOnly === 'Save Note' &&
+        enSnap.modalTag === '[Wrong Position]' &&
+        enSnap.toast.includes('Diagnostic captured')
+      );
+
+      // Cleanup
+      document.getElementById('gh-note-skip')?.click();
+      window.__ghSendServerEvent({ type: 'ROUTE_UPDATED', active: false });
+      window.__ghSendServerEvent({ type: 'TARGET_LOCK_UPDATED', locked_target: null });
+      h.renderInfoWindow(null);
+      window.__GH_BRIDGE__.recenter();
+
+      return { ok: viOk && enOk, viOk, enOk, viSnap, enSnap };
+    })()`);
+    record('appsample_language_updated', asLangRes.ok, JSON.stringify({ viOk: asLangRes.viOk, enOk: asLangRes.enOk }));
+
     // =========================================================================
     // 2. Kongying v3 Offline Fixture Suite (b, c, e, f, g)
     // =========================================================================
@@ -1072,6 +1635,165 @@ async function main() {
       };
     })()`);
     record('kongying_target_lock_isolation_and_mark_unmark', kyMarkAndLockRes.ok, `locked=${kyMarkAndLockRes.lockedOwn} cleared=${kyMarkAndLockRes.clearedForeign} ignored=${kyMarkAndLockRes.ignoredOk} mark=${kyMarkAndLockRes.markOk} unmark=${kyMarkAndLockRes.unmarkOk}`);
+
+    // (k1) Kongying LAN_FOCUS_PIN & LAN_SET_FLOOR
+    const kyFocusFloorRes = await page.eval(`(async () => {
+      const h = window.__ghFixtureHandles;
+      const CT = window.GHCoordTransform;
+      const tf = CT.getTransform('kongying', 2);
+      const canon = CT.leafletToCanonical(tf, 1319.8804911037, -3606.7583012494);
+      const baseViews = window.__ghSetViewCalls.length;
+
+      // Foreign/mismatched ignored
+      window.__ghSendServerEvent({ type: 'LAN_FOCUS_PIN', pin_id: 'appsample:301', map_id: 2, lat: canon.lat, lng: canon.lng });
+      window.__ghSendServerEvent({ type: 'LAN_FOCUS_PIN', pin_id: 'kongying:1288', map_id: 2, lat: canon.lat, lng: canon.lng, target_provider: 'appsample' });
+      await new Promise((r) => setTimeout(r, 80));
+      const ignoredOk = window.__ghSetViewCalls.length === baseViews && !h.vm.popup_window_show;
+
+      // Valid LAN_FOCUS_PIN for kongying:1288 -> swapped Leaflet setView + popup opened
+      window.__ghSendServerEvent({
+        type: 'LAN_FOCUS_PIN',
+        pin_id: 'kongying:1288',
+        map_id: 2,
+        lat: canon.lat,
+        lng: canon.lng,
+        target_provider: 'kongying',
+        owner_tab_id: window.__GH_BRIDGE__.tabId
+      });
+      await new Promise((r) => setTimeout(r, 120));
+      const lastView = window.__ghSetViewCalls[window.__ghSetViewCalls.length - 1];
+      const expLl = CT.canonicalToLeaflet(tf, canon.lat, canon.lng);
+      const viewOk = Boolean(lastView && Math.abs(lastView.lat - expLl[0]) < 1e-3 && Math.abs(lastView.lng - expLl[1]) < 1e-3);
+      const pop = document.getElementById('popup_window');
+      const popupOk = Boolean(h.vm.popup_window_show && pop && pop.getAttribute('data-marker-id') === '1288');
+
+      // LAN_SET_FLOOR: documented no-op when underground_show=false; binary toggle when underground_show=true
+      h.setUndergroundShow(false);
+      window.__ghSendServerEvent({ type: 'LAN_SET_FLOOR', floor_id: '10', target_provider: 'kongying', owner_tab_id: window.__GH_BRIDGE__.tabId });
+      await new Promise((r) => setTimeout(r, 40));
+      const noopWhenHidden = h.vm.underground_opacity === false;
+
+      h.setUndergroundShow(true);
+      window.__ghSendServerEvent({ type: 'LAN_SET_FLOOR', floor_id: '10', target_provider: 'kongying', owner_tab_id: window.__GH_BRIDGE__.tabId });
+      await new Promise((r) => setTimeout(r, 40));
+      const ugOn = h.vm.underground_opacity === true;
+
+      window.__ghSendServerEvent({ type: 'LAN_SET_FLOOR', floor_id: '0', target_provider: 'kongying', owner_tab_id: window.__GH_BRIDGE__.tabId });
+      await new Promise((r) => setTimeout(r, 40));
+      const surfBack = h.vm.underground_opacity === false;
+
+      return {
+        ok: ignoredOk && viewOk && popupOk && noopWhenHidden && ugOn && surfBack,
+        ignoredOk, viewOk, popupOk, noopWhenHidden, ugOn, surfBack
+      };
+    })()`);
+    record('kongying_lan_focus_pin_and_set_floor', kyFocusFloorRes.ok, JSON.stringify(kyFocusFloorRes));
+
+    // (k2) Kongying ROUTE_UPDATED (swapped axes + area switch), GH_CMD_ROUTE_*, LANGUAGE_UPDATED, DIAGNOSTIC_CAPTURED
+    const kyParityRes = await page.eval(`(async () => {
+      const h = window.__ghFixtureHandles;
+      const CT = window.GHCoordTransform;
+      const tf = CT.getTransform('kongying', 2);
+      const exp0 = CT.canonicalToLeaflet(tf, -500, 1000);
+      const exp1 = CT.canonicalToLeaflet(tf, -450, 1050);
+
+      // ROUTE_UPDATED on Kongying map 2
+      window.__ghSendServerEvent({
+        type: 'ROUTE_UPDATED',
+        active: true,
+        title: 'KY Route',
+        map_id: 2,
+        active_section: 0,
+        section_count: 2,
+        section_done: 0,
+        section_total: 2,
+        active_edges: [[0, 1]],
+        active_stops: [
+          { id: 'kongying:1288', kind: 'collectible', lat: -500, lng: 1000, collected: false },
+          { id: 'kongying:1193', kind: 'collectible', lat: -450, lng: 1050, collected: false }
+        ]
+      });
+      await new Promise((r) => setTimeout(r, 60));
+      const leg = document.querySelector('#gh-tsp-route-svg .gh-route-leg');
+      const fromParts = leg ? leg.getAttribute('data-leaflet-from').split(',').map(Number) : [];
+      const toParts = leg ? leg.getAttribute('data-leaflet-to').split(',').map(Number) : [];
+      const routeSwapOk = Boolean(
+        document.getElementById('gh-route-bar')?.textContent.includes('KY Route') &&
+        leg &&
+        Math.abs(fromParts[0] - exp0[0]) < 1e-3 && Math.abs(fromParts[1] - exp0[1]) < 1e-3 &&
+        Math.abs(toParts[0] - exp1[0]) < 1e-3 && Math.abs(toParts[1] - exp1[1]) < 1e-3
+      );
+
+      // Area switch to Chasm UG (map 9) clears SVG; switching back to Mondstadt (map 2) redraws
+      h.setAreaCode('A:LY:CENGYAN_UG');
+      window.__GH_BRIDGE__.syncRouteOverlay();
+      await new Promise((r) => setTimeout(r, 40));
+      const clearedOnAreaSwitch = !document.getElementById('gh-tsp-route-svg');
+      h.setAreaCode('A:MD:MENGDE');
+      window.__GH_BRIDGE__.syncRouteOverlay();
+      await new Promise((r) => setTimeout(r, 40));
+      const redrawnOnAreaReturn = Boolean(document.querySelector('#gh-tsp-route-svg .gh-route-leg'));
+
+      // LANGUAGE_UPDATED VI <-> EN while route bar, lock pill & recenter btn are visible
+      window.__ghSendServerEvent({ type: 'TARGET_LOCK_UPDATED', locked_target: { id: 'kongying:1288', name: 'Chest', map_id: 2, lat: -500, lng: 1000 } });
+      window.__ghSendServerEvent({ type: 'LANGUAGE_UPDATED', language: 'vi' });
+      await new Promise((r) => setTimeout(r, 50));
+      const langViOk = Boolean(
+        document.getElementById('gh-route-bar')?.textContent.includes('Xem tuyến') &&
+        document.getElementById('gh-recenter-btn')?.textContent.includes('Bám lại vị trí') &&
+        document.querySelector('#gh-target-lock-pill button')?.textContent === 'Hủy'
+      );
+      window.__ghSendServerEvent({ type: 'LANGUAGE_UPDATED', language: 'en' });
+      await new Promise((r) => setTimeout(r, 50));
+      const langEnOk = Boolean(
+        document.getElementById('gh-route-bar')?.textContent.includes('View Route') &&
+        document.getElementById('gh-recenter-btn')?.textContent.includes('Re-center') &&
+        document.querySelector('#gh-target-lock-pill button')?.textContent === 'Cancel'
+      );
+
+      // GH_CMD_ROUTE_EXPORT / GH_CMD_ROUTE_CLEAR / GH_CMD_ROUTE_IMPORT
+      window.__ghMockRouteExportDoc = { filename: 'ky_route.ghroute.json', doc: { schema: 1, title: 'KY Route' } };
+      const dlStart = window.__ghDownloads.length;
+      window.__ghSendServerEvent({ type: 'GH_CMD_ROUTE_EXPORT' });
+      await new Promise((r) => setTimeout(r, 80));
+      const exportOk = window.__ghDownloads.length > dlStart && window.__ghDownloads[window.__ghDownloads.length - 1].filename === 'ky_route.ghroute.json';
+
+      window.__ghSendServerEvent({ type: 'GH_CMD_ROUTE_CLEAR' });
+      await new Promise((r) => setTimeout(r, 50));
+      const clearOk = !document.getElementById('gh-route-bar') && !document.getElementById('gh-tsp-route-svg');
+
+      window.__ghMockRouteState = {
+        ok: true,
+        active: true,
+        title: 'KY Reimported',
+        map_id: 2,
+        active_section: 0,
+        section_count: 1,
+        section_done: 0,
+        section_total: 1,
+        active_edges: [],
+        active_stops: [{ id: 'kongying:1288', kind: 'collectible', lat: -500, lng: 1000, collected: false }]
+      };
+      window.__ghSendServerEvent({ type: 'GH_CMD_ROUTE_IMPORT', fit: true });
+      await new Promise((r) => setTimeout(r, 80));
+      const importOk = Boolean(document.getElementById('gh-route-bar')?.textContent.includes('KY Reimported'));
+      window.__ghSendServerEvent({ type: 'GH_CMD_ROUTE_CLEAR' });
+      window.__ghMockRouteState = { ok: true, active: false };
+
+      // DIAGNOSTIC_CAPTURED modal + Escape close
+      window.__ghSendServerEvent({ type: 'DIAGNOSTIC_CAPTURED', folder_name: 'diag_ky_001', has_world_coords: false, reason: 'Low landmarks' });
+      await new Promise((r) => setTimeout(r, 80));
+      const diagShown = Boolean(document.getElementById('gh-diag-note-modal')?.getAttribute('data-folder') === 'diag_ky_001');
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 40));
+      const diagEscClosed = !document.getElementById('gh-diag-note-modal');
+
+      return {
+        ok: routeSwapOk && clearedOnAreaSwitch && redrawnOnAreaReturn && langViOk && langEnOk && exportOk && clearOk && importOk && diagShown && diagEscClosed,
+        routeSwapOk, clearedOnAreaSwitch, redrawnOnAreaReturn, langViOk, langEnOk, exportOk, clearOk, importOk, diagShown, diagEscClosed
+      };
+    })()`);
+    record('kongying_language_route_commands_and_diagnostic', kyParityRes.ok, JSON.stringify(kyParityRes));
 
     // =========================================================================
     // 3. HoYoLAB Isolation Suite (d)
